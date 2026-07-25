@@ -458,7 +458,7 @@
                     </p>
                     <span class="count-pill"
                         ><i class="fa-solid fa-wrench" aria-hidden="true"></i
-                        ><b>33 tools</b> across 7 areas</span
+                        ><b>35 tools</b> across 7 areas</span
                     >
                 </div>
             </section>
@@ -656,6 +656,128 @@
                                         ></i>
                                         …or send a photo of the package — the AI
                                         reads the barcode digits off it.
+                                    </p>
+                                </div>
+                            </article>
+
+                            <article class="tool-card" id="start_meal_import">
+                                <div class="tool-head">
+                                    <code class="tool-name"
+                                        >start_meal_import</code
+                                    >
+                                    <span class="chip chip-log">Import</span>
+                                    <span class="chip chip-widget"
+                                        ><i
+                                            class="fa-solid fa-table-cells-large"
+                                            aria-hidden="true"
+                                        ></i>
+                                        Interactive UI</span
+                                    >
+                                </div>
+                                <p class="tool-desc">
+                                    Open an importer in the chat to bring your
+                                    history over from another app — pick the
+                                    file you exported from MyFitnessPal,
+                                    Cronometer, Lose It! or MacroFactor, match
+                                    its columns to calories and macros, and see
+                                    exactly which meals will be added before you
+                                    confirm. The file is read in your browser,
+                                    nothing is saved until you approve the
+                                    preview, and importing the same file again
+                                    won't create duplicates.
+                                </p>
+                                <div class="tool-ex">
+                                    <span class="tool-ex-label"
+                                        >Try saying</span
+                                    >
+                                    <p>
+                                        Import my meal history from MyFitnessPal
+                                    </p>
+                                </div>
+                            </article>
+
+                            <article class="tool-card" id="bulk_import_meals">
+                                <div class="tool-head">
+                                    <code class="tool-name"
+                                        >bulk_import_meals</code
+                                    >
+                                    <span class="chip chip-log">Import</span>
+                                </div>
+                                <p class="tool-desc">
+                                    Add a batch of past meals in one go — up to
+                                    50 at a time — instead of logging them one
+                                    by one. The importer above writes through
+                                    this, and the AI can use it directly for
+                                    meal data you've pasted into the chat. Every
+                                    row is checked first and anything that
+                                    doesn't fit is reported row by row, so
+                                    re-sending the same rows is safe and won't
+                                    duplicate what's already logged.
+                                </p>
+                                <div class="tool-params">
+                                    <span class="tool-params-label"
+                                        >Parameters</span
+                                    >
+                                    <ul>
+                                        <li>
+                                            <code>meals</code>
+                                            <span class="param-req"
+                                                >required</span
+                                            >
+                                            — The rows to import, in source-file
+                                            order (1–50 per call)
+                                        </li>
+                                        <li>
+                                            <code>expected_row_count</code>
+                                            <span class="param-req"
+                                                >required</span
+                                            >
+                                            — How many rows this call carries,
+                                            counted from the source file, so a
+                                            dropped row gets caught
+                                        </li>
+                                        <li>
+                                            <code>expected_total_kcal</code>
+                                            <span class="param-opt"
+                                                >optional</span
+                                            >
+                                            — Calorie total from the source
+                                            file, reconciled against what
+                                            arrives
+                                        </li>
+                                        <li>
+                                            <code>dry_run</code>
+                                            <span class="param-opt"
+                                                >optional</span
+                                            >
+                                            — Report what would happen without
+                                            writing anything
+                                        </li>
+                                        <li>
+                                            <code>on_error</code>
+                                            <span class="param-opt"
+                                                >optional</span
+                                            >
+                                            — Import the valid rows and report
+                                            the rest, or write nothing if any
+                                            row fails
+                                        </li>
+                                        <li>
+                                            <code>source_app</code>
+                                            <span class="param-opt"
+                                                >optional</span
+                                            >
+                                            — Which app the file came from
+                                        </li>
+                                    </ul>
+                                </div>
+                                <div class="tool-ex">
+                                    <span class="tool-ex-label"
+                                        >Try saying</span
+                                    >
+                                    <p>
+                                        Here's last week's meals pasted from my
+                                        old app — add them all
                                     </p>
                                 </div>
                             </article>
