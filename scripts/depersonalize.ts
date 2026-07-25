@@ -248,6 +248,22 @@ const JOBS: { path: string; rules: Rule[] }[] = [
     // rewritten here — these HTML-tuned patterns are unreliable against its TS
     // template literals. If you regenerate the pages, update the generator's
     // SITE constant, GA tag, GitHub/contact links by hand (see its header).
+    // llms.txt is markdown served at /llms.txt, so none of the HTML-tuned rules
+    // above reach it — it needs its own job or a fork publishes the maintainer's
+    // domain and repo to every crawler that reads it. Its GitHub reference is a
+    // markdown link in prose, so GITHUB_LINKS_RULE (which deletes a whole <a>
+    // line) is wrong here: swap the URL for a placeholder and keep the bullet.
+    {
+        path: "public/llms.txt",
+        rules: [
+            {
+                name: "llms.txt: GitHub repo URL -> placeholder",
+                find: /https:\/\/github\.com\/akutishevsky\/nutrition-mcp/g,
+                replace: "https://github.com/your-org/nutrition-mcp",
+            },
+            DOMAIN_RULE,
+        ],
+    },
     { path: "public/sitemap.xml", rules: [DOMAIN_RULE] },
     { path: "public/robots.txt", rules: [DOMAIN_RULE] },
     { path: "src/index.ts", rules: [GLAMA_RULE, ...CSP_RULES] },
