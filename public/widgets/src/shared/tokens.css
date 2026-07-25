@@ -17,6 +17,12 @@
     --fat: #f43f7e;
     --water: #0ea5e9;
     --over: #d0452b;
+    --warn: #b26a00;
+
+    /* Native controls (select, input, scrollbars) follow the theme only when
+       color-scheme is declared; without it a dark widget renders light OS
+       chrome that ignores every token. */
+    color-scheme: light;
 
     --radius: 18px;
 }
@@ -37,6 +43,8 @@
         --fat: #fb7199;
         --water: #38bdf8;
         --over: #ff6b52;
+        --warn: #e0a030;
+        color-scheme: dark;
     }
 }
 
@@ -56,6 +64,8 @@
     --fat: #f43f7e;
     --water: #0ea5e9;
     --over: #d0452b;
+    --warn: #b26a00;
+    color-scheme: light;
 }
 :root[data-theme="dark"] {
     --text: #f5f5f7;
@@ -72,4 +82,6 @@
     --fat: #fb7199;
     --water: #38bdf8;
     --over: #ff6b52;
+    --warn: #e0a030;
+    color-scheme: dark;
 }

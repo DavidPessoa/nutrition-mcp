@@ -29,6 +29,10 @@ export const WIDGET_TEMPLATES: Record<string, string> = {
     // Temporary capability probe for the bulk-import spike; its tool is
     // registered only when ENABLE_WIDGET_PROBE is set. Remove with the spike.
     "import-probe": "import-probe.html",
+    // Dev-only visual reference for the shared components. Listed here so it is
+    // assembled and covered by widgets.test.ts, but NO ui:// resource and no
+    // tool reference it, so no client can reach it. View via `bun run harness`.
+    "component-gallery": "component-gallery.html",
 };
 
 const cache = new Map<string, string>();

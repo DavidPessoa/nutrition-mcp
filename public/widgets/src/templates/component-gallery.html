@@ -1,0 +1,169 @@
+<!doctype html>
+<!--
+  Component gallery — DEV ONLY.
+
+  Every shared component on one page so the light/dark and narrow-width passes
+  that STYLE_GUIDE.md requires can actually be done. Deliberately registered as
+  a WIDGET_TEMPLATES entry but with NO ui:// resource and NO tool, so it is
+  assembled and covered by src/widgets.test.ts yet unreachable by any client.
+
+  View it with:  bun run harness   ->  http://localhost:8787/host?widget=component-gallery
+-->
+<html lang="en">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>Component Gallery</title>
+        <style>
+            /*@include shared/tokens.css@*/
+
+            /*@include shared/base.css@*/
+
+            /*@include shared/seg.css@*/
+
+            /*@include shared/form.css@*/
+
+            /*@include shared/table.css@*/
+
+            .gal {
+                padding: 16px;
+                display: grid;
+                /* minmax(0, 1fr), not the implicit auto column: an auto column is
+                   sized by its widest content, so the nowrap preview table would
+                   stretch every sibling card and scroll the page sideways. */
+                grid-template-columns: minmax(0, 1fr);
+                gap: 18px;
+            }
+            .gal section {
+                padding: 14px;
+            }
+            .gal h3 {
+                margin: 0 0 10px;
+                font-size: 11.5px;
+                font-weight: 700;
+                text-transform: uppercase;
+                letter-spacing: 0.06em;
+                color: var(--accent);
+            }
+        </style>
+    </head>
+    <body>
+        <div id="root"></div>
+        <script>
+            /*@include shared/bridge.js@*/
+
+            function render() {
+                document.getElementById("root").innerHTML = `
+          <div class="gal">
+            <section class="card">
+              <h3>Buttons</h3>
+              <div class="actions" style="margin-top:0">
+                <button class="btn btn-primary">Import 42 meals</button>
+                <button class="btn">Back</button>
+                <button class="btn btn-danger">Discard</button>
+                <button class="btn btn-sm">Small</button>
+                <button class="btn" disabled>Disabled</button>
+              </div>
+            </section>
+
+            <section class="card">
+              <h3>Fields</h3>
+              <div class="field">
+                <label class="label" for="g-sel">Map column: Calories</label>
+                <select class="select" id="g-sel">
+                  <option>calories</option>
+                  <option>protein_g</option>
+                  <option>(ignore this column)</option>
+                </select>
+              </div>
+              <div class="field">
+                <label class="label" for="g-in">Source app</label>
+                <input class="input" id="g-in" placeholder="myfitnesspal" />
+                <span class="hint">Used to label rows that have no food name.</span>
+              </div>
+              <div class="field">
+                <label class="label" for="g-bad">Expected row count</label>
+                <input class="input invalid" id="g-bad" value="-3" />
+                <span class="field-error">Must be a positive whole number.</span>
+              </div>
+            </section>
+
+            <section class="card">
+              <h3>File drop</h3>
+              <label class="drop">
+                <span class="big">📄</span>
+                <strong>Choose your export file</strong><br />or drag it here
+                <input type="file" class="drop-input" accept=".csv" />
+              </label>
+            </section>
+
+            <section class="card">
+              <h3>Notices</h3>
+              <div class="notice notice-ok"><span>✓</span><span>All 42 rows mapped cleanly.</span></div>
+              <div class="notice notice-warn"><span>!</span><span>12 rows had a date but no time; they will be logged at local noon.</span></div>
+              <div class="notice notice-error"><span>✕</span><span>expected_row_count is 40 but 42 rows were parsed.</span></div>
+              <div class="notice" style="margin-bottom:0"><span>i</span><span>Neutral note on the same surface.</span></div>
+            </section>
+
+            <section class="card">
+              <h3>Progress &amp; steps</h3>
+              <div class="steps">
+                <span class="step done"><span class="dot">1</span>File</span><span class="step-sep">→</span>
+                <span class="step active"><span class="dot">2</span>Map columns</span><span class="step-sep">→</span>
+                <span class="step"><span class="dot">3</span>Preview</span><span class="step-sep">→</span>
+                <span class="step"><span class="dot">4</span>Import</span>
+              </div>
+              <div class="bar"><span style="width:62%"></span></div>
+              <div class="hint" style="margin-top:6px">Chunk 5 of 8 — 250 of 400 rows</div>
+            </section>
+
+            <section class="card">
+              <h3>Segmented control (existing)</h3>
+              <div class="seg" style="margin-bottom:0">
+                <button class="seg-btn active">7d</button>
+                <button class="seg-btn">14d</button>
+                <button class="seg-btn">30d</button>
+              </div>
+            </section>
+
+            <section class="card">
+              <h3>Preview table</h3>
+              <div class="tscroll">
+                <table class="tbl">
+                  <thead><tr>
+                    <th>Line</th><th class="wide">Description</th><th>When</th>
+                    <th>Meal</th><th class="num">kcal</th><th>Status</th>
+                  </tr></thead>
+                  <tbody>
+                    <tr><td class="dim">2</td><td class="wide">Oatmeal (1 cup dry) with banana</td>
+                        <td>2026-01-15 08:30</td><td>breakfast</td><td class="num">300</td>
+                        <td><span class="pill pill-ok">create</span></td></tr>
+                    <tr><td class="dim">3</td><td class="wide">Rice, cooked</td>
+                        <td>2026-01-15 13:00</td><td>lunch</td><td class="num">400</td>
+                        <td><span class="pill pill-dim">duplicate</span></td></tr>
+                    <tr class="muted"><td class="dim">4</td><td class="wide">Breakfast (imported from MyFitnessPal)</td>
+                        <td>2026-01-16 12:00</td><td>breakfast</td><td class="num">250</td>
+                        <td><span class="pill pill-warn">noon</span></td></tr>
+                    <tr class="bad"><td class="dim">5</td><td class="wide">Soup</td>
+                        <td class="dim">2026-13-01</td><td class="dim">—</td><td class="num dim">—</td>
+                        <td><span class="pill pill-bad">error</span></td></tr>
+                  </tbody>
+                </table>
+                <div class="tmore">Showing 4 of 412 rows</div>
+              </div>
+            </section>
+          </div>`;
+            }
+
+            initWidget({
+                name: "component-gallery",
+                loading: '<div class="empty">Loading gallery…</div>',
+                coerce: () => ({ gallery: true }),
+                render,
+                sample: { gallery: true },
+            });
+
+            render();
+        </script>
+    </body>
+</html>

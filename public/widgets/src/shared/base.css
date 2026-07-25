@@ -58,6 +58,17 @@ header.head {
     margin: 0 2px 9px;
 }
 
+/* The shared surface. Every card — stat tile, chart panel, form panel — is this
+   same fill/border/radius/shadow. Previously documented in STYLE_GUIDE.md as a
+   recipe to copy, which meant each component re-declared it; now it is real so
+   new widgets can just use it. */
+.card {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+}
+
 .empty {
     text-align: center;
     color: var(--text-dim);
