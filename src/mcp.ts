@@ -550,7 +550,7 @@ function registerTools(
         {
             title: "Bulk Import Meals",
             description:
-                "Import many past meals in one call, for backfilling history from a file the user exported from another app (MyFitnessPal, Cronometer, Lose It!, MacroFactor) or from a list they pasted. Parse the source yourself and map it to the row schema; the server validates every row and reports per-row results, so you can fix and re-send only the rows that failed. Prefer this over calling log_meal in a loop — log_meal is rate-limited per call, so a week of meals would exhaust the budget. Two rules matter for correctness. (1) Compute expected_row_count, and expected_total_kcal when every row has calories, FROM THE SOURCE FILE using deterministic tooling (a script, or counting the actual lines) — never by re-reading the JSON you just wrote, which would only compare your output against itself and catch nothing. (2) Call once with dry_run: true first whenever the rows came from parsing a CSV, a screenshot, or free text; check the resolved logged_at and meal_type echoed back for every row, show the user what will be imported, and only then call again with dry_run: false. Pass local times exactly as the file gives them and let the server apply the user's timezone; do not compute UTC offsets yourself, and do not guess a value you cannot find — omit the field and list the column in unmapped_columns instead. Maximum " +
+                "Import many past meals in one call, for backfilling history from a file the user exported from another app (MyFitnessPal, Cronometer, Lose It!, MacroFactor) or from a list they pasted. Parse the source yourself and map it to the row schema; the server validates every row and reports per-row results, so you can fix and re-send only the rows that failed. Prefer this over calling log_meal in a loop — log_meal is rate-limited per call, so a week of meals would exhaust the budget. Two rules matter for correctness. (1) Compute expected_row_count, and expected_total_kcal when every row has calories, FROM THE SOURCE FILE using deterministic tooling (a script, or counting the actual lines) — never by re-reading the JSON you just wrote, which would only compare your output against itself and catch nothing. (2) Call once with dry_run: true first whenever the rows came from parsing a CSV, a screenshot, or free text; check the resolved logged_at and meal_type echoed back for every row, show the user what will be imported, and only then call again with dry_run: false. Pass local times exactly as the file gives them and let the server apply the user's timezone; do not compute UTC offsets yourself, and do not guess a value you cannot find — omit the field and list the column in unmapped_columns instead. (3) Because those local times are placed using the user's saved timezone, check with get_timezone before a large import: if it is unset the server falls back to UTC, and correcting it afterwards moves every imported meal — including onto adjacent days for anything logged near midnight. Offer set_timezone first. Maximum " +
                 MAX_ROWS_PER_CALL +
                 " rows per call: split larger files by date range, keeping all rows for one calendar date in the same call.",
             inputSchema: {
@@ -613,7 +613,14 @@ function registerTools(
             return withAnalytics(
                 "bulk_import_meals",
                 async () => {
-                    const tz = await getUserTimezone(userId);
+                    // One profile read serves both: the timezone, and whether the
+                    // user ever configured one. profiles.timezone defaults to
+                    // 'UTC', so a missing profile row is the reliable "never set"
+                    // signal — and rows without an explicit offset are placed with
+                    // it, so the import warns rather than silently guessing.
+                    const profile = await getProfile(userId);
+                    const tz = profile?.timezone ?? "UTC";
+                    const tzConfigured = profile !== null;
 
                     // Bound total growth before doing any work (see
                     // MAX_MEALS_PER_USER).
@@ -655,6 +662,7 @@ function registerTools(
                     const result = await runImport(args as BulkImportArgs, {
                         userId,
                         tz,
+                        tzConfigured,
                         nowMs: Date.now(),
                         insert: (input) => insertMeal(userId, input),
                         existingKeys: (keys) =>

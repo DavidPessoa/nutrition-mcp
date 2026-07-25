@@ -26,13 +26,19 @@ const TZ = "Europe/Kyiv";
 
 /** Simulates insertMeal: a row whose (user, idempotency_key) already exists is
  *  returned as deduplicated instead of inserted again. */
-function makeStore(opts: { failOn?: (input: MealInput) => boolean } = {}) {
+function makeStore(
+    opts: {
+        failOn?: (input: MealInput) => boolean;
+        tzConfigured?: boolean;
+    } = {},
+) {
     const byKey = new Map<string, Meal>();
     const inserted: MealInput[] = [];
     let counter = 0;
     const deps: ImportDeps = {
         userId: "user-1",
         tz: TZ,
+        tzConfigured: opts.tzConfigured ?? true,
         nowMs: NOW,
         async insert(input: MealInput): Promise<MealInsertResult> {
             if (opts.failOn?.(input)) throw new Error("simulated db failure");
@@ -678,6 +684,58 @@ test("buildSummaryText names failing lines and stays prose, not JSON", async () 
     expect(text).toContain("line 3");
     expect(text).toContain("2026-13-01");
     expect(text).not.toContain("{");
+});
+
+// ---------- unset timezone ----------
+
+test("runImport warns when an unconfigured timezone placed the rows", async () => {
+    // profiles.timezone defaults to 'UTC', so an unconfigured user silently gets
+    // UTC. Rows without their own offset are placed with it, and once the user
+    // sets a real timezone those instants re-read in it: times shift by the
+    // offset, and rows near either edge of the day change date entirely.
+    const { deps } = makeStore({ tzConfigured: false });
+    const result = await runImport(
+        args([
+            row({ source_line: 2, logged_at: "2026-01-15" }), // bare -> noon
+            row({ source_line: 3, logged_at: "2026-01-15T01:00" }), // local time
+        ]),
+        deps,
+    );
+
+    expect(result.summary.created).toBe(2);
+    const warning = result.warnings.find((w) => /timezone is not set/.test(w));
+    expect(warning).toBeDefined();
+    expect(warning).toContain("2 row(s)");
+    expect(warning).toMatch(/near midnight/);
+});
+
+test("rows carrying their own offset do not trigger the timezone warning", async () => {
+    // An explicit offset names an absolute instant, so the profile timezone is
+    // irrelevant to where it lands.
+    const { deps } = makeStore({ tzConfigured: false });
+    const result = await runImport(
+        args([
+            row({ source_line: 2, logged_at: "2026-01-15T08:30:00+02:00" }),
+            row({ source_line: 3, logged_at: "2026-01-15T09:30:00Z" }),
+        ]),
+        deps,
+    );
+
+    expect(result.summary.created).toBe(2);
+    expect(result.warnings.some((w) => /timezone is not set/.test(w))).toBe(
+        false,
+    );
+});
+
+test("a configured timezone never triggers the warning", async () => {
+    const { deps } = makeStore({ tzConfigured: true });
+    const result = await runImport(
+        args([row({ source_line: 2, logged_at: "2026-01-15" })]),
+        deps,
+    );
+    expect(result.warnings.some((w) => /timezone is not set/.test(w))).toBe(
+        false,
+    );
 });
 
 // ---------- output schema conformance ----------

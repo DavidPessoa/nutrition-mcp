@@ -424,6 +424,7 @@ test("a parsed export feeds straight into runImport", async () => {
         {
             userId: "user-1",
             tz: "Europe/Kyiv",
+            tzConfigured: true,
             nowMs: Date.parse("2026-07-25T12:00:00Z"),
             async insert(input) {
                 inserted.push(input);

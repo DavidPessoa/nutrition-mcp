@@ -92,6 +92,9 @@ export interface ResolvedRow {
     meal_type_inferred: boolean;
     description_synthesized: boolean;
     logged_at_from_bare_date: boolean;
+    /** Internal: drives the unset-timezone warning. Not part of the tool's
+     *  output schema — the aggregate warning is what a caller acts on. */
+    logged_at_used_profile_tz: boolean;
 }
 
 export type RowValidation =
@@ -268,6 +271,11 @@ export interface ImportDeps {
     userId: string;
     /** The user's IANA timezone; date-only and offset-less rows resolve in it. */
     tz: string;
+    /** Whether the user has actually configured a timezone, as opposed to
+     *  falling back to the UTC default. A bare date or offset-less local time
+     *  imported under an unconfigured timezone lands on the wrong day once the
+     *  user later sets their real one, so this drives a warning. */
+    tzConfigured: boolean;
     nowMs: number;
     insert(input: MealInput): Promise<MealInsertResult>;
     /** Which of these idempotency keys already exist, so a dry run can predict
@@ -315,6 +323,10 @@ const TIMESTAMP_FIX =
 export interface ResolvedTimestamp {
     iso: string;
     fromBareDate: boolean;
+    /** True when the profile timezone was needed to place this instant, i.e. the
+     *  input was a bare date or an offset-less local time. False when the input
+     *  carried its own offset and is therefore timezone-independent. */
+    usedProfileTimezone: boolean;
 }
 
 /**
@@ -457,7 +469,14 @@ export function resolveLoggedAt(
         };
     }
 
-    return { ok: true, value: { iso: instant.toISOString(), fromBareDate } };
+    return {
+        ok: true,
+        value: {
+            iso: instant.toISOString(),
+            fromBareDate,
+            usedProfileTimezone: expectedDate !== null,
+        },
+    };
 }
 
 // ---------- Meal type ----------
@@ -710,6 +729,7 @@ export function validateRow(
             meal_type_inferred: mealTypeInferred,
             description_synthesized: descriptionSynthesized,
             logged_at_from_bare_date: ts.value.fromBareDate,
+            logged_at_used_profile_tz: ts.value.usedProfileTimezone,
         },
     };
 }
@@ -1082,6 +1102,23 @@ export async function runImport(
     if (bareDates > 0) {
         warnings.push(
             `${bareDates} row(s) had a date but no time; they were logged at local noon.`,
+        );
+    }
+
+    // An unconfigured timezone silently means UTC. Rows that carried their own
+    // offset are unaffected, but a bare date or a local time had to be placed
+    // using that default — and once the user sets their real timezone, those
+    // instants re-read in it. Times shift by the whole offset, and rows near
+    // either edge of the day change date: a 01:00 row imported as UTC reads as
+    // the previous day in Los Angeles, a 23:30 row as the next day in Tokyo.
+    const tzDependent = okRows.filter(
+        (v) => v.resolved.logged_at_used_profile_tz,
+    ).length;
+    if (!deps.tzConfigured && tzDependent > 0) {
+        warnings.push(
+            `Your timezone is not set, so ${tzDependent} row(s) without an explicit UTC offset were placed using UTC. ` +
+                `If you set a different timezone later, those meals will move — by the offset for times of day, and to an adjacent day for anything logged near midnight. ` +
+                `Set your timezone first and re-import for accurate results.`,
         );
     }
 
