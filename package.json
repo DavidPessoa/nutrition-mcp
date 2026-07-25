@@ -32,6 +32,7 @@
         "harness": "bun run scripts/widget-harness.ts",
         "format": "bunx prettier --write .",
         "format:check": "bunx prettier --check .",
+        "typecheck": "bun run scripts/typecheck.ts",
         "depersonalize": "bun run scripts/depersonalize.ts",
         "generate-oauth-creds": "echo \"OAUTH_CLIENT_ID=$(openssl rand -hex 16)\" && echo \"OAUTH_CLIENT_SECRET=$(openssl rand -hex 32)\""
     },
