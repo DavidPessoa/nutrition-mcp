@@ -1,6 +1,9 @@
 import { test, expect } from "bun:test";
+import { z } from "zod";
 import type { MealInput, MealInsertResult, Meal } from "./supabase.js";
 import {
+    serializeImportResult,
+    BULK_IMPORT_OUTPUT_SCHEMA,
     resolveLoggedAt,
     normalizeMealType,
     inferMealType,
@@ -675,6 +678,114 @@ test("buildSummaryText names failing lines and stays prose, not JSON", async () 
     expect(text).toContain("line 3");
     expect(text).toContain("2026-13-01");
     expect(text).not.toContain("{");
+});
+
+// ---------- output schema conformance ----------
+
+test("serialized output validates against the declared outputSchema on every path", async () => {
+    // The only guard against nullable-vs-required drift: .nullable() does NOT
+    // make a field optional, so an absent RowError.field must serialize to an
+    // explicit null or strict clients reject the whole result. CI runs no
+    // typecheck, so this test is what catches it.
+    const schema = z.object(BULK_IMPORT_OUTPUT_SCHEMA);
+
+    const scenarios: Record<string, () => Promise<unknown>> = {
+        async success() {
+            const { deps } = makeStore();
+            return runImport(args([row({ source_line: 2 })]), deps);
+        },
+        async partial_success() {
+            const { deps } = makeStore();
+            return runImport(
+                args([
+                    row({ source_line: 2 }),
+                    row({ source_line: 3, logged_at: "2026-13-01" }),
+                ]),
+                deps,
+            );
+        },
+        async failed_all_rows() {
+            const { deps } = makeStore();
+            return runImport(
+                args([row({ source_line: 2, logged_at: "nope" })]),
+                deps,
+            );
+        },
+        async failed_batch_gate() {
+            const { deps } = makeStore();
+            return runImport(
+                args([row({ source_line: 2 })], { expected_row_count: 9 }),
+                deps,
+            );
+        },
+        async dry_run() {
+            const { deps } = makeStore();
+            return runImport(
+                args([row({ source_line: 2 })], { dry_run: true }),
+                deps,
+            );
+        },
+        async abort() {
+            const { deps } = makeStore();
+            return runImport(
+                args(
+                    [
+                        row({ source_line: 2 }),
+                        row({ source_line: 3, logged_at: "2026-13-01" }),
+                    ],
+                    { on_error: "abort" },
+                ),
+                deps,
+            );
+        },
+        async insert_failure() {
+            const { deps } = makeStore({
+                failOn: (i) => i.description === "Oatmeal",
+            });
+            return runImport(args([row({ source_line: 2 })]), deps);
+        },
+        async too_many_rows() {
+            const { deps } = makeStore();
+            return runImport(
+                args(
+                    Array.from({ length: MAX_ROWS_PER_CALL + 1 }, (_, i) =>
+                        row({ source_line: i + 2 }),
+                    ),
+                ),
+                deps,
+            );
+        },
+    };
+
+    for (const [name, build] of Object.entries(scenarios)) {
+        const result = (await build()) as Parameters<
+            typeof serializeImportResult
+        >[0];
+        const serialized = serializeImportResult(result);
+        const parsed = schema.safeParse(serialized);
+        if (!parsed.success) {
+            throw new Error(
+                `${name} failed output validation: ${JSON.stringify(parsed.error.issues)}`,
+            );
+        }
+        // Required-but-nullable keys must be PRESENT, not merely undefined.
+        for (const r of serialized.results) {
+            for (const key of [
+                "client_row_id",
+                "meal_id",
+                "description",
+                "logged_at",
+                "meal_type",
+                "error",
+            ]) {
+                expect(Object.hasOwn(r, key)).toBe(true);
+            }
+            if (r.error) {
+                expect(Object.hasOwn(r.error, "field")).toBe(true);
+                expect(Object.hasOwn(r.error, "suggested_fix")).toBe(true);
+            }
+        }
+    }
 });
 
 test("buildSummaryText explains a batch-gate failure that has no per-row results", async () => {

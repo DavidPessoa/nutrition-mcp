@@ -20,6 +20,7 @@
 //      dateInTz decides which day a meal belongs to on every read path, so
 //      resolveLoggedAt asserts the round trip rather than trusting the math.
 
+import { z } from "zod";
 import type { MealInput, MealInsertResult } from "./supabase.js";
 import { dateInTz, zonedHourUtc, zonedWallClockToUtc } from "./tz.js";
 import { decodeEscapeSequences } from "./normalize.js";
@@ -154,6 +155,102 @@ export interface ImportResult {
     summary: ImportSummary;
     warnings: string[];
     results: ImportResultRow[];
+}
+
+// The tool's declared output contract. Lives here beside the types it mirrors
+// so serializeImportResult can be tested against it directly — CI runs no
+// typecheck, so a drift between the two is only caught by a test.
+//
+// Failure is a valid value of this schema (status: "failed"), never a separate
+// error envelope: the per-row report is the product, and returning isError lets
+// hosts surface only the text and drop it.
+const IMPORT_ERROR_SCHEMA = z
+    .object({
+        code: z.string(),
+        field: z.string().nullable(),
+        message: z.string(),
+        suggested_fix: z.string().nullable(),
+        retryable: z.boolean(),
+    })
+    .nullable();
+
+export const BULK_IMPORT_OUTPUT_SCHEMA = {
+    status: z.enum(["success", "partial_success", "failed"]),
+    dry_run: z.boolean(),
+    summary: z.object({
+        total: z.number(),
+        created: z.number(),
+        deduplicated: z.number(),
+        would_create: z.number(),
+        failed: z.number(),
+        not_attempted: z.number(),
+        duplicate_rows_in_file: z.number(),
+        rows_without_calories: z.number(),
+        skipped_by_caller: z.number(),
+    }),
+    warnings: z.array(z.string()),
+    results: z.array(
+        z.object({
+            index: z.number(),
+            source_line: z.number(),
+            client_row_id: z.string().nullable(),
+            status: z.enum([
+                "created",
+                "deduplicated",
+                "failed",
+                "would_create",
+                "would_deduplicate",
+                "not_attempted",
+            ]),
+            meal_id: z.string().nullable(),
+            description: z.string().nullable(),
+            logged_at: z.string().nullable(),
+            meal_type: z.string().nullable(),
+            meal_type_inferred: z.boolean(),
+            description_synthesized: z.boolean(),
+            logged_at_from_bare_date: z.boolean(),
+            error: IMPORT_ERROR_SCHEMA,
+        }),
+    ),
+};
+
+/**
+ * Render an ImportResult as structuredContent.
+ *
+ * Every `.nullable()` field above is REQUIRED in the emitted JSON Schema —
+ * nullable is not optional — so an absent `field`/`suggested_fix` on a RowError
+ * has to become an explicit null. Leaving them undefined would drop the key and
+ * fail output validation.
+ */
+export function serializeImportResult(result: ImportResult) {
+    return {
+        status: result.status,
+        dry_run: result.dry_run,
+        summary: { ...result.summary },
+        warnings: [...result.warnings],
+        results: result.results.map((r) => ({
+            index: r.index,
+            source_line: r.source_line,
+            client_row_id: r.client_row_id ?? null,
+            status: r.status,
+            meal_id: r.meal_id ?? null,
+            description: r.description ?? null,
+            logged_at: r.logged_at ?? null,
+            meal_type: r.meal_type ?? null,
+            meal_type_inferred: r.meal_type_inferred,
+            description_synthesized: r.description_synthesized,
+            logged_at_from_bare_date: r.logged_at_from_bare_date,
+            error: r.error
+                ? {
+                      code: r.error.code,
+                      field: r.error.field ?? null,
+                      message: r.error.message,
+                      suggested_fix: r.error.suggested_fix ?? null,
+                      retryable: r.error.retryable,
+                  }
+                : null,
+        })),
+    };
 }
 
 export interface BulkImportArgs {

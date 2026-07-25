@@ -84,11 +84,23 @@ function persistAnalytics(record: AnalyticsRecord): void {
         });
 }
 
+/**
+ * Wrap a tool handler with timing + analytics.
+ *
+ * A handler that returns normally counts as a success. Tools that report failure
+ * in their own payload instead of throwing (bulk_import_meals returns a
+ * structured report rather than an error, so hosts don't drop the per-row
+ * detail) must pass `options.outcome`, or their failures show up as successes in
+ * tool_analytics.
+ */
 export async function withAnalytics<T>(
     toolName: string,
     handler: () => Promise<T>,
     context: AnalyticsContext,
     args?: Record<string, unknown>,
+    options?: {
+        outcome?: (result: T) => { success: boolean; errorCategory?: string };
+    },
 ): Promise<T> {
     const start = performance.now();
     const invokedAt = new Date().toISOString();
@@ -100,16 +112,26 @@ export async function withAnalytics<T>(
     try {
         const result = await handler();
         const durationMs = Math.round(performance.now() - start);
+        const outcome = options?.outcome?.(result) ?? { success: true };
 
-        console.log(
-            `[analytics] ${toolName} success ${durationMs}ms user=${context.userId}`,
-        );
+        if (outcome.success) {
+            console.log(
+                `[analytics] ${toolName} success ${durationMs}ms user=${context.userId}`,
+            );
+        } else {
+            console.warn(
+                `[analytics] ${toolName} reported-failure=${outcome.errorCategory ?? "unknown"} ${durationMs}ms user=${context.userId}`,
+            );
+        }
 
         persistAnalytics({
             user_id: context.userId,
             tool_name: toolName,
-            success: true,
+            success: outcome.success,
             duration_ms: durationMs,
+            error_category: outcome.success
+                ? undefined
+                : (outcome.errorCategory ?? "unknown"),
             date_range_days: dateRangeDays,
             mcp_session_id: context.sessionId,
             invoked_at: invokedAt,

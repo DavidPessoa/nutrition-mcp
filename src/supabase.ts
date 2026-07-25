@@ -240,6 +240,47 @@ export async function getMealsInRange(
     return (data as Meal[]) ?? [];
 }
 
+/**
+ * How many meal rows this user already has. Used by bulk import to bound total
+ * growth: rate limiting is per HTTP request, so one batched call writes many
+ * rows for a single limiter hit.
+ */
+export async function countMeals(userId: string): Promise<number> {
+    const { count, error } = await getSupabase()
+        .from("meals")
+        .select("id", { count: "exact", head: true })
+        .eq("user_id", userId);
+
+    if (error) throw new Error(`Failed to count meals: ${error.message}`);
+    return count ?? 0;
+}
+
+/**
+ * Which of `keys` are already present for this user. Lets a dry-run import
+ * predict deduplication instead of promising creates that will not happen.
+ */
+export async function existingIdempotencyKeys(
+    userId: string,
+    keys: string[],
+): Promise<Set<string>> {
+    if (keys.length === 0) return new Set();
+
+    const { data, error } = await getSupabase()
+        .from("meals")
+        .select("idempotency_key")
+        .eq("user_id", userId)
+        .in("idempotency_key", keys);
+
+    if (error) {
+        throw new Error(`Failed to check existing meals: ${error.message}`);
+    }
+    return new Set(
+        ((data as { idempotency_key: string | null }[]) ?? [])
+            .map((r) => r.idempotency_key)
+            .filter((k): k is string => k !== null),
+    );
+}
+
 export async function getAllMeals(userId: string): Promise<Meal[]> {
     const { data, error } = await getSupabase()
         .from("meals")
