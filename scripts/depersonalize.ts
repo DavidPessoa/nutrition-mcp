@@ -13,6 +13,7 @@
  *   - GitHub repo links (nav, footer, "Star on GitHub" CTA) and the live
  *     star-count fetch
  *   - Contact section, footer contact link
+ *   - The support email embedded in the bulk-import widget
  *   - Medium / YouTube footer links
  *   - The nutrition-mcp.com domain -> your-domain.com placeholder
  *     (install/MCP URL, canonical/OG tags, sitemap, robots)
@@ -183,6 +184,18 @@ const ALT_RULES: Rule[] = [
 
 // Every comparison page under public/alternatives/, discovered at run time so a
 // newly generated app page is depersonalized without editing this list.
+/**
+ * The import widget's support contact. It is JS, not markup, so the HTML-tuned
+ * rules above do not apply: blank the constant rather than deleting it, because
+ * every call site guards on it being non-empty and removing the declaration
+ * would throw a ReferenceError inside the widget.
+ */
+const WIDGET_SUPPORT_RULE: Rule = {
+    name: "import widget: support email -> empty",
+    find: /(\/\* support-contact:start \*\/\s*\n\s*const SUPPORT_EMAIL = )"[^"]*"/,
+    replace: '$1""',
+};
+
 const altPageJobs = (
     await Array.fromAsync(
         new Bun.Glob("*.html").scan({ cwd: "public/alternatives" }),
@@ -238,6 +251,12 @@ const JOBS: { path: string; rules: Rule[] }[] = [
     { path: "public/sitemap.xml", rules: [DOMAIN_RULE] },
     { path: "public/robots.txt", rules: [DOMAIN_RULE] },
     { path: "src/index.ts", rules: [GLAMA_RULE, ...CSP_RULES] },
+    // The import widget is a source partial, not a served page, so it is not in
+    // the HTML jobs above — but it does embed the maintainer's support address.
+    {
+        path: "public/widgets/src/templates/import-meals.html",
+        rules: [WIDGET_SUPPORT_RULE],
+    },
 ];
 
 let hadWarning = false;

@@ -82,6 +82,19 @@
             .stat-row b {
                 font-variant-numeric: tabular-nums;
             }
+            .diag {
+                display: block;
+                margin-top: 8px;
+                padding: 7px 9px;
+                border-radius: 8px;
+                background: var(--track);
+                font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+                font-size: 10.5px;
+                line-height: 1.5;
+                white-space: pre-wrap;
+                user-select: all;
+                color: var(--text-dim);
+            }
         </style>
     </head>
     <body>
@@ -102,6 +115,96 @@
                 tz_configured: true,
             };
             let API = null;
+
+            // Support contact, shown only when something has actually gone wrong.
+            // Plain text, NOT a mailto: link — the widget runs in a
+            // sandbox="allow-scripts" iframe and Chrome blocks navigation to
+            // external protocols from one, so a mailto anchor silently does
+            // nothing while still looking clickable.
+            // depersonalize.ts strips this block; keep the marker comments.
+            /* support-contact:start */
+            const SUPPORT_EMAIL = "anton@nutrition-mcp.com";
+            /* support-contact:end */
+
+            // A short, copyable description of the file and what went wrong.
+            // "Email me" on its own costs two round trips — the first reply is
+            // always "what does your file look like?" — so the answer ships with
+            // the question.
+            function diagnosticsBlock() {
+                if (!SUPPORT_EMAIL) return "";
+                const t = S.table;
+                const lines = [];
+                if (t) {
+                    lines.push(
+                        t.headers.length +
+                            " columns: " +
+                            t.headers.slice(0, 8).join(" | ") +
+                            (t.headers.length > 8 ? " | …" : ""),
+                    );
+                    lines.push(
+                        "encoding " +
+                            t.encoding +
+                            " · delimiter " +
+                            (t.delimiter === "\t" ? "tab" : t.delimiter) +
+                            " · decimal " +
+                            t.decimalSeparator +
+                            " · " +
+                            t.rows.length +
+                            " rows",
+                    );
+                    lines.push(
+                        "dates read as " +
+                            dateFormatLabel(S.dateFormat) +
+                            " · energy " +
+                            S.energyUnit +
+                            (S.dateAmbiguous ? " · format was ambiguous" : ""),
+                    );
+                }
+                const r = S.result;
+                if (r) {
+                    lines.push(
+                        "imported " +
+                            r.created +
+                            " · already logged " +
+                            r.deduplicated +
+                            " · failed " +
+                            r.failed +
+                            " · skipped " +
+                            S.skipped,
+                    );
+                    const first = (r.rowErrors || [])[0];
+                    if (first)
+                        lines.push(
+                            "first error, line " +
+                                first.line +
+                                ": " +
+                                first.message,
+                        );
+                    for (const e of (r.chunkErrors || []).slice(0, 2))
+                        lines.push("batch error: " + e);
+                } else if (S.badDates > 0) {
+                    lines.push(
+                        S.badDates +
+                            " row(s) have an unreadable date" +
+                            (S.badDateSample
+                                ? " (line " +
+                                  S.badDateSample.line +
+                                  ": " +
+                                  S.badDateSample.value +
+                                  ")"
+                                : ""),
+                    );
+                }
+                return (
+                    '<div class="notice"><span>✉</span><span>Not working as expected? Email ' +
+                    "<b>" +
+                    esc(SUPPORT_EMAIL) +
+                    "</b> and include the lines below — that is everything needed to diagnose it." +
+                    '<span class="diag">' +
+                    esc(lines.join("\n")) +
+                    "</span></span></div>"
+                );
+            }
 
             // ---- state -------------------------------------------------------
             const FIELDS = [
@@ -609,7 +712,12 @@
                     API && !API.canCallTools
                         ? '<div class="notice notice-warn"><span>!</span><span>' +
                           "This host does not let this view write to your log. Ask Claude to import the file instead — it can do it directly." +
-                          "</span></div>"
+                          "</span></div>" +
+                          (SUPPORT_EMAIL
+                              ? '<div class="notice"><span>✉</span><span>If asking Claude does not work either, email <b>' +
+                                esc(SUPPORT_EMAIL) +
+                                "</b>.</span></div>"
+                              : "")
                         : "";
                 const tzWarn = !CFG.tz_configured
                     ? '<div class="notice notice-warn"><span>!</span><span>' +
@@ -903,6 +1011,7 @@
                           ) +
                           "</span></div>"
                         : "") +
+                    (S.badDates > 0 ? diagnosticsBlock() : "") +
                     '<div class="actions"><button class="btn btn-primary" id="doImport"' +
                     (S.busy || !(API && API.canCallTools) ? " disabled" : "") +
                     ">" +
@@ -962,6 +1071,7 @@
                               .join("") +
                           "</tbody></table></div>"
                         : "") +
+                    (ok ? "" : diagnosticsBlock()) +
                     '<div class="actions"><button class="btn" id="restart">Import another file</button></div>' +
                     "</section>"
                 );
