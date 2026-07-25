@@ -58,9 +58,6 @@ export const WIDGET_TEMPLATES: Record<string, string> = {
     "meal-logged": "meal-logged.html",
     trends: "trends.html",
     "weight-trends": "weight-trends.html",
-    // Temporary capability probe for the bulk-import spike; its tool is
-    // registered only when ENABLE_WIDGET_PROBE is set. Remove with the spike.
-    "import-probe": "import-probe.html",
     "import-meals": "import-meals.html",
     // Dev-only visual reference for the shared components. Listed here so it is
     // assembled and covered by widgets.test.ts, but NO ui:// resource and no

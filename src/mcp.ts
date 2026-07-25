@@ -85,13 +85,7 @@ const GOAL_PROGRESS_WIDGET_URI = "ui://widget/goal-progress.html";
 const MEAL_LOGGED_WIDGET_URI = "ui://widget/meal-logged.html";
 const TRENDS_WIDGET_URI = "ui://widget/trends.html";
 const WEIGHT_TRENDS_WIDGET_URI = "ui://widget/weight-trends.html";
-const IMPORT_PROBE_WIDGET_URI = "ui://widget/import-probe.html";
 const IMPORT_MEALS_WIDGET_URI = "ui://widget/import-meals.html";
-
-// Temporary: gates the bulk-import capability probe (widget + debug tool) so
-// merging it is inert. Set ENABLE_WIDGET_PROBE in the deploy environment to run
-// the spike, then unset it and delete the probe.
-const WIDGET_PROBE_ENABLED = !!process.env.ENABLE_WIDGET_PROBE;
 
 // Sent to clients in the initialize response (SDK ServerOptions.instructions).
 // Advisory — not every client surfaces it, so the enforcement rule ("interview
@@ -1098,68 +1092,6 @@ function registerTools(
             );
         },
     );
-
-    // Temporary bulk-import capability probe. Both the tool and its resource are
-    // registered only when ENABLE_WIDGET_PROBE is set, so this is invisible in
-    // production until the spike is deliberately switched on.
-    if (WIDGET_PROBE_ENABLED) {
-        server.registerResource(
-            "import-probe-widget",
-            IMPORT_PROBE_WIDGET_URI,
-            {
-                title: "Widget Capability Probe",
-                description:
-                    "Temporary diagnostic UI: reports whether this host proxies app-initiated tools/call, advertises serverTools, and imposes container dimensions.",
-                mimeType: APP_UI_MIME_TYPE,
-            },
-            async (uri) => {
-                return {
-                    contents: [
-                        {
-                            uri: uri.href,
-                            mimeType: APP_UI_MIME_TYPE,
-                            text: await getWidgetHtml("import-probe"),
-                            _meta: { ui: { prefersBorder: true } },
-                        },
-                    ],
-                };
-            },
-        );
-
-        server.registerTool(
-            "debug_widget_probe",
-            {
-                title: "Debug: Widget Capability Probe",
-                description:
-                    "Diagnostic only. Opens a probe widget that reports whether this MCP host lets a widget call tools on the server, and how long such a call takes. Call it when the user asks to run the widget capability probe; it reads nothing and writes nothing.",
-                inputSchema: {},
-                outputSchema: { probe: z.boolean(), host_hint: z.string() },
-                annotations: {
-                    title: "Debug: Widget Capability Probe",
-                    readOnlyHint: true,
-                    destructiveHint: false,
-                    idempotentHint: true,
-                },
-                _meta: { ui: { resourceUri: IMPORT_PROBE_WIDGET_URI } },
-            },
-            async () => {
-                const structuredContent = {
-                    probe: true,
-                    host_hint:
-                        "Press the buttons in the widget; a multi-second read means the host prompts per call.",
-                };
-                return {
-                    content: [
-                        {
-                            type: "text" as const,
-                            text: "Widget capability probe opened. Use its buttons to test whether this host proxies app-initiated tools/call.",
-                        },
-                    ],
-                    structuredContent,
-                };
-            },
-        );
-    }
 
     // UI resource for the get_nutrition_summary dashboard widget. Served as an
     // MCP Apps resource; the host fetches it and renders it in a sandboxed
