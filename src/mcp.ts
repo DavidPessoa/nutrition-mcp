@@ -115,7 +115,14 @@ Photo-based meal logging — when the user sends a photo of food, follow these s
 
 Keep the interview proportional: a single obvious item with one known past variation may need only one question, while a full plate with several dishes usually needs several. A restaurant meal you pinned down from published chain nutrition may need only the how-much-did-you-eat question. If the user says to just log it or otherwise signals impatience, stop asking, state your remaining assumptions plainly, and log.
 
-For "log my usual X" requests, use search_meals the same way: search, then interview to confirm the variation and the amount before logging.`;
+For "log my usual X" requests, use search_meals the same way: search, then interview to confirm the variation and the amount before logging.
+
+Importing history from another app — when the user wants to bring in past meals from MyFitnessPal, Cronometer, Lose It!, MacroFactor or a similar export:
+1. If they have a FILE, call start_meal_import first and let them drive it. The importer reads and maps the file in the browser, so the rows never pass through you and cannot be mistranscribed, and it handles column mapping, batching and retries. Do not ask them to paste a file you could import properly.
+2. Call bulk_import_meals directly only when the importer is not an option: the data is already pasted into the conversation, the user cannot use the panel, or the importer reports that this client will not let it save. Then parse the rows yourself and follow that tool's description exactly — in particular, compute the row count and calorie total from the source text with real counting rather than by re-reading what you just wrote, and dry-run first.
+3. Never log a backfill by calling log_meal in a loop. It is rate-limited per call, so a single week of meals would exhaust the budget; one bulk_import_meals call carries up to 50 rows for the same cost.
+4. Check get_timezone before any sizeable import and offer set_timezone if it is unset. Times without an explicit UTC offset are placed using the saved timezone, so correcting it afterwards moves every imported meal — onto an adjacent day for anything logged near midnight.
+5. Show the user what was resolved before treating an import as done: the dry run echoes back the date, time and meal type for every row, and a misread date column shows up there rather than in the totals. Re-sending the same rows is safe — the server recognises them and skips them — so a retry after a failure or a timeout never duplicates anything.`;
 
 interface DailyTotals {
     calories: number;
