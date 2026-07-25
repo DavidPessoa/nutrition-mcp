@@ -158,8 +158,13 @@
                 table: null, // ParsedTable from csv.ts
                 mapping: {}, // field key -> column index (-1 = unmapped)
                 sourceApp: "",
+                dateFormat: "iso", // iso | dmy | mdy — sniffed, user-confirmable
+                dateAmbiguous: false, // sniff could not tell day-first from month-first
+                energyUnit: "kcal", // kcal | kj — unit of the calories column
                 rows: [], // built import rows
                 skipped: 0,
+                badDates: 0, // rows dropped because their date would not parse
+                badDateSample: null, // { line, value } of the first such row
                 errors: [], // local pre-flight problems
                 busy: false,
                 progress: null, // { done, total, label }
@@ -199,6 +204,8 @@
                 S.errors = [];
                 autoMap();
                 guessSourceApp();
+                resniffDateFormat();
+                resniffEnergyUnit();
                 S.step = "map";
                 render();
             }
@@ -229,6 +236,102 @@
                 else S.sourceApp = "";
             }
 
+            // ---- date format & energy unit -----------------------------------
+            //
+            // The server accepts ISO dates and kcal only, so a DD/MM/YYYY or
+            // kilojoule export has to be converted here. Both settings are sniffed
+            // from the file (sniffDateFormat / sniffEnergyUnit in csv.ts) and then
+            // stay editable, because a sniff is a guess and both failure modes are
+            // silent: day/month order is genuinely undecidable for a column of
+            // 05/06/2026, and a column headed "Calories" may hold kJ, which would
+            // store every row 4.184x too high while reporting success. So each
+            // control is shown next to a worked example from the user's own first
+            // row — a wrong setting is then visible before anything is written.
+            const DATE_FORMAT_OPTIONS = [
+                ["iso", "Year-Month-Day (2026-07-18)"],
+                ["dmy", "Day/Month/Year (18/07/2026)"],
+                ["mdy", "Month/Day/Year (07/18/2026)"],
+            ];
+            const ENERGY_UNIT_OPTIONS = [
+                ["kcal", "Calories (kcal)"],
+                ["kj", "Kilojoules (kJ)"],
+            ];
+
+            // Some exports put the whole timestamp in the date column. toIsoDate
+            // tolerates a trailing time but returns the date alone, so the time is
+            // captured here and re-appended after conversion — dropping it would
+            // quietly move every meal to midday. Mirrors csv.ts's TRAILING_TIME_RE
+            // so exactly what toIsoDate discards is what gets put back.
+            const CELL_TIME_RE =
+                /[T ]\s*(\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?\s*[ap]?\.?m?\.?)$/i;
+            function timeInDateCell(raw) {
+                const m = CELL_TIME_RE.exec(
+                    String(raw == null ? "" : raw).trim(),
+                );
+                return m ? m[1].trim() : "";
+            }
+
+            function dateFormatLabel(fmt) {
+                const o = DATE_FORMAT_OPTIONS.find((x) => x[0] === fmt);
+                return o ? o[1].replace(/\s*\(.*\)$/, "") : String(fmt);
+            }
+
+            // Cells / numbers of the column currently mapped to `fieldKey`
+            // (limit 0 = all of them).
+            function columnCells(fieldKey, limit) {
+                const t = S.table;
+                const idx = S.mapping[fieldKey];
+                const out = [];
+                if (!t || !(idx >= 0)) return out;
+                for (const r of t.rows) {
+                    if (isBlankCell(r[idx])) continue;
+                    out.push(r[idx].trim());
+                    if (limit && out.length >= limit) break;
+                }
+                return out;
+            }
+            function columnNumbers(fieldKey, limit) {
+                const t = S.table;
+                const idx = S.mapping[fieldKey];
+                const out = [];
+                if (!t || !(idx >= 0)) return out;
+                for (const r of t.rows) {
+                    const v = parseNumber(r[idx], t.decimalSeparator);
+                    if (v === null) continue;
+                    out.push(v);
+                    if (limit && out.length >= limit) break;
+                }
+                return out;
+            }
+
+            // Sniff the whole column, not a sample: one 18/07/2026 anywhere in the
+            // file is what settles day-first, and the energy median is steadier
+            // over every row. Re-run on load AND whenever the user remaps
+            // logged_at / calories, since the evidence came from that column.
+            function resniffDateFormat() {
+                const values = columnCells("logged_at", 0);
+                if (!values.length) {
+                    S.dateFormat = "iso";
+                    S.dateAmbiguous = false;
+                    return;
+                }
+                const sniffed = sniffDateFormat(values);
+                S.dateFormat = sniffed.format;
+                S.dateAmbiguous = sniffed.ambiguous;
+            }
+            function resniffEnergyUnit() {
+                const t = S.table;
+                const idx = S.mapping.calories;
+                if (!t || !(idx >= 0)) {
+                    S.energyUnit = "kcal";
+                    return;
+                }
+                S.energyUnit = sniffEnergyUnit(
+                    t.headers[idx] || "",
+                    columnNumbers("calories", 0),
+                );
+            }
+
             // ---- step 2 -> 3: build rows -------------------------------------
             function buildRows() {
                 const t = S.table;
@@ -246,27 +349,55 @@
 
                 const rows = [];
                 let skipped = 0;
+                let badDates = 0;
+                let badDateSample = null;
                 for (let i = 0; i < t.rows.length; i++) {
                     const r = t.rows[i];
                     if (m.deleted >= 0 && isDeletedRow(r, m.deleted)) {
                         skipped++;
                         continue;
                     }
-                    let when = cell(r, m.logged_at);
-                    if (when === undefined) {
+                    const rawWhen = cell(r, m.logged_at);
+                    if (rawWhen === undefined) {
                         skipped++;
                         continue;
                     }
-                    // A separate time column is common (Cronometer: Day + Time).
-                    const time = cell(r, m.time);
+                    // The server only accepts ISO, so convert with the format the
+                    // column agreed on. A cell that will not parse is dropped and
+                    // counted rather than sent — the server would reject it row by
+                    // row anyway, and the count is surfaced in the preview so a
+                    // wrong format setting cannot pass as a successful import.
+                    const iso = toIsoDate(rawWhen, S.dateFormat);
+                    if (iso === null) {
+                        badDates++;
+                        if (!badDateSample) {
+                            badDateSample = {
+                                line: t.sourceLines[i],
+                                value: rawWhen,
+                            };
+                        }
+                        skipped++;
+                        continue;
+                    }
+                    let when = iso;
+                    // A separate time column is common (Cronometer: Day + Time);
+                    // otherwise keep a time that rode along in the date cell,
+                    // which toIsoDate drops.
+                    const time = cell(r, m.time) || timeInDateCell(rawWhen);
                     if (time) when = when + " " + time;
+
+                    // Calories only: protein/carbs/fat are grams in every export.
+                    const energy = num(r, m.calories);
 
                     rows.push({
                         source_line: t.sourceLines[i],
                         logged_at: when,
                         description: cell(r, m.description),
                         meal_type: cell(r, m.meal_type),
-                        calories: num(r, m.calories),
+                        calories:
+                            energy === undefined
+                                ? undefined
+                                : toKcal(energy, S.energyUnit),
                         protein_g: num(r, m.protein_g),
                         carbs_g: num(r, m.carbs_g),
                         fat_g: num(r, m.fat_g),
@@ -274,6 +405,8 @@
                     });
                 }
                 S.rows = rows;
+                S.badDates = badDates;
+                S.badDateSample = badDateSample;
                 S.skipped = skipped + t.skippedTotalsRows + t.skippedBlankRows;
             }
 
@@ -501,6 +634,74 @@
                 );
             }
 
+            // Worked examples: the first real value from the user's own file, run
+            // through the very functions the import will use. Returns escaped HTML.
+            function dateExampleHtml() {
+                if (!(S.mapping.logged_at >= 0))
+                    return "Map a date column above to see how a value from your file converts.";
+                const raw = columnCells("logged_at", 1)[0];
+                if (raw === undefined) return "That column has no dates in it.";
+                const iso = toIsoDate(raw, S.dateFormat);
+                if (iso === null)
+                    return (
+                        esc(raw) +
+                        " → cannot be read as " +
+                        esc(dateFormatLabel(S.dateFormat)) +
+                        ", so rows like it will be skipped"
+                    );
+                const time = timeInDateCell(raw);
+                return esc(raw) + " → " + esc(iso + (time ? " " + time : ""));
+            }
+            function energyExampleHtml() {
+                if (!(S.mapping.calories >= 0))
+                    return "Map a calories column above to see how a value from your file converts.";
+                const v = columnNumbers("calories", 1)[0];
+                if (v === undefined) return "That column has no numbers in it.";
+                if (S.energyUnit === "kj")
+                    return esc(v) + " kJ → " + esc(toKcal(v, "kj")) + " kcal";
+                return esc(v) + " kcal → " + esc(v) + " kcal (no conversion)";
+            }
+
+            function formatFieldsHtml() {
+                const select = (id, options, sel) =>
+                    '<select class="select" id="' +
+                    id +
+                    '">' +
+                    options
+                        .map(
+                            (o) =>
+                                '<option value="' +
+                                o[0] +
+                                '"' +
+                                (sel === o[0] ? " selected" : "") +
+                                ">" +
+                                esc(o[1]) +
+                                "</option>",
+                        )
+                        .join("") +
+                    "</select>";
+                return (
+                    '<div style="margin-top:12px">' +
+                    // Undecidable, so it must not be dressed up as auto-detected.
+                    (S.dateAmbiguous
+                        ? '<div class="notice notice-warn"><span>!</span><span>' +
+                          "The date format could not be determined from this file — its dates read equally well as day-first or month-first. Please confirm which one your app exports: the wrong choice files meals on the wrong day with no error." +
+                          "</span></div>"
+                        : "") +
+                    '<div class="field"><label class="label" for="dateFormat">Date format in this file</label>' +
+                    select("dateFormat", DATE_FORMAT_OPTIONS, S.dateFormat) +
+                    '<span class="hint">' +
+                    dateExampleHtml() +
+                    "</span></div>" +
+                    '<div class="field"><label class="label" for="energyUnit">Energy unit of the calories column</label>' +
+                    select("energyUnit", ENERGY_UNIT_OPTIONS, S.energyUnit) +
+                    '<span class="hint">' +
+                    energyExampleHtml() +
+                    "</span></div>" +
+                    "</div>"
+                );
+            }
+
             function mapStep() {
                 const t = S.table;
                 const opts = (sel) =>
@@ -562,7 +763,8 @@
                         );
                     }).join("") +
                     "</div>" +
-                    '<div class="field" style="margin-top:12px"><label class="label">Source app (optional)</label>' +
+                    formatFieldsHtml() +
+                    '<div class="field"><label class="label">Source app (optional)</label>' +
                     '<input class="input" id="srcapp" value="' +
                     esc(S.sourceApp) +
                     '" placeholder="myfitnesspal" />' +
@@ -595,6 +797,34 @@
                     "</b> batch" +
                     (chunks === 1 ? "" : "es") +
                     "</span></div>" +
+                    // State the two conversions applied, so the confirmation step
+                    // shows what will be sent rather than what the file said.
+                    '<div class="hint" style="margin-bottom:10px">Dates read as ' +
+                    esc(dateFormatLabel(S.dateFormat)) +
+                    "; energy " +
+                    (S.energyUnit === "kj"
+                        ? "converted from kJ to kcal"
+                        : "read as kcal") +
+                    ".</div>" +
+                    // Importing fewer rows than the file holds is the exact failure
+                    // this flow exists to prevent, so never let it pass silently.
+                    (S.badDates
+                        ? '<div class="notice notice-warn"><span>!</span><span>' +
+                          esc(
+                              S.badDates +
+                                  " row(s) were skipped because their date could not be read as " +
+                                  dateFormatLabel(S.dateFormat) +
+                                  (S.badDateSample
+                                      ? " (e.g. line " +
+                                        S.badDateSample.line +
+                                        ": " +
+                                        S.badDateSample.value +
+                                        ")"
+                                      : "") +
+                                  ". Go back and set the date format that matches your file.",
+                          ) +
+                          "</span></div>"
+                        : "") +
                     (noTime
                         ? '<div class="notice notice-warn"><span>!</span><span>' +
                           noTime +
@@ -775,12 +1005,31 @@
                 }
                 for (const sel of document.querySelectorAll(".map-sel")) {
                     sel.onchange = (e) => {
-                        S.mapping[e.target.dataset.field] = Number(
-                            e.target.value,
-                        );
+                        const field = e.target.dataset.field;
+                        S.mapping[field] = Number(e.target.value);
+                        // The date format and energy unit were read off the column
+                        // that was mapped a moment ago, so a remap invalidates
+                        // them: sniff the newly chosen column instead.
+                        if (field === "logged_at") resniffDateFormat();
+                        if (field === "calories") resniffEnergyUnit();
                         render();
                     };
                 }
+                // Re-rendering on change is what makes the worked example live.
+                const dateFormat = document.getElementById("dateFormat");
+                if (dateFormat)
+                    dateFormat.onchange = (e) => {
+                        S.dateFormat = e.target.value;
+                        // The user has now stated it, so stop asking.
+                        S.dateAmbiguous = false;
+                        render();
+                    };
+                const energyUnit = document.getElementById("energyUnit");
+                if (energyUnit)
+                    energyUnit.onchange = (e) => {
+                        S.energyUnit = e.target.value;
+                        render();
+                    };
                 const srcapp = document.getElementById("srcapp");
                 if (srcapp)
                     srcapp.oninput = (e) => {
@@ -816,6 +1065,11 @@
                         S.rows = [];
                         S.result = null;
                         S.errors = [];
+                        S.dateFormat = "iso";
+                        S.dateAmbiguous = false;
+                        S.energyUnit = "kcal";
+                        S.badDates = 0;
+                        S.badDateSample = null;
                         render();
                     };
             }

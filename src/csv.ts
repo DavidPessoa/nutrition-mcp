@@ -508,3 +508,262 @@ export function isDeletedRow(row: string[], deletedColumn: number): boolean {
     const v = (row[deletedColumn] ?? "").trim().toLowerCase();
     return v === "true" || v === "yes" || v === "1";
 }
+
+// ---------- dates ----------
+//
+// The server only accepts ISO (`YYYY-MM-DD`, see resolveLoggedAt in
+// src/import.ts), so a DD/MM/YYYY or MM/DD/YYYY export fails on every single
+// row until the widget normalises it. Normalising needs two steps, because a
+// single cell can never be trusted on its own: sniff the format across a whole
+// column, then convert each cell with the format the column agreed on.
+
+export type DateFormat = "iso" | "dmy" | "mdy";
+
+/**
+ * What to assume for a day/month-ambiguous column. Day-first is the majority
+ * convention worldwide, but it is a coin flip for any individual file — which is
+ * why sniffDateFormat pairs this default with `ambiguous: true` so the UI asks
+ * instead of importing three weeks of meals onto the wrong days.
+ */
+const AMBIGUOUS_DEFAULT: DateFormat = "dmy";
+
+/** A trailing time-of-day: "18/07/2026 08:30", "2026-07-18T08:30:00", "1:00 PM". */
+const TRAILING_TIME_RE =
+    /[T ]\s*\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?\s*[ap]?\.?m?\.?$/i;
+
+/** Three numeric components separated by `/`, `.` or `-`. */
+const DATE_CELL_RE = /^(\d{1,4})[/.-](\d{1,2})[/.-](\d{1,4})$/;
+
+interface DateCell {
+    year: number;
+    /** First non-year component: day if day-first, month if month-first. */
+    first: number;
+    /** Second non-year component. */
+    second: number;
+    /**
+     * True when the cell led with a 4-digit year, i.e. it is ISO-shaped and its
+     * component order is not in question at all.
+     */
+    yearFirst: boolean;
+}
+
+/**
+ * Split a date cell into components without deciding what they mean.
+ *
+ * Returns null for anything unusable, which deliberately includes 2-DIGIT YEARS
+ * ("03/04/26"). Guessing a century is one bad assumption, but the real problem
+ * is that all three components are then 1-2 digits, so "26/07/18" could be
+ * day-first, month-first *or* year-first and no sample of the column can settle
+ * it. A rejected row surfaces as a fixable error; a mis-ordered one silently
+ * files a meal on the wrong day. No export we have seen uses 2-digit years, so
+ * the cost of rejecting is a message the user can act on.
+ *
+ * A trailing time-of-day is tolerated and dropped: some exports put the whole
+ * timestamp in one column, and dropping the time only costs precision (the
+ * server dates a bare date at local noon and flags logged_at_from_bare_date),
+ * whereas rejecting would fail every row of such a file.
+ */
+function splitDateCell(raw: string | undefined): DateCell | null {
+    if (isBlankCell(raw)) return null;
+    const text = raw!.trim().replace(TRAILING_TIME_RE, "").trim();
+    const m = DATE_CELL_RE.exec(text);
+    if (!m) return null;
+    const a = m[1]!;
+    const b = m[2]!;
+    const c = m[3]!;
+    if (a.length === 4) {
+        return {
+            year: Number(a),
+            first: Number(b),
+            second: Number(c),
+            yearFirst: true,
+        };
+    }
+    if (c.length === 4) {
+        return {
+            year: Number(c),
+            first: Number(a),
+            second: Number(b),
+            yearFirst: false,
+        };
+    }
+    return null; // no 4-digit year anywhere
+}
+
+/**
+ * Decide which date format a column of raw cells uses.
+ *
+ * The only reliable discriminator is a value that cannot be read both ways: a
+ * first component above 12 means day-first, a second component above 12 means
+ * month-first. Frequency proves nothing, so a column of `05/06/2026` reports
+ * `ambiguous: true` and the UI must ask rather than pick — an unflagged guess
+ * would file every meal on the wrong day with no visible symptom.
+ *
+ * Blank and unparseable cells are ignored so a "n/a" or a stray note cannot
+ * skew the vote.
+ */
+export function sniffDateFormat(values: string[]): {
+    format: DateFormat;
+    ambiguous: boolean;
+} {
+    let iso = 0;
+    let dmy = 0;
+    let mdy = 0;
+    /** Parseable but readable both ways, e.g. 05/06/2026. */
+    let either = 0;
+
+    for (const v of values) {
+        const p = splitDateCell(v);
+        if (p === null) continue;
+        if (p.yearFirst) {
+            iso++;
+        } else if (p.first > 12 && p.second > 12) {
+            continue; // not a real date in either reading
+        } else if (p.first > 12) {
+            dmy++;
+        } else if (p.second > 12) {
+            mdy++;
+        } else {
+            either++;
+        }
+    }
+
+    const nonIso = dmy + mdy + either;
+    // Nothing usable in the sample: we know literally nothing, so ask.
+    if (iso === 0 && nonIso === 0) return { format: "iso", ambiguous: true };
+    if (nonIso === 0) return { format: "iso", ambiguous: false };
+
+    const dayVsMonth: DateFormat =
+        dmy > mdy ? "dmy" : mdy > dmy ? "mdy" : AMBIGUOUS_DEFAULT;
+
+    // A column mixing ISO and slash forms is either a hand-edited file or an
+    // export that changed format mid-history. Report the majority, but flag it.
+    if (iso > 0) {
+        return { format: iso >= nonIso ? "iso" : dayVsMonth, ambiguous: true };
+    }
+    // Both discriminators fired, so the column is not one single format.
+    if (dmy > 0 && mdy > 0) return { format: dayVsMonth, ambiguous: true };
+    if (dmy > 0) return { format: "dmy", ambiguous: false };
+    if (mdy > 0) return { format: "mdy", ambiguous: false };
+    // Every value fits both readings.
+    return { format: AMBIGUOUS_DEFAULT, ambiguous: true };
+}
+
+/**
+ * Reject calendar dates that do not exist. Date.UTC rolls them over silently
+ * (2026-02-31 becomes 2026-03-03), which would turn a day/month swap into a
+ * plausible-looking wrong date instead of an error — the same bug class
+ * isRealCalendarDate guards in src/import.ts. Round-trip the components to
+ * catch it.
+ */
+function isRealDate(year: number, month: number, day: number): boolean {
+    if (month < 1 || month > 12 || day < 1 || day > 31) return false;
+    const probe = new Date(Date.UTC(year, month - 1, day));
+    return (
+        probe.getUTCFullYear() === year &&
+        probe.getUTCMonth() === month - 1 &&
+        probe.getUTCDate() === day
+    );
+}
+
+/**
+ * Convert a raw date cell to `YYYY-MM-DD`, or null when it cannot be trusted.
+ * Zero-pads, because the server's BARE_DATE_RE demands exactly 4-2-2 digits.
+ */
+export function toIsoDate(
+    raw: string | undefined,
+    format: DateFormat,
+): string | null {
+    const p = splitDateCell(raw);
+    if (p === null) return null;
+
+    let year: number;
+    let month: number;
+    let day: number;
+    if (p.yearFirst) {
+        // A leading 4-digit year is ISO no matter what `format` says: nothing
+        // else is written year-first, so honour the cell over the column so one
+        // ISO row in a day-first file still imports.
+        year = p.year;
+        month = p.first;
+        day = p.second;
+    } else if (format === "iso") {
+        // Told ISO and handed 18/07/2026: we have no mandate to pick an order.
+        return null;
+    } else if (format === "dmy") {
+        year = p.year;
+        day = p.first;
+        month = p.second;
+    } else {
+        year = p.year;
+        month = p.first;
+        day = p.second;
+    }
+
+    if (!isRealDate(year, month, day)) return null;
+    return `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}
+
+// ---------- energy ----------
+
+export type EnergyUnit = "kcal" | "kj";
+
+/** Thermochemical kilojoules per kilocalorie — the constant every food label uses. */
+const KJ_PER_KCAL = 4.184;
+
+/**
+ * Above this median, values are read as kJ when the header says nothing.
+ *
+ * Be clear-eyed about this: it is a weak signal and no threshold is correct.
+ * Per-meal kcal run ~50-1200, per-meal kJ ~200-5000, and a per-DAY kcal total
+ * (~2000) sits squarely inside the per-meal kJ range — the ranges overlap, so
+ * any threshold mislabels some real file. 2500 is chosen to fail safe: it only
+ * claims kJ for values implausible as a single meal in kcal, and everything
+ * below falls through to the kcal default. The header is the real signal.
+ */
+const KJ_MEDIAN_THRESHOLD = 2500;
+
+const KJ_HEADER_RE = /(?:^|_)(kj|kjs|kilojoule|kilojoules|joule|joules)(?:_|$)/;
+const KCAL_HEADER_RE =
+    /(?:^|_)(kcal|kcals|cal|cals|calorie|calories|kilocalorie|kilocalories)(?:_|$)/;
+
+/**
+ * Decide whether an energy column is in kcal or kJ.
+ *
+ * The header is the primary signal because it is the one place the exporting app
+ * actually states its unit; the magnitude heuristic is only a last resort (see
+ * KJ_MEDIAN_THRESHOLD for why it is weak). Defaults to kcal when unsure, since
+ * that is what the server stores and what most exports use — mistaking kJ for
+ * kcal inflates every row 4.184x, so the UI should still show a preview of the
+ * converted numbers before importing.
+ *
+ * A header naming both ("Calories (kJ)") is read as kJ: the parenthesised unit
+ * is a deliberate statement, while "Calories" is often just the generic word for
+ * an energy column.
+ */
+export function sniffEnergyUnit(header: string, values: number[]): EnergyUnit {
+    const key = normalizeHeader(header);
+    if (KJ_HEADER_RE.test(key)) return "kj";
+    if (KCAL_HEADER_RE.test(key)) return "kcal";
+
+    const usable = values
+        .filter((v) => Number.isFinite(v) && v > 0)
+        .sort((a, b) => a - b);
+    if (usable.length === 0) return "kcal";
+    const median = usable[Math.floor(usable.length / 2)]!;
+    return median > KJ_MEDIAN_THRESHOLD ? "kj" : "kcal";
+}
+
+/**
+ * Convert an energy value to kcal.
+ *
+ * kJ values are rounded to a whole number: the calories column is an integer in
+ * the DB, so a fractional kcal is dropped downstream anyway, and rounding here
+ * keeps the widget's preview and control totals identical to what the server
+ * will store. kcal passes through untouched — including its decimals, which the
+ * server is free to round itself.
+ */
+export function toKcal(value: number, unit: EnergyUnit): number {
+    if (unit === "kcal") return value;
+    return Math.round(value / KJ_PER_KCAL);
+}

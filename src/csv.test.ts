@@ -1,6 +1,6 @@
 import { test, expect } from "bun:test";
 import type { MealInput } from "./supabase.js";
-import { runImport } from "./import.js";
+import { runImport, resolveLoggedAt } from "./import.js";
 import {
     parseCsv,
     decodeBytes,
@@ -14,6 +14,10 @@ import {
     isBlankCell,
     isTotalsRow,
     isDeletedRow,
+    sniffDateFormat,
+    toIsoDate,
+    sniffEnergyUnit,
+    toKcal,
 } from "./csv.js";
 
 // ---------- RFC 4180 core ----------
@@ -470,4 +474,213 @@ test("parses the server's own export format round-trip", () => {
     // The wall-clock form is exactly what resolveLoggedAt's local-time branch
     // accepts, so an export re-imports without offset math.
     expect(t.rows[0]![1]).toBe("2026-01-15 08:30:00");
+});
+
+// ---------- date format sniffing ----------
+
+test("sniffDateFormat detects day-first from a value whose day exceeds 12", () => {
+    // The export that motivated this: DD/MM/YYYY, which the server rejects on
+    // every row. One value above 12 in the first position is the whole proof.
+    for (const sample of [
+        ["05/06/2026", "18/07/2026", "01/01/2026"],
+        ["05.06.2026", "18.07.2026"], // German Excel locale
+        ["05-06-2026", "18-07-2026"], // dashes, but day-first not ISO
+    ]) {
+        expect(sniffDateFormat(sample)).toEqual({
+            format: "dmy",
+            ambiguous: false,
+        });
+    }
+});
+
+test("sniffDateFormat detects month-first and plain ISO", () => {
+    // Lose It! writes MM/DD/YYYY: the 15 in second position is the discriminator.
+    expect(sniffDateFormat(["01/15/2026", "01/16/2026"])).toEqual({
+        format: "mdy",
+        ambiguous: false,
+    });
+    // A 4-digit leading year is unambiguous, so no question to ask.
+    expect(sniffDateFormat(["2026-01-15", "2026-07-18"])).toEqual({
+        format: "iso",
+        ambiguous: false,
+    });
+    // Some exports write ISO with slashes.
+    expect(sniffDateFormat(["2026/01/15"])).toEqual({
+        format: "iso",
+        ambiguous: false,
+    });
+});
+
+test("sniffDateFormat flags samples it cannot decide so the UI must ask", () => {
+    // The case that must never be answered silently: every value reads fine both
+    // ways, so a guess files three weeks of meals on the wrong days unflagged.
+    expect(sniffDateFormat(["05/06/2026", "01/02/2026", "12/11/2026"])).toEqual(
+        {
+            format: "dmy",
+            ambiguous: true,
+        },
+    );
+    // Nothing usable at all.
+    expect(sniffDateFormat([])).toEqual({ format: "iso", ambiguous: true });
+    expect(sniffDateFormat(["n/a", "-", "Breakfast"])).toEqual({
+        format: "iso",
+        ambiguous: true,
+    });
+    // Both discriminators fire: the column is not one single format.
+    expect(sniffDateFormat(["18/07/2026", "01/15/2026"])).toEqual({
+        format: "dmy",
+        ambiguous: true,
+    });
+    // Mixed ISO and slash forms (hand-edited file, or a format change mid-file).
+    expect(sniffDateFormat(["2026-01-15", "2026-01-16", "18/07/2026"])).toEqual(
+        { format: "iso", ambiguous: true },
+    );
+});
+
+test("sniffDateFormat ignores blank and unparseable cells rather than skewing", () => {
+    // A "n/a" date or a stray note cell must not outvote the one row that
+    // actually disambiguates the column.
+    expect(
+        sniffDateFormat([
+            "",
+            "  ",
+            "n/a",
+            "null",
+            "yesterday",
+            "13/13/2026", // impossible in either reading
+            "26/07/18", // 2-digit year: could be any of three orders
+            "18/07/2026",
+        ]),
+    ).toEqual({ format: "dmy", ambiguous: false });
+});
+
+// ---------- date conversion ----------
+
+test("toIsoDate converts both component orders and zero-pads", () => {
+    // The server's BARE_DATE_RE demands exactly 4-2-2 digits, so "2026-7-8"
+    // would be rejected even though it is the right day.
+    expect(toIsoDate("18/07/2026", "dmy")).toBe("2026-07-18");
+    expect(toIsoDate("5/6/2026", "dmy")).toBe("2026-06-05");
+    expect(toIsoDate("01/15/2026", "mdy")).toBe("2026-01-15");
+    expect(toIsoDate("7.8.2026", "mdy")).toBe("2026-07-08");
+    expect(toIsoDate("2026-07-18", "iso")).toBe("2026-07-18");
+    // A year-first cell stays ISO even under a day-first column format: nothing
+    // is written year-first, so one ISO row in a DD/MM file still imports.
+    expect(toIsoDate("2026-07-18", "dmy")).toBe("2026-07-18");
+    // ...but the reverse is not guessed: told ISO, handed a slash date.
+    expect(toIsoDate("18/07/2026", "iso")).toBeNull();
+    // A trailing time is dropped rather than failing the row.
+    expect(toIsoDate("18/07/2026 08:30", "dmy")).toBe("2026-07-18");
+    expect(toIsoDate("15/01/2026 1:00 PM", "dmy")).toBe("2026-01-15");
+    // Blank-ish and junk cells.
+    for (const v of ["", "  ", "n/a", "-", undefined, "Breakfast", "07/2026"]) {
+        expect(toIsoDate(v, "dmy")).toBeNull();
+    }
+});
+
+test("toIsoDate rejects dates that do not exist instead of rolling over", () => {
+    // Date.UTC turns 2026-02-31 into 2026-03-03 silently, which would convert a
+    // day/month swap into a plausible wrong date rather than an error. The same
+    // bug class isRealCalendarDate guards server-side.
+    expect(toIsoDate("31/02/2026", "dmy")).toBeNull();
+    expect(toIsoDate("29/02/2026", "dmy")).toBeNull(); // 2026 is not a leap year
+    expect(toIsoDate("29/02/2024", "dmy")).toBe("2024-02-29"); // but 2024 is
+    expect(toIsoDate("31/13/2026", "dmy")).toBeNull(); // month 13
+    expect(toIsoDate("00/07/2026", "dmy")).toBeNull(); // day 0
+    expect(toIsoDate("2026-02-30", "iso")).toBeNull();
+    // Reading a real MM/DD date as day-first produces an impossible date, which
+    // is exactly the loud failure we want when the format was chosen wrongly.
+    expect(toIsoDate("01/15/2026", "dmy")).toBeNull();
+});
+
+test("toIsoDate rejects 2-digit years rather than guessing a century", () => {
+    // Deliberate: with all three components 1-2 digits, "26/07/18" could be
+    // day-first, month-first OR year-first and no sample of the column settles
+    // it, so a guess would file meals on an arbitrary day. A rejected row is a
+    // fixable error message; a mis-ordered one is invisible.
+    for (const v of ["18/07/26", "07/18/26", "26/07/18", "1.2.26"]) {
+        expect(toIsoDate(v, "dmy")).toBeNull();
+        expect(toIsoDate(v, "mdy")).toBeNull();
+        expect(toIsoDate(v, "iso")).toBeNull();
+    }
+});
+
+test("toIsoDate output is accepted by the server's resolveLoggedAt", () => {
+    // The contract that matters: normalising client-side is pointless unless the
+    // result lands in resolveLoggedAt's bare-date branch untouched.
+    const iso = toIsoDate("18/07/2026", "dmy");
+    expect(iso).toBe("2026-07-18");
+    const r = resolveLoggedAt(
+        iso!,
+        "Europe/Kyiv",
+        Date.parse("2026-07-25T12:00:00Z"),
+    );
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+        expect(r.value.fromBareDate).toBe(true);
+        // Kyiv is +03:00 in July, so local noon is 09:00Z.
+        expect(r.value.iso).toBe("2026-07-18T09:00:00.000Z");
+    }
+    // And the raw DD/MM/YYYY the widget started with is rejected server-side,
+    // which is why the conversion exists at all.
+    expect(resolveLoggedAt("18/07/2026", "Europe/Kyiv", Date.now()).ok).toBe(
+        false,
+    );
+});
+
+// ---------- energy units ----------
+
+test("sniffEnergyUnit reads the unit from the header first", () => {
+    // The header is the one place the exporting app states its unit. Mapping a
+    // kJ column to calories inflates every row 4.184x with no visible symptom.
+    for (const h of [
+        "Energy (kJ)",
+        "energy_kj",
+        "kJ",
+        "Kilojoules",
+        "Energy, kilojoule",
+    ]) {
+        expect(sniffEnergyUnit(h, [1500, 1600])).toBe("kj");
+    }
+    for (const h of [
+        "Energy (kcal)",
+        "Calories",
+        "calories_kcal",
+        "Cals",
+        "Calorie",
+    ]) {
+        expect(sniffEnergyUnit(h, [220, 198])).toBe("kcal");
+    }
+    // Both named: the parenthesised unit is a deliberate statement, the word
+    // "Calories" is often just the generic name for an energy column.
+    expect(sniffEnergyUnit("Calories (kJ)", [900])).toBe("kj");
+});
+
+test("sniffEnergyUnit falls back to magnitude only for an uninformative header", () => {
+    // Weak by design: per-meal kcal and per-meal kJ overlap, so this only claims
+    // kJ for values implausible as one meal in kcal, and defaults to kcal
+    // otherwise. A daily kcal total is the known blind spot.
+    expect(sniffEnergyUnit("Energy", [2900, 3400, 4200])).toBe("kj");
+    expect(sniffEnergyUnit("Amount", [220, 198, 640])).toBe("kcal");
+    // The other half of the caveat: a small-meal kJ column looks exactly like a
+    // kcal column, so it is missed and needs the header or the user.
+    expect(sniffEnergyUnit("Energy", [900, 1200, 1500])).toBe("kcal");
+    // No usable values at all -> the safe default.
+    expect(sniffEnergyUnit("Energy", [])).toBe("kcal");
+    expect(sniffEnergyUnit("Energy", [0, NaN])).toBe("kcal");
+    // The blind spot, stated out loud: a day's totals in kcal read as kcal only
+    // because they sit under the threshold, not because anything proved it.
+    expect(sniffEnergyUnit("Energy", [1900, 2100, 2300])).toBe("kcal");
+});
+
+test("toKcal divides kJ by 4.184 and rounds to a whole kcal", () => {
+    // The calories column is an integer in the DB, so rounding here keeps the
+    // widget's preview and control totals identical to what the server stores.
+    expect(toKcal(1000, "kj")).toBe(239); // 239.005...
+    expect(toKcal(920, "kj")).toBe(220); // 219.88 -> a Cronometer-sized meal
+    expect(toKcal(8368, "kj")).toBe(2000); // exactly 2000 kcal
+    expect(toKcal(0, "kj")).toBe(0);
+    // kcal passes through untouched, decimals included.
+    expect(toKcal(220, "kcal")).toBe(220);
+    expect(toKcal(219.88, "kcal")).toBe(219.88);
 });
