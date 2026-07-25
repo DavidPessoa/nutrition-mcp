@@ -541,6 +541,13 @@ interface DateCell {
     /** Second non-year component. */
     second: number;
     /**
+     * True when the year was written with two digits and had to be expanded, so
+     * the year's POSITION was assumed rather than observed. Day-vs-month can
+     * still be discriminated from such a cell, but the reading is less certain,
+     * which sniffDateFormat reflects by flagging it.
+     */
+    yearWasTwoDigit?: boolean;
+    /**
      * True when the cell led with a 4-digit year, i.e. it is ISO-shaped and its
      * component order is not in question at all.
      */
@@ -563,6 +570,19 @@ interface DateCell {
  * server dates a bare date at local noon and flags logged_at_from_bare_date),
  * whereas rejecting would fail every row of such a file.
  */
+/**
+ * Expand a two-digit year using the strftime/POSIX pivot: 00-68 map to
+ * 2000-2068 and 69-99 to 1969-1999.
+ *
+ * A fixed pivot rather than one derived from today's date, because this module
+ * is deliberately clock-free. It does not need to be clever: the import bounds
+ * dates to roughly the last twenty years, so a nonsense expansion surfaces as an
+ * out-of-range error on that row instead of a silently misfiled meal.
+ */
+function expandTwoDigitYear(yy: number): number {
+    return yy <= 68 ? 2000 + yy : 1900 + yy;
+}
+
 function splitDateCell(raw: string | undefined): DateCell | null {
     if (isBlankCell(raw)) return null;
     const text = raw!.trim().replace(TRAILING_TIME_RE, "").trim();
@@ -587,7 +607,18 @@ function splitDateCell(raw: string | undefined): DateCell | null {
             yearFirst: false,
         };
     }
-    return null; // no 4-digit year anywhere
+    // No 4-digit year anywhere, e.g. 18/07/26. The ORDER is still recoverable —
+    // that is what the caller's `format` states — so only the century is
+    // genuinely unknown, and that is a solvable problem. Assume the year is last,
+    // which is what "dmy" and "mdy" mean; a leading two-digit year (`26/07/18`
+    // as year-first) is a shape no surveyed export uses and one we do not offer.
+    return {
+        year: expandTwoDigitYear(Number(c)),
+        first: Number(a),
+        second: Number(b),
+        yearFirst: false,
+        yearWasTwoDigit: true,
+    };
 }
 
 /**
@@ -611,6 +642,8 @@ export function sniffDateFormat(values: string[]): {
     let mdy = 0;
     /** Parseable but readable both ways, e.g. 05/06/2026. */
     let either = 0;
+    /** Discriminating cells whose year was written in full. */
+    let fourDigitEvidence = 0;
 
     for (const v of values) {
         const p = splitDateCell(v);
@@ -621,12 +654,19 @@ export function sniffDateFormat(values: string[]): {
             continue; // not a real date in either reading
         } else if (p.first > 12) {
             dmy++;
+            if (!p.yearWasTwoDigit) fourDigitEvidence++;
         } else if (p.second > 12) {
             mdy++;
+            if (!p.yearWasTwoDigit) fourDigitEvidence++;
         } else {
             either++;
         }
     }
+
+    // Day-vs-month can be read off a two-digit-year cell, but the year's
+    // position had to be assumed to get there. When that is the ONLY evidence,
+    // report the reading and still ask the user to confirm it.
+    const twoDigitOnly = dmy + mdy > 0 && fourDigitEvidence === 0;
 
     const nonIso = dmy + mdy + either;
     // Nothing usable in the sample: we know literally nothing, so ask.
@@ -643,6 +683,8 @@ export function sniffDateFormat(values: string[]): {
     }
     // Both discriminators fired, so the column is not one single format.
     if (dmy > 0 && mdy > 0) return { format: dayVsMonth, ambiguous: true };
+    // Order is known, century is not: usable, but say so.
+    if (twoDigitOnly) return { format: dayVsMonth, ambiguous: true };
     if (dmy > 0) return { format: "dmy", ambiguous: false };
     if (mdy > 0) return { format: "mdy", ambiguous: false };
     // Every value fits both readings.

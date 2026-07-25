@@ -593,16 +593,43 @@ test("toIsoDate rejects dates that do not exist instead of rolling over", () => 
     expect(toIsoDate("01/15/2026", "dmy")).toBeNull();
 });
 
-test("toIsoDate rejects 2-digit years rather than guessing a century", () => {
-    // Deliberate: with all three components 1-2 digits, "26/07/18" could be
-    // day-first, month-first OR year-first and no sample of the column settles
-    // it, so a guess would file meals on an arbitrary day. A rejected row is a
-    // fixable error message; a mis-ordered one is invisible.
-    for (const v of ["18/07/26", "07/18/26", "26/07/18", "1.2.26"]) {
-        expect(toIsoDate(v, "dmy")).toBeNull();
-        expect(toIsoDate(v, "mdy")).toBeNull();
-        expect(toIsoDate(v, "iso")).toBeNull();
-    }
+test("toIsoDate expands a 2-digit year once the format states the order", () => {
+    // Sniffing cannot resolve "26/07/18" — it could be day-, month- or
+    // year-first. But once the user has CHOSEN day-first, the order is no longer
+    // in question and only the century is, which is solvable. Rejecting outright
+    // would hard-fail every row of such an export with no recourse in the UI.
+    expect(toIsoDate("18/07/26", "dmy")).toBe("2026-07-18");
+    expect(toIsoDate("07/18/26", "mdy")).toBe("2026-07-18");
+    expect(toIsoDate("1.2.26", "dmy")).toBe("2026-02-01");
+    expect(toIsoDate("1-2-26", "mdy")).toBe("2026-01-02");
+
+    // POSIX pivot, asserted at the boundary so a change is deliberate.
+    expect(toIsoDate("01/01/68", "dmy")).toBe("2068-01-01");
+    expect(toIsoDate("01/01/69", "dmy")).toBe("1969-01-01");
+
+    // Still no mandate to invent an order when told the file is ISO.
+    expect(toIsoDate("18/07/26", "iso")).toBeNull();
+    // And a date that does not exist is still refused, expanded year or not.
+    expect(toIsoDate("31/02/26", "dmy")).toBeNull();
+    expect(toIsoDate("29/02/27", "dmy")).toBeNull();
+});
+
+test("sniffDateFormat reads day-vs-month from 2-digit years but flags the guess", () => {
+    // 18 cannot be a month, so day-first is certain; the year's POSITION was
+    // assumed to get there, so the UI must still confirm.
+    expect(sniffDateFormat(["18/07/26", "19/07/26"])).toEqual({
+        format: "dmy",
+        ambiguous: true,
+    });
+    expect(sniffDateFormat(["07/18/26", "01/15/26"])).toEqual({
+        format: "mdy",
+        ambiguous: true,
+    });
+    // One full-year cell settles it, so the column stops being a guess.
+    expect(sniffDateFormat(["18/07/26", "19/07/2026"])).toEqual({
+        format: "dmy",
+        ambiguous: false,
+    });
 });
 
 test("toIsoDate output is accepted by the server's resolveLoggedAt", () => {
