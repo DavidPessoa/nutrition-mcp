@@ -227,6 +227,25 @@ test("normalizeHeader folds unit suffixes and the micro sign", () => {
     expect(normalizeHeader("B12 (μg)")).toBe(normalizeHeader("B12 (ug)"));
 });
 
+test("normalizeHeader folds accents so an accented header matches its alias", () => {
+    // The bug this guards: the a-z sweep deleted diacritics outright, so the
+    // German protein header reduced to "eiwei" and could never match the
+    // "eiweiss" alias the widget ships — the column just came through unmapped.
+    expect(normalizeHeader("Eiweiß")).toBe("eiweiss");
+    expect(normalizeHeader("Eiweiß")).toBe(normalizeHeader("Eiweiss"));
+    // Accents elsewhere reduced to stubs the same way ("Größe" -> "gr_e").
+    expect(normalizeHeader("Größe")).toBe("grosse");
+    expect(normalizeHeader("Protéines")).toBe("proteines");
+    expect(normalizeHeader("Calorías")).toBe("calorias");
+    // Folding must not disturb headers that were already plain ASCII.
+    expect(normalizeHeader("Fat (g)")).toBe("fat_g");
+    expect(normalizeHeader("Kohlenhydrate")).toBe("kohlenhydrate");
+    // An accented header now resolves through findColumn, which is the point.
+    expect(
+        findColumn(["Datum", "Eiweiß", "Fett"], ["protein", "eiweiss"]),
+    ).toBe(1);
+});
+
 test("duplicate header names are kept positional and warned about", () => {
     // Cronometer repeats "Amount". Keying data by name would silently drop one.
     const t = parseCsv("Food,Amount,Amount\nRice,58.00 g,1 cup");

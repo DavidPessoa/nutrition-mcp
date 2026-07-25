@@ -426,14 +426,24 @@ export function isBlankCell(raw: string | undefined): boolean {
  * "Fat" match without keying data by name.
  */
 export function normalizeHeader(header: string): string {
-    return header
-        .trim()
-        .toLowerCase()
-        .replace(/µ|μ/g, "u") // micro sign / Greek mu -> u (ug)
-        .replace(/\(([^)]*)\)/g, " $1 ")
-        .replace(/[^a-z0-9]+/g, " ")
-        .trim()
-        .replace(/\s+/g, "_");
+    return (
+        header
+            .trim()
+            .toLowerCase()
+            .replace(/µ|μ/g, "u") // micro sign / Greek mu -> u (ug)
+            // Fold accents to their base letter before the a-z sweep below, which
+            // would otherwise delete them and leave a stub: "Eiweiß" became "eiwei"
+            // and never matched its own "eiweiss" alias, "Größe" became "gr_e".
+            // NFD splits a letter from its combining mark so the mark can be
+            // dropped; ß has no decomposition, so it is spelled out separately.
+            .normalize("NFD")
+            .replace(/[\u0300-\u036f]/g, "")
+            .replace(/ß/g, "ss")
+            .replace(/\(([^)]*)\)/g, " $1 ")
+            .replace(/[^a-z0-9]+/g, " ")
+            .trim()
+            .replace(/\s+/g, "_")
+    );
 }
 
 /**
