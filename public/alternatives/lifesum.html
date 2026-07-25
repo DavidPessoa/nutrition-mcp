@@ -124,7 +124,7 @@
                         "name": "Does the AI read my export file when I import?",
                         "acceptedAnswer": {
                             "@type": "Answer",
-                            "text": "Not when the importer opens. It parses the CSV in your browser and shows you a preview of exactly what will be added; only the rows you confirm are sent, and they go as structured data rather than through the AI's reply. That means no row can be mistyped or invented in transit. Each row also carries a content fingerprint, so running the same file again reports those meals as already logged instead of duplicating them. If your client can't display in-chat panels, the fallback is to paste the export — the AI does read it on that path, so prefer the importer when you have the choice."
+                            "text": "Not when the importer opens. It parses the CSV in your browser and shows you what will be added before anything is written: how many meals, the calorie total, anything it had to flag, and the rows themselves — a long file lists the first of them plus a count of the rest rather than every line. Only the rows you confirm are sent, and they go as structured data rather than through the AI's reply, so no row can be mistyped or invented in transit. Each row also carries a content fingerprint, so running the same file again reports those meals as already logged instead of duplicating them. If your client can't display in-chat panels, the fallback is to paste the export — the AI does read it on that path, so prefer the importer when you have the choice."
                         }
                     },
                     {
@@ -463,10 +463,10 @@
                         <p class="section-sub">
                             Ask to import and an importer opens right in the
                             chat: pick your export, map the columns, preview
-                            exactly what will be added, then confirm. The file
-                            is read in your browser — the AI never sees the
-                            rows. In clients without in-chat panels, paste your
-                            export instead.
+                            what will be added, then confirm. The file is read
+                            in your browser — the AI never sees the rows. In
+                            clients without in-chat panels, paste your export
+                            instead.
                         </p>
                     </div>
                     <div class="prose">
@@ -480,7 +480,7 @@
                             recognised by name the way MyFitnessPal's,
                             Cronometer's, Lose It!'s, and MacroFactor's are, so
                             that mapping is a one-time manual step — after it
-                            you preview exactly what will be added and confirm.
+                            you preview what will be added and confirm.
                         </p>
                         <p>
                             Nothing hides behind an assumption. The mapper shows
@@ -662,18 +662,22 @@
                             </summary>
                             <p>
                                 Not when the importer opens. It parses the CSV
-                                in your browser and shows you a preview of
-                                exactly what will be added; only the rows you
-                                confirm are sent, and they go as structured data
-                                rather than through the AI's reply. That means
-                                no row can be mistyped or invented in transit.
-                                Each row also carries a content fingerprint, so
-                                running the same file again reports those meals
-                                as already logged instead of duplicating them.
-                                If your client can't display in-chat panels, the
-                                fallback is to paste the export — the AI does
-                                read it on that path, so prefer the importer
-                                when you have the choice.
+                                in your browser and shows you what will be added
+                                before anything is written: how many meals, the
+                                calorie total, anything it had to flag, and the
+                                rows themselves — a long file lists the first of
+                                them plus a count of the rest rather than every
+                                line. Only the rows you confirm are sent, and
+                                they go as structured data rather than through
+                                the AI's reply, so no row can be mistyped or
+                                invented in transit. Each row also carries a
+                                content fingerprint, so running the same file
+                                again reports those meals as already logged
+                                instead of duplicating them. If your client
+                                can't display in-chat panels, the fallback is to
+                                paste the export — the AI does read it on that
+                                path, so prefer the importer when you have the
+                                choice.
                             </p>
                         </details>
                         <details>

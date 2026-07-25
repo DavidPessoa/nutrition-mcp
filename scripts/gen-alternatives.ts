@@ -94,13 +94,13 @@ const APPS: App[] = [
         importSection: {
             title: "Bring the diary with you",
             body: [
-                "Years of logged history is the real reason people stay, and you don't have to abandon it. Ask to import and an importer panel opens in the chat: you choose the CSV MyFitnessPal exports, it's parsed in your browser, the columns it recognises are matched for you, and you see exactly what will be added before anything is written. The rows never pass through the AI, so there's nothing for it to mistype.",
+                "Years of logged history is the real reason people stay, and you don't have to abandon it. Ask to import and an importer panel opens in the chat: you choose the CSV MyFitnessPal exports, it's parsed in your browser, the columns it recognises are matched for you, and you see what will be added before anything is written. The rows never pass through the AI, so there's nothing for it to mistype.",
                 "A MyFitnessPal export is handled by name, quirks included. The file arrives with a byte-order mark that would otherwise corrupt the first column heading; its notes can contain line breaks inside a quoted cell, which naive line-splitting would shred along with every row after it; and each day's block ends with a totals row that must not become a meal. The one that matters most: MyFitnessPal exports one aggregated row per meal per day and no food-name column at all, so rather than rejecting those rows for having no description, the importer recognises the shape and labels them by their slot — they arrive as “Breakfast (imported from MyFitnessPal)”.",
                 "Dates are confirmed, not assumed. A column of 05/06/2024 is genuinely undecidable — May or June — so the importer shows you its reading next to a real row from your own file and lets you correct it before writing. And every row carries a content fingerprint, so re-running the same file reports those meals as already logged instead of duplicating them. Import a partial export, spot a column you mapped wrongly, and simply do it again.",
             ],
         },
         importFaq:
-            "Yes. Ask to import your history and an importer opens in the chat: you pick the CSV MyFitnessPal exports, it's parsed in your browser rather than read by the AI, you map or confirm the columns, preview exactly what will be added, and confirm. MyFitnessPal's export is recognised by name — including its byte-order mark, its trailing totals rows, and the fact that it writes one aggregated row per meal per day with no food name, which get labelled by meal slot. Re-importing the same file never creates duplicates.",
+            "Yes. Ask to import your history and an importer opens in the chat: you pick the CSV MyFitnessPal exports, it's parsed in your browser rather than read by the AI, you map or confirm the columns, preview what will be added, and confirm. MyFitnessPal's export is recognised by name — including its byte-order mark, its trailing totals rows, and the fact that it writes one aggregated row per meal per day with no food name, which get labelled by meal slot. Re-importing the same file never creates duplicates.",
         extraFaqs: [
             {
                 q: "Can Nutrition MCP scan barcodes like MyFitnessPal Premium?",
@@ -143,7 +143,7 @@ const APPS: App[] = [
             ],
         },
         importFaq:
-            "Yes. Ask to import and an importer opens in the chat: you choose your Cronometer CSV, it's parsed in your browser rather than read by the AI, and you preview exactly what will be added before confirming. Cronometer's export is recognised by name — its separate date and time columns are both read, and its repeated “Amount” heading can't collide because columns are keyed by position. The date and time, food name, meal, calories, protein, carbs, fat, and notes come across; micronutrients and portion amounts don't. Re-importing the same file never creates duplicates.",
+            "Yes. Ask to import and an importer opens in the chat: you choose your Cronometer CSV, it's parsed in your browser rather than read by the AI, and you preview what will be added before confirming. Cronometer's export is recognised by name — its separate date and time columns are both read, and its repeated “Amount” heading can't collide because columns are keyed by position. The date and time, food name, meal, calories, protein, carbs, fat, and notes come across; micronutrients and portion amounts don't. Re-importing the same file never creates duplicates.",
         extraFaqs: [
             {
                 q: "Does Nutrition MCP track micronutrients like Cronometer?",
@@ -180,7 +180,7 @@ const APPS: App[] = [
         importSection: {
             title: "Your logged days come too",
             body: [
-                "Switching doesn't mean starting from zero. Ask to import and an importer opens in the chat: you pick the CSV Lose It! exports, it's parsed in your browser, the columns it recognises map themselves, and you confirm a preview of exactly what will be added. It's a file picker and a preview, not a dictation exercise — on that path the AI never reads or retypes your rows.",
+                "Switching doesn't mean starting from zero. Ask to import and an importer opens in the chat: you pick the CSV Lose It! exports, it's parsed in your browser, the columns it recognises map themselves, and you confirm a preview of what will be added. It's a file picker and a preview, not a dictation exercise — on that path the AI never reads or retypes your rows.",
                 "Two Lose It! specifics are handled deliberately. Its export carries a deleted flag, and rows marked deleted are skipped rather than imported: bringing them back would resurrect food you removed on purpose, and no total on the preview would reveal it. It also writes the literal string “n/a” for cells with no value, which is read as empty rather than as a zero — so a macro you never tracked stays absent instead of being recorded as a real 0 g and dragging your averages down.",
                 "Run it as often as you like. Each row carries a content fingerprint, so a repeat import of the same file reports the meals as already logged and adds nothing. And if the dates in your export could be read two ways — 05/06 being May or June — the importer shows its reading against a row from your own file and asks you to confirm it before writing.",
             ],
@@ -268,7 +268,7 @@ const APPS: App[] = [
         importSection: {
             title: "Bring the log, map the columns",
             body: [
-                "Your Yazio history can come across, though you'll do a little of the work. Ask to import and an importer panel opens in the chat: you pick your CSV export, it's parsed in your browser, and you point its columns at date, food, meal, calories, protein, carbs, and fat yourself. Four apps' exports — MyFitnessPal, Cronometer, Lose It!, and MacroFactor — are recognised by their column names; Yazio isn't one of them, so expect to set that mapping once. Everything after it is the same: a preview of exactly what will be added, then your confirmation.",
+                "Your Yazio history can come across, though you'll do a little of the work. Ask to import and an importer panel opens in the chat: you pick your CSV export, it's parsed in your browser, and you point its columns at date, food, meal, calories, protein, carbs, and fat yourself. Four apps' exports — MyFitnessPal, Cronometer, Lose It!, and MacroFactor — are recognised by their column names; Yazio isn't one of them, so expect to set that mapping once. Everything after it is the same: a preview of what will be added, then your confirmation.",
                 "The European quirks that defeat most importers are handled. A semicolon-delimited file whose numbers use comma decimals — the shape Excel produces in a German or Austrian locale — is read correctly, instead of the delimiter being mistaken for a decimal point or every macro being scaled by a thousand. Quoted fields, line breaks inside a cell, blank-ish values, and stray totals rows are handled too, and the AI never reads the file, so no number can be mistyped in transit.",
                 "Dates and energy are confirmed rather than guessed. A DD/MM/YYYY column is read day-first, and where the values genuinely can't settle it — 05/06 being either May or June — the importer shows its reading beside a row from your own file so you can correct it. If the energy column is in kilojoules it's converted to kilocalories, with the unit shown as a control next to a worked example. Re-importing the same file adds nothing: each row carries a content fingerprint, so repeats come back as already logged.",
             ],
@@ -311,7 +311,7 @@ const APPS: App[] = [
         importSection: {
             title: "Nothing to retype",
             body: [
-                "Moving trackers means moving your history, and you don't have to retype a line of it. Ask to import and an importer panel opens in the chat: you pick your Lifesum CSV export, it's parsed in your browser, and you point its columns at date, food, meal, calories, protein, carbs, and fat. Lifesum's headings aren't recognised by name the way MyFitnessPal's, Cronometer's, Lose It!'s, and MacroFactor's are, so that mapping is a one-time manual step — after it you preview exactly what will be added and confirm.",
+                "Moving trackers means moving your history, and you don't have to retype a line of it. Ask to import and an importer panel opens in the chat: you pick your Lifesum CSV export, it's parsed in your browser, and you point its columns at date, food, meal, calories, protein, carbs, and fat. Lifesum's headings aren't recognised by name the way MyFitnessPal's, Cronometer's, Lose It!'s, and MacroFactor's are, so that mapping is a one-time manual step — after it you preview what will be added and confirm.",
                 "Nothing hides behind an assumption. The mapper shows you your own file — its real headings, real cells, and a running count of the rows that will be created — so a column aimed at the wrong field is visible before anything is written rather than discovered afterwards. Quoted fields, line breaks inside a cell, blank-ish values, and totals rows are all handled, and because the file is read in your browser the AI never sees a row it could mistype.",
                 "European exports are covered: a semicolon-delimited file with comma decimals reads correctly, DD/MM/YYYY dates convert once you've confirmed the order, and kilojoules become kilocalories with the unit shown next to a worked example from your own first row. Run the import twice and nothing doubles — each row carries a content fingerprint, so repeats are reported as already logged.",
             ],
@@ -675,7 +675,7 @@ function faqsFor(app: App): { q: string; a: string }[] {
         },
         {
             q: `Does the AI read my export file when I import?`,
-            a: `Not when the importer opens. It parses the CSV in your browser and shows you a preview of exactly what will be added; only the rows you confirm are sent, and they go as structured data rather than through the AI's reply. That means no row can be mistyped or invented in transit. Each row also carries a content fingerprint, so running the same file again reports those meals as already logged instead of duplicating them. If your client can't display in-chat panels, the fallback is to paste the export — the AI does read it on that path, so prefer the importer when you have the choice.`,
+            a: `Not when the importer opens. It parses the CSV in your browser and shows you what will be added before anything is written: how many meals, the calorie total, anything it had to flag, and the rows themselves — a long file lists the first of them plus a count of the rest rather than every line. Only the rows you confirm are sent, and they go as structured data rather than through the AI's reply, so no row can be mistyped or invented in transit. Each row also carries a content fingerprint, so running the same file again reports those meals as already logged instead of duplicating them. If your client can't display in-chat panels, the fallback is to paste the export — the AI does read it on that path, so prefer the importer when you have the choice.`,
         },
         {
             q: `Is Nutrition MCP free?`,
@@ -928,7 +928,7 @@ ${app.migrate.body
                         <p class="section-sub">
                             Ask to import and an importer opens right in the
                             chat: pick your export, map the columns, preview
-                            exactly what will be added, then confirm. The file
+                            what will be added, then confirm. The file
                             is read in your browser — the AI never sees the
                             rows. In clients without in-chat panels, paste your
                             export instead.
@@ -1153,7 +1153,7 @@ ${cards}
                             The usual reason people stay put is the years already
                             logged. Ask to import and an importer opens right in
                             the chat: pick your export, map the columns, preview
-                            exactly what will be added, then confirm — or paste
+                            what will be added, then confirm — or paste
                             the export if your client has no in-chat panels.
                         </p>
                     </div>
