@@ -85,15 +85,11 @@ export function dowInTz(instant: Date | string, tz: string): number {
 }
 
 /**
- * UTC instant corresponding to 00:00:00 local on `date` in `tz`.
- * Works correctly across DST transitions.
+ * Wall-clock fields of an absolute instant in `tz`, re-encoded as a UTC
+ * timestamp. This is the primitive the offset math is built on: the zone's
+ * offset at instant `t` is `wallAsUtc(t) - t`.
  */
-export function zonedDayStartUtc(date: string, tz: string): Date {
-    const [y, m, d] = date.split("-").map(Number);
-    if (y == null || m == null || d == null) {
-        throw new Error(`Invalid date string: ${date}`);
-    }
-    const utcGuess = Date.UTC(y, m - 1, d, 0, 0, 0);
+function wallAsUtc(instantMs: number, tz: string): number {
     const parts = new Intl.DateTimeFormat("en-US", {
         timeZone: tz,
         hour12: false,
@@ -103,29 +99,104 @@ export function zonedDayStartUtc(date: string, tz: string): Date {
         hour: "2-digit",
         minute: "2-digit",
         second: "2-digit",
-    }).formatToParts(new Date(utcGuess));
-    const getPart = (t: string) =>
-        Number(parts.find((p) => p.type === t)!.value);
-    let lh = getPart("hour");
-    if (lh === 24) lh = 0;
-    const asUtc = Date.UTC(
-        getPart("year"),
-        getPart("month") - 1,
-        getPart("day"),
-        lh,
-        getPart("minute"),
-        getPart("second"),
+    }).formatToParts(new Date(instantMs));
+    const get = (t: string) => Number(parts.find((p) => p.type === t)!.value);
+    const hour = get("hour") === 24 ? 0 : get("hour");
+    return Date.UTC(
+        get("year"),
+        get("month") - 1,
+        get("day"),
+        hour,
+        get("minute"),
+        get("second"),
     );
-    const offsetMs = asUtc - utcGuess;
-    return new Date(utcGuess - offsetMs);
+}
+
+/**
+ * UTC instant for a local wall-clock time in `tz`.
+ *
+ * Two-candidate resolution. A single offset probe is not enough: probing at the
+ * wall time re-read as UTC samples the offset at the wrong instant whenever a
+ * transition falls between that probe and the real answer, which is the normal
+ * case for zones that switch at or near local midnight (Australia/Lord_Howe,
+ * Asia/Gaza, Africa/Cairo, Asia/Tehran, Pacific/Fiji). Iterating naively
+ * instead breaks zones that spring forward exactly at midnight
+ * (America/Havana), so we generate both candidates and keep the ones whose
+ * wall clock actually round-trips.
+ *
+ * `gap` marks a wall time that does not exist (skipped by spring-forward); the
+ * later candidate is returned, i.e. the clock jumps forward as it does in
+ * reality. `ambiguous` marks a wall time that occurs twice (fall-back); the
+ * earlier instant is returned. Note only gaps are detected reliably —
+ * detecting every fold would need a wider search, and a fold is a <=1h
+ * difference that never changes the calendar day, so it does not affect
+ * day bucketing.
+ */
+export function zonedWallClockToUtc(
+    y: number,
+    mo: number,
+    d: number,
+    hh: number,
+    mi: number,
+    se: number,
+    tz: string,
+): { instant: Date; gap: boolean; ambiguous: boolean } {
+    const want = Date.UTC(y, mo - 1, d, hh, mi, se);
+    const c1 = want - (wallAsUtc(want, tz) - want);
+    const c2 = want - (wallAsUtc(c1, tz) - c1);
+    const candidates = c1 === c2 ? [c1] : [c1, c2];
+    const valid = candidates.filter((c) => wallAsUtc(c, tz) === want);
+
+    if (valid.length === 0) {
+        // Nonexistent local time: take the later candidate so the result sits
+        // after the jump rather than before it.
+        return {
+            instant: new Date(Math.max(c1, c2)),
+            gap: true,
+            ambiguous: false,
+        };
+    }
+    if (valid.length > 1) {
+        return {
+            instant: new Date(Math.min(...valid)),
+            gap: false,
+            ambiguous: true,
+        };
+    }
+    return { instant: new Date(valid[0]!), gap: false, ambiguous: false };
+}
+
+/** Parse a YYYY-MM-DD string into numeric parts, throwing on junk. */
+function splitDate(date: string): [number, number, number] {
+    const [y, m, d] = date.split("-").map(Number);
+    if (y == null || m == null || d == null || Number.isNaN(y + m + d)) {
+        throw new Error(`Invalid date string: ${date}`);
+    }
+    return [y, m, d];
+}
+
+/**
+ * UTC instant corresponding to 00:00:00 local on `date` in `tz`.
+ * Works correctly across DST transitions, including midnight ones.
+ */
+export function zonedDayStartUtc(date: string, tz: string): Date {
+    const [y, m, d] = splitDate(date);
+    return zonedWallClockToUtc(y, m, d, 0, 0, 0, tz).instant;
+}
+
+/**
+ * UTC instant corresponding to `hour`:00:00 local on `date` in `tz`. Used to
+ * anchor a date-only value at a specific local hour; note that day-start plus
+ * N hours is NOT the same thing across a DST transition.
+ */
+export function zonedHourUtc(date: string, tz: string, hour: number): Date {
+    const [y, m, d] = splitDate(date);
+    return zonedWallClockToUtc(y, m, d, hour, 0, 0, tz).instant;
 }
 
 /** Exclusive upper bound: midnight of the day AFTER `date` in `tz`, as UTC. */
 export function zonedNextDayStartUtc(date: string, tz: string): Date {
-    const [y, m, d] = date.split("-").map(Number);
-    if (y == null || m == null || d == null) {
-        throw new Error(`Invalid date string: ${date}`);
-    }
+    const [y, m, d] = splitDate(date);
     const next = new Date(Date.UTC(y, m - 1, d));
     next.setUTCDate(next.getUTCDate() + 1);
     const nextStr = next.toISOString().slice(0, 10);
