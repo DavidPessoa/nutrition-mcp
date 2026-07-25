@@ -140,6 +140,17 @@ repaint a whole series with it (see the ring convention below).
 | `--fat`      | `#f43f7e` | `#fb7199` |
 | `--water`    | `#0ea5e9` | `#38bdf8` |
 | `--over`     | `#d0452b` | `#ff6b52` |
+| `--warn`     | `#b26a00` | `#e0a030` |
+
+Two additions the block above elides for brevity, both present in all four theme
+blocks in `tokens.css`:
+
+- **`--warn`** — the amber counterpart to `--over`, for "worth a look" rather than
+  "wrong" (a row logged at local noon because the source had no time). Like
+  `--over` it is a status flag, never a series colour.
+- **`color-scheme: light` / `dark`** — not a custom property, but it belongs with
+  the theme because native controls (`select`, `input`, scrollbars) ignore every
+  token without it and render light OS chrome inside a dark widget.
 
 ## 2. Base reset, typography, layout
 
@@ -211,7 +222,9 @@ header.head {
 ## 3. Surface recipe
 
 Every card — stat tile, chart panel, empty state — is the same surface: `--panel`
-fill, `1px --panel-border`, `--radius`, `--shadow`. Reuse this on any new card.
+fill, `1px --panel-border`, `--radius`, `--shadow`. **`.card` now ships in
+`shared/base.css`**, so use the class rather than re-declaring the four
+properties; the older components predate it and still inline their own copy.
 
 ```css
 .card {
@@ -556,10 +569,79 @@ and slicing client-side over re-calling the tool — instant, no host round-trip
 }
 ```
 
+## 8. Components: form controls (`shared/form.css`)
+
+Everything an interactive widget needs, all token-only. Before the import widget
+the _only_ control in the design language was `.seg-btn`, so anything here is new
+ground — reuse these rather than hand-rolling a control in a template.
+
+| class                                            | use                                                         |
+| ------------------------------------------------ | ----------------------------------------------------------- |
+| `.field` / `.field-row` / `.label`/`.hint`       | vertical field stack, inline row, caption text              |
+| `.input`, `.select`                              | text input and dropdown; add `.invalid` for the error state |
+| `.field-error`                                   | the message under an invalid control                        |
+| `.btn`, `.btn-primary`, `.btn-danger`, `.btn-sm` | buttons; `.actions` wraps a row of them                     |
+| `.drop` + `.drop-input`                          | file drop zone; add `.over` while dragging                  |
+| `.notice`, `-ok` / `-warn` / `-error`            | inline banner on the card surface                           |
+| `.bar > span`, `.steps` / `.step`                | progress bar and step indicator                             |
+
+Three things that are easy to get wrong:
+
+- **`color-scheme` is declared in `tokens.css`, not here.** Without it the browser
+  paints native OS chrome that ignores every token: a `<select>` in a dark widget
+  comes out light, and so does its dropdown list. It is set in all four theme
+  blocks alongside the custom properties.
+- **`.btn-primary` uses `color: var(--bg)`** on the accent fill, same trick as
+  `.seg-btn.active` — off-white on dark-green in light, black on light-green in
+  dark, no theme-specific override.
+- **The select chevron is an inlined `data:` SVG** with a literal stroke colour.
+  The sandbox CSP allows `img-src data:` only, and `currentColor` does not work
+  inside `url()`, so a mid-grey that reads on both themes is used instead.
+
+`:focus-visible` is styled once for every control (accent border plus a
+`color-mix` ring) — keyboard-only, so it never shows on mouse clicks.
+
+## 9. Component: preview table (`shared/table.css`)
+
+For showing rows the user must confirm before a write. `.tscroll` wraps `.tbl`;
+`thead th` is sticky so column identity survives scrolling, which matters when
+the table _is_ the confirmation step. `.pill` + `-ok`/`-warn`/`-bad`/`-dim` marks
+per-row status; `.num` right-aligns numerics, `.wide` is the one column allowed
+to wrap, and `.tmore` is the truncation footer.
+
+**`.tscroll` sets `min-width: 0`, and that is required, not cosmetic.** A grid or
+flex item defaults to `min-width: auto`, so a `white-space: nowrap` table's
+min-content width otherwise pushes its column wide and drags every _sibling_ card
+with it — the page then scrolls horizontally instead of the table scrolling
+inside itself. If a parent is a grid, also give it `grid-template-columns:
+minmax(0, 1fr)` rather than relying on the implicit auto column. This was a real
+bug caught by the component gallery.
+
+`.tscroll` also caps its own height (`max-height`) so the widget's reported height
+stays bounded: a host may impose `hostContext.containerDimensions`, and an
+unbounded table is simply clipped rather than scrolled.
+
 ## Verifying a new widget
 
-Use the local host-harness (see `mcp-apps-widgets` memory) to drive the widget
-without a real client, and screenshot at light/dark and at a narrow (~400px) width
+Run `bun run harness` and open <http://localhost:8787>. It mimics a strict host
+(validates the `ui/initialize` shape, withholds the tool result until
+`ui/notifications/initialized`, starts the iframe at 130px, applies the sandbox
+CSP) and additionally answers app-initiated `tools/call`. Query flags reproduce
+host behaviour: `?serverTools=0`, `?tools=0` (never answer), `?delay=3000` (stand
+in for a per-call approval prompt), `?maxHeight=600`, `?fail=1`.
+
+`?widget=component-gallery` renders every shared component on one page — use it
+for the light/dark and narrow-width passes, and extend it when you add a
+component.
+
+**Check that the page itself never scrolls horizontally.** In the harness:
+
+```js
+const de = document.documentElement;
+de.scrollWidth > de.clientWidth; // must be false
+```
+
+Then screenshot at light/dark and at a narrow (~400px) width
 before shipping — the mobile check is what catches shrinking SVG text and cramped
 grids. For interactive widgets, also exercise each control and confirm it
 re-renders.

@@ -19,6 +19,38 @@
 const SRC_DIR = "./public/widgets/src";
 const INCLUDE_RE = /\/\*@include\s+([^\s@]+)\s*@\*\//g;
 
+// Second marker: inline a TypeScript module from src/ as plain JS.
+//
+//     /*@inlinets src/csv.ts@*/
+//
+// Exists so a widget can use tested server-side code instead of a hand-copied
+// twin. The CSV parser is the case in point: it faces arbitrary user files, so it
+// belongs in src/ with fixture tests, but the widget needs it inside the iframe
+// where nothing can be imported. Transpiling the real module keeps the two from
+// drifting. Only works for modules with NO runtime imports (csv.ts has none) —
+// there is no bundler here, just type-stripping.
+const INLINE_TS_RE = /\/\*@inlinets\s+([^\s@]+)\s*@\*\//g;
+
+async function inlineTs(relPath: string): Promise<string> {
+    const file = Bun.file(`./${relPath}`);
+    if (!(await file.exists())) {
+        throw new Error(`@inlinets source not found: ${relPath}`);
+    }
+    const ts = await file.text();
+    if (/^\s*import\s/m.test(ts)) {
+        throw new Error(
+            `@inlinets ${relPath} has runtime imports; only self-contained modules can be inlined`,
+        );
+    }
+    const js = new Bun.Transpiler({ loader: "ts" }).transformSync(ts);
+    // Strip module syntax: the result is spliced into a plain <script>, where a
+    // bare `export` is a syntax error.
+    return js
+        .replace(/^export\s+default\s+/gm, "")
+        .replace(/^export\s+/gm, "")
+        .replace(/^\s*export\s*\{[^}]*\};?\s*$/gm, "");
+}
+
 // ui:// resource name → template file under src/templates/.
 export const WIDGET_TEMPLATES: Record<string, string> = {
     "nutrition-summary": "nutrition-summary.html",
@@ -26,6 +58,11 @@ export const WIDGET_TEMPLATES: Record<string, string> = {
     "meal-logged": "meal-logged.html",
     trends: "trends.html",
     "weight-trends": "weight-trends.html",
+    "import-meals": "import-meals.html",
+    // Dev-only visual reference for the shared components. Listed here so it is
+    // assembled and covered by widgets.test.ts, but NO ui:// resource and no
+    // tool reference it, so no client can reach it. View via `bun run harness`.
+    "component-gallery": "component-gallery.html",
 };
 
 const cache = new Map<string, string>();
@@ -63,9 +100,23 @@ async function resolveIncludes(
 
 async function assemble(templateFile: string): Promise<string> {
     const template = await readSrc(`templates/${templateFile}`);
-    return resolveIncludes(template, templateFile, [
+    const withPartials = await resolveIncludes(template, templateFile, [
         `templates/${templateFile}`,
     ]);
+
+    // @inlinets runs after @include so a shared partial can pull one in too.
+    const tsMatches = [...withPartials.matchAll(INLINE_TS_RE)];
+    if (tsMatches.length === 0) return withPartials;
+    const compiled = new Map<string, string>();
+    for (const m of tsMatches) {
+        const rel = m[1];
+        if (!rel || compiled.has(rel)) continue;
+        compiled.set(rel, await inlineTs(rel));
+    }
+    return withPartials.replace(
+        INLINE_TS_RE,
+        (_full, rel) => compiled.get(rel) ?? "",
+    );
 }
 
 // Return the fully-inlined HTML for a widget, assembling+caching on first use.

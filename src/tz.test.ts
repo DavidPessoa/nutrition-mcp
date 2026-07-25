@@ -7,6 +7,8 @@ import {
     dowInTz,
     zonedDayStartUtc,
     zonedNextDayStartUtc,
+    zonedHourUtc,
+    zonedWallClockToUtc,
     shiftLocalDate,
     validateLoggedAt,
 } from "./tz.js";
@@ -53,6 +55,113 @@ test("zonedDayStartUtc handles DST transitions and fractional offsets", () => {
     expect(zonedDayStartUtc("2024-03-01", "Asia/Kathmandu").toISOString()).toBe(
         "2024-02-29T18:15:00.000Z",
     );
+});
+
+test("zonedDayStartUtc handles zones whose DST transition is at local midnight", () => {
+    // Regression: a single offset probe (taken at midnight UTC) samples the
+    // offset AFTER the transition while local midnight is still before it, so
+    // the day window started up to an hour early and late-night meals were
+    // counted in the wrong day.
+    expect(
+        zonedDayStartUtc("2025-10-05", "Australia/Lord_Howe").toISOString(),
+    ).toBe("2025-10-04T13:30:00.000Z"); // 30-minute DST shift
+    expect(zonedDayStartUtc("2025-04-12", "Asia/Gaza").toISOString()).toBe(
+        "2025-04-11T22:00:00.000Z",
+    );
+    expect(zonedDayStartUtc("2020-12-20", "Pacific/Fiji").toISOString()).toBe(
+        "2020-12-19T12:00:00.000Z",
+    );
+});
+
+test("zonedWallClockToUtc flags nonexistent local times and jumps forward", () => {
+    // These zones spring forward AT midnight, so 00:00 local never occurs;
+    // the resolved instant is 01:00 local, matching what clocks actually do.
+    const cairo = zonedWallClockToUtc(2023, 4, 28, 0, 0, 0, "Africa/Cairo");
+    expect(cairo.gap).toBe(true);
+    expect(cairo.instant.toISOString()).toBe("2023-04-27T22:00:00.000Z");
+
+    const tehran = zonedWallClockToUtc(2022, 3, 22, 0, 0, 0, "Asia/Tehran");
+    expect(tehran.gap).toBe(true);
+    expect(tehran.instant.toISOString()).toBe("2022-03-21T20:30:00.000Z");
+
+    // Naively iterating the offset probe instead of keeping both candidates
+    // regresses this one to 2024-03-10T04:00Z (= 23:00 the previous day).
+    const havana = zonedWallClockToUtc(2024, 3, 10, 0, 0, 0, "America/Havana");
+    expect(havana.gap).toBe(true);
+    expect(havana.instant.toISOString()).toBe("2024-03-10T05:00:00.000Z");
+
+    // An ordinary existing wall time is neither a gap nor ambiguous.
+    const plain = zonedWallClockToUtc(
+        2024,
+        3,
+        1,
+        9,
+        30,
+        0,
+        "America/Los_Angeles",
+    );
+    expect(plain.gap).toBe(false);
+    expect(plain.ambiguous).toBe(false);
+    expect(plain.instant.toISOString()).toBe("2024-03-01T17:30:00.000Z");
+});
+
+test("zonedHourUtc anchors a date at a local hour, unlike day-start plus N hours", () => {
+    // Spring-forward: day start + 12h is 13:00 local, not noon.
+    const dayStart = zonedDayStartUtc("2024-03-10", "America/Los_Angeles");
+    const plus12 = new Date(dayStart.getTime() + 12 * 3600 * 1000);
+    expect(hourInTz(plus12, "America/Los_Angeles")).toBe(13);
+    expect(
+        hourInTz(
+            zonedHourUtc("2024-03-10", "America/Los_Angeles", 12),
+            "America/Los_Angeles",
+        ),
+    ).toBe(12);
+    // Fall-back: day start + 12h is 11:00 local.
+    const fbStart = zonedDayStartUtc("2024-11-03", "America/Los_Angeles");
+    expect(
+        hourInTz(
+            new Date(fbStart.getTime() + 12 * 3600 * 1000),
+            "America/Los_Angeles",
+        ),
+    ).toBe(11);
+    expect(
+        hourInTz(
+            zonedHourUtc("2024-11-03", "America/Los_Angeles", 12),
+            "America/Los_Angeles",
+        ),
+    ).toBe(12);
+    // Fractional offsets still land exactly on the hour.
+    expect(
+        hourInTz(
+            zonedHourUtc("2026-01-15", "Asia/Kathmandu", 12),
+            "Asia/Kathmandu",
+        ),
+    ).toBe(12);
+});
+
+test("local noon round-trips to the same calendar date in every IANA zone", () => {
+    // The invariant the bulk importer depends on: a date-only value anchored at
+    // local noon must read back as that same date via dateInTz.
+    const zones = Intl.supportedValuesOf("timeZone");
+    const dates = [
+        "2024-03-10",
+        "2024-11-03",
+        "2025-10-05",
+        "2025-04-12",
+        "2026-03-29",
+        "2026-10-25",
+        "2022-03-22",
+        "2023-04-28",
+        "2020-12-20",
+    ];
+    const failures: string[] = [];
+    for (const tz of zones) {
+        for (const date of dates) {
+            const back = dateInTz(zonedHourUtc(date, tz, 12), tz);
+            if (back !== date) failures.push(`${tz} ${date} -> ${back}`);
+        }
+    }
+    expect(failures).toEqual([]);
 });
 
 test("zonedNextDayStartUtc is the exclusive upper bound", () => {

@@ -27,6 +27,8 @@ import {
     getWidgetsEnabled,
     upsertProfile,
     getProfile,
+    countMeals,
+    existingIdempotencyKeys,
     type Meal,
     type NutritionGoals,
     type WaterEntry,
@@ -57,6 +59,14 @@ import {
     type WeightUnit,
 } from "./units.js";
 import { exportMeals } from "./export.js";
+import {
+    runImport,
+    buildSummaryText,
+    serializeImportResult,
+    BULK_IMPORT_OUTPUT_SCHEMA,
+    MAX_ROWS_PER_CALL,
+    type BulkImportArgs,
+} from "./import.js";
 import { normalizeBarcode, lookupBarcode, formatFoodResult } from "./foods.js";
 import { formatMealSearchResults } from "./search.js";
 import { getWidgetHtml } from "./widgets.js";
@@ -75,6 +85,7 @@ const GOAL_PROGRESS_WIDGET_URI = "ui://widget/goal-progress.html";
 const MEAL_LOGGED_WIDGET_URI = "ui://widget/meal-logged.html";
 const TRENDS_WIDGET_URI = "ui://widget/trends.html";
 const WEIGHT_TRENDS_WIDGET_URI = "ui://widget/weight-trends.html";
+const IMPORT_MEALS_WIDGET_URI = "ui://widget/import-meals.html";
 
 // Sent to clients in the initialize response (SDK ServerOptions.instructions).
 // Advisory — not every client surfaces it, so the enforcement rule ("interview
@@ -104,7 +115,14 @@ Photo-based meal logging — when the user sends a photo of food, follow these s
 
 Keep the interview proportional: a single obvious item with one known past variation may need only one question, while a full plate with several dishes usually needs several. A restaurant meal you pinned down from published chain nutrition may need only the how-much-did-you-eat question. If the user says to just log it or otherwise signals impatience, stop asking, state your remaining assumptions plainly, and log.
 
-For "log my usual X" requests, use search_meals the same way: search, then interview to confirm the variation and the amount before logging.`;
+For "log my usual X" requests, use search_meals the same way: search, then interview to confirm the variation and the amount before logging.
+
+Importing history from another app — when the user wants to bring in past meals from MyFitnessPal, Cronometer, Lose It!, MacroFactor or a similar export:
+1. If they have a FILE, call start_meal_import first and let them drive it. The importer reads and maps the file in the browser, so the rows never pass through you and cannot be mistranscribed, and it handles column mapping, batching and retries. Do not ask them to paste a file you could import properly.
+2. Call bulk_import_meals directly only when the importer is not an option: the data is already pasted into the conversation, the user cannot use the panel, or the importer reports that this client will not let it save. Then parse the rows yourself and follow that tool's description exactly — in particular, compute the row count and calorie total from the source text with real counting rather than by re-reading what you just wrote, and dry-run first.
+3. Never log a backfill by calling log_meal in a loop. It is rate-limited per call, so a single week of meals would exhaust the budget; one bulk_import_meals call carries up to 50 rows for the same cost.
+4. Check get_timezone before any sizeable import and offer set_timezone if it is unset. Times without an explicit UTC offset are placed using the saved timezone, so correcting it afterwards moves every imported meal — onto an adjacent day for anything logged near midnight.
+5. Show the user what was resolved before treating an import as done: the dry run echoes back the date, time and meal type for every row, and a misread date column shows up there rather than in the totals. Re-sending the same rows is safe — the server recognises them and skips them — so a retry after a failure or a timeout never duplicates anything.`;
 
 interface DailyTotals {
     calories: number;
@@ -197,6 +215,60 @@ const MEAL_PROGRESS_OUTPUT_SCHEMA = {
     }),
     meals: z.array(MEAL_BREAKDOWN_ITEM),
 };
+
+// ---------- bulk_import_meals ----------
+
+// Ceiling on total rows per user. Rate limiting is per HTTP request, so one
+// batched call writes up to MAX_ROWS_PER_CALL rows for a single limiter hit;
+// without this there is no bound on table growth. Set far above any real user:
+// 200k rows is ~180 years at three meals a day.
+const MAX_MEALS_PER_USER = 200_000;
+
+// Deliberately permissive: bounds live in validateRow so a single bad cell
+// produces an identified per-row error instead of a Zod rejection that discards
+// the whole batch (and the structured report with it). z.coerce mirrors
+// log_meal, whose numbers are coerced because models emit "450" as a string.
+const IMPORT_ROW_SCHEMA = z.object({
+    source_line: z.coerce
+        .number()
+        .describe(
+            "1-based line number of this row in the source file. Required: the server checks that line numbers are unique and increasing to detect dropped or duplicated rows.",
+        ),
+    description: z
+        .string()
+        .optional()
+        .describe(
+            "What was eaten. Include the portion in the text, e.g. 'Oatmeal (1 cup dry) with banana'. Omit only when the source has no food name at all.",
+        ),
+    logged_at: z
+        .string()
+        .optional()
+        .describe(
+            "When it was eaten. Accepts 'YYYY-MM-DD' (logged at local noon), 'YYYY-MM-DDTHH:mm' as LOCAL time in the user's timezone, or full ISO 8601 with an offset. Prefer local time straight from the file: do NOT compute UTC offsets yourself.",
+        ),
+    meal_type: z
+        .string()
+        .optional()
+        .describe(
+            "breakfast, lunch, dinner or snack. Case-insensitive; unrecognized values become snack. Omit when the source has no meal column and it will be inferred from the time.",
+        ),
+    calories: z.coerce.number().optional(),
+    protein_g: z.coerce.number().optional(),
+    carbs_g: z.coerce.number().optional(),
+    fat_g: z.coerce.number().optional(),
+    notes: z
+        .string()
+        .optional()
+        .describe(
+            "Anything from the source worth keeping that has no column here (micronutrients, the original row text).",
+        ),
+    client_row_id: z
+        .string()
+        .optional()
+        .describe(
+            "Optional label echoed back in the result so you can match errors to your own rows.",
+        ),
+});
 
 // Compute the day's running totals vs goals for a meal that was just logged or
 // updated, packaging both the model-facing progress text and the meal-logged
@@ -471,6 +543,248 @@ function registerTools(
                     };
                 },
                 { userId },
+            );
+        },
+    );
+
+    // UI resource for the import widget. Registered unconditionally, like every
+    // other widget resource — only the tool's _meta.ui link is gated per user.
+    server.registerResource(
+        "import-meals-widget",
+        IMPORT_MEALS_WIDGET_URI,
+        {
+            title: "Import Meals",
+            description:
+                "Interactive importer for a meal-history export: reads the file in the browser, maps its columns, previews the rows, then writes them via bulk_import_meals.",
+            mimeType: APP_UI_MIME_TYPE,
+        },
+        async (uri) => {
+            return {
+                contents: [
+                    {
+                        uri: uri.href,
+                        mimeType: APP_UI_MIME_TYPE,
+                        text: await getWidgetHtml("import-meals"),
+                        _meta: { ui: { prefersBorder: true } },
+                    },
+                ],
+            };
+        },
+    );
+
+    server.registerTool(
+        "start_meal_import",
+        {
+            title: "Import Meals from a File",
+            description:
+                "Open an importer the user can drive themselves to load a meal-history export (MyFitnessPal, Cronometer, Lose It!, MacroFactor). Prefer this over bulk_import_meals whenever the user has an actual file: the importer reads and maps it in the browser, so the rows never pass through you and cannot be mistranscribed, and it handles column mapping, batching and retries. Call it when the user says they want to import, upload, or bring in their history from another app. Fall back to bulk_import_meals if the user cannot use the importer, if they have already pasted the data into the conversation, or if the importer reports that this client will not let it save.",
+            inputSchema: {},
+            outputSchema: {
+                // Real content: the widget needs all of this. With no
+                // structuredContent the bridge never paints and the iframe sits
+                // on its loading state forever.
+                tz: z.string(),
+                tz_configured: z.boolean(),
+                today: z.string(),
+                max_rows_per_call: z.number(),
+                import_tool_name: z.string(),
+                known_source_apps: z.array(z.string()),
+                widgets_enabled: z.boolean(),
+            },
+            annotations: {
+                title: "Import Meals from a File",
+                readOnlyHint: true,
+                destructiveHint: false,
+                idempotentHint: true,
+            },
+            ...uiMeta(IMPORT_MEALS_WIDGET_URI),
+        },
+        async () => {
+            return withAnalytics(
+                "start_meal_import",
+                async () => {
+                    const profile = await getProfile(userId);
+                    const tz = profile?.timezone ?? "UTC";
+                    const structuredContent = {
+                        // The widget must resolve dates the same way the server
+                        // will, so it is told the timezone rather than guessing.
+                        tz,
+                        tz_configured: profile !== null,
+                        today: todayInTz(tz),
+                        max_rows_per_call: MAX_ROWS_PER_CALL,
+                        import_tool_name: "bulk_import_meals",
+                        known_source_apps: [
+                            "myfitnesspal",
+                            "cronometer",
+                            "loseit",
+                            "macrofactor",
+                        ],
+                        widgets_enabled: widgetsEnabled,
+                    };
+                    const text = widgetsEnabled
+                        ? "Importer ready — pick your export file in the panel above. Nothing is saved until you confirm the preview." +
+                          (profile === null
+                              ? " Note: this account has no timezone set, so times will be read as UTC. Offer to set it first."
+                              : "")
+                        : "This account has widgets turned off, so the importer cannot be shown. Ask the user to paste their export (or enable widgets with set_widget_display), then import it yourself with bulk_import_meals.";
+                    return {
+                        content: [{ type: "text" as const, text }],
+                        structuredContent,
+                    };
+                },
+                { userId },
+            );
+        },
+    );
+
+    server.registerTool(
+        "bulk_import_meals",
+        {
+            title: "Bulk Import Meals",
+            description:
+                "Import many past meals in one call, for backfilling history from a file the user exported from another app (MyFitnessPal, Cronometer, Lose It!, MacroFactor) or from a list they pasted. Parse the source yourself and map it to the row schema; the server validates every row and reports per-row results, so you can fix and re-send only the rows that failed. Prefer this over calling log_meal in a loop — log_meal is rate-limited per call, so a week of meals would exhaust the budget. Two rules matter for correctness. (1) Compute expected_row_count, and expected_total_kcal when every row has calories, FROM THE SOURCE FILE using deterministic tooling (a script, or counting the actual lines) — never by re-reading the JSON you just wrote, which would only compare your output against itself and catch nothing. (2) Call once with dry_run: true first whenever the rows came from parsing a CSV, a screenshot, or free text; check the resolved logged_at and meal_type echoed back for every row, show the user what will be imported, and only then call again with dry_run: false. Pass local times exactly as the file gives them and let the server apply the user's timezone; do not compute UTC offsets yourself, and do not guess a value you cannot find — omit the field and list the column in unmapped_columns instead. (3) Because those local times are placed using the user's saved timezone, check with get_timezone before a large import: if it is unset the server falls back to UTC, and correcting it afterwards moves every imported meal — including onto adjacent days for anything logged near midnight. Offer set_timezone first. Maximum " +
+                MAX_ROWS_PER_CALL +
+                " rows per call: split larger files by date range, keeping all rows for one calendar date in the same call.",
+            inputSchema: {
+                meals: z
+                    .array(IMPORT_ROW_SCHEMA)
+                    .describe(
+                        `The rows to import, in source-file order. 1 to ${MAX_ROWS_PER_CALL} per call.`,
+                    ),
+                expected_row_count: z.coerce
+                    .number()
+                    .describe(
+                        "How many rows THIS call carries, counted from the source file. The server rejects the batch if it disagrees, which is how a dropped or truncated row gets caught.",
+                    ),
+                expected_total_kcal: z.coerce
+                    .number()
+                    .optional()
+                    .describe(
+                        "Sum of calories across this call's rows, from the source file. Supply it whenever every row has calories; the server reconciles it within 0.5%.",
+                    ),
+                dry_run: z
+                    .boolean()
+                    .default(false)
+                    .describe(
+                        "Validate and report what would happen without writing anything.",
+                    ),
+                on_error: z
+                    .enum(["continue", "abort"])
+                    .default("continue")
+                    .describe(
+                        "continue: import the valid rows and report the rest. abort: if ANY row fails validation, write nothing. Note writes are not transactional — once writing starts, a database error leaves earlier rows saved.",
+                    ),
+                rows_skipped: z.coerce
+                    .number()
+                    .default(0)
+                    .describe(
+                        "How many source rows you deliberately did not send (deleted entries, totals rows, unparseable lines). Explains gaps in source_line so they are not reported as dropped rows.",
+                    ),
+                unmapped_columns: z
+                    .array(z.string())
+                    .default([])
+                    .describe(
+                        "Source columns you could not map to any field. Report them here rather than inventing a place for them.",
+                    ),
+                source_app: z
+                    .string()
+                    .optional()
+                    .describe(
+                        "Which app the file came from, e.g. myfitnesspal. Used to label rows that have no food name of their own.",
+                    ),
+            },
+            outputSchema: BULK_IMPORT_OUTPUT_SCHEMA,
+            annotations: {
+                title: "Bulk Import Meals",
+                readOnlyHint: false,
+                destructiveHint: false,
+                idempotentHint: true,
+            },
+        },
+        async (args) => {
+            return withAnalytics(
+                "bulk_import_meals",
+                async () => {
+                    // One profile read serves both: the timezone, and whether the
+                    // user ever configured one. profiles.timezone defaults to
+                    // 'UTC', so a missing profile row is the reliable "never set"
+                    // signal — and rows without an explicit offset are placed with
+                    // it, so the import warns rather than silently guessing.
+                    const profile = await getProfile(userId);
+                    const tz = profile?.timezone ?? "UTC";
+                    const tzConfigured = profile !== null;
+
+                    // Bound total growth before doing any work (see
+                    // MAX_MEALS_PER_USER).
+                    const existingCount = await countMeals(userId);
+                    if (
+                        existingCount + args.meals.length >
+                        MAX_MEALS_PER_USER
+                    ) {
+                        const structuredContent = serializeImportResult({
+                            status: "failed",
+                            dry_run: args.dry_run ?? false,
+                            summary: {
+                                total: args.meals.length,
+                                created: 0,
+                                deduplicated: 0,
+                                would_create: 0,
+                                failed: 0,
+                                not_attempted: 0,
+                                duplicate_rows_in_file: 0,
+                                rows_without_calories: 0,
+                                skipped_by_caller: args.rows_skipped ?? 0,
+                            },
+                            warnings: [
+                                `This import would exceed the maximum of ${MAX_MEALS_PER_USER} stored meals (you have ${existingCount}). Delete some history first.`,
+                            ],
+                            results: [],
+                        });
+                        return {
+                            content: [
+                                {
+                                    type: "text" as const,
+                                    text: structuredContent.warnings[0]!,
+                                },
+                            ],
+                            structuredContent,
+                        };
+                    }
+
+                    const result = await runImport(args as BulkImportArgs, {
+                        userId,
+                        tz,
+                        tzConfigured,
+                        nowMs: Date.now(),
+                        insert: (input) => insertMeal(userId, input),
+                        existingKeys: (keys) =>
+                            existingIdempotencyKeys(userId, keys),
+                    });
+
+                    return {
+                        content: [
+                            {
+                                type: "text" as const,
+                                text: buildSummaryText(result),
+                            },
+                        ],
+                        structuredContent: serializeImportResult(result),
+                    };
+                },
+                { userId },
+                undefined,
+                {
+                    // Nothing landed means the call really failed, even though
+                    // we return a normal result rather than isError.
+                    outcome: (r) => {
+                        const s = (
+                            r as { structuredContent?: { status?: string } }
+                        ).structuredContent;
+                        return s?.status === "failed"
+                            ? { success: false, errorCategory: "import_failed" }
+                            : { success: true };
+                    },
+                },
             );
         },
     );

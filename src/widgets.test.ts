@@ -12,6 +12,11 @@ test.each(KEYS)("%s assembles into a self-contained widget", async (key) => {
 
     // No include marker left behind (the real marker, not the word in prose).
     expect(html.match(/\/\*@include/g)).toBeNull();
+    // Same for the TS-inlining marker: an unresolved one would ship a widget
+    // whose script silently lacks whole functions.
+    expect(html.match(/\/\*@inlinets/g)).toBeNull();
+    // Module syntax must not survive into the inline <script>.
+    expect(html).not.toMatch(/^export\s/m);
 
     // Structure: one inlined stylesheet + one inlined script, no external refs.
     expect((html.match(/<style>/g) ?? []).length).toBe(1);

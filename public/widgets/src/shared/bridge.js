@@ -15,6 +15,9 @@
 //     plus a debounced ResizeObserver, so the host grows the iframe to fit.
 //   - theme handling (data-theme from the host context / notifications, plus the
 //     ChatGPT Apps SDK window.openai globals path).
+//   - an outbound request channel, so a widget can call tools on the server
+//     (config.onReady → api.callTool). Measured against MCP Inspector: ~370ms
+//     per call steady state, no per-call approval prompt.
 //   - a no-host fallback that renders config.sample so the file previews on its own.
 //
 // config = {
@@ -25,6 +28,16 @@
 //   coerce:   (payload) => data | null   // pull the widget's data out of a payload
 //   render:   (data) => void             // paint the widget from coerced data
 //   sample:   any                        // fallback data for standalone preview
+//   onReady?: (api) => void              // after the handshake; api documented below
+// }
+//
+// api = {
+//   callTool(name, args?, opts?) => Promise<result>   // opts.timeoutMs, default 60s
+//   canCallTools: boolean        // host advertised hostCapabilities.serverTools
+//   hostCapabilities: object     // as reported by the host
+//   hostContext: object          // theme, containerDimensions, ...
+//   hostInfo: object             // { name, version } of the host
+//   updateModelContext(text)     // push a short summary into the model's context
 // }
 function initWidget(config) {
     const rootId = config.rootId || "root";
@@ -54,6 +67,7 @@ function initWidget(config) {
     // widget stays empty and the host collapses it.
     function paint(data) {
         config.render(data);
+        painted = true;
         const el = root();
         if (!el || el.innerHTML.trim() === "") return;
         const foot = document.createElement("div");
@@ -80,11 +94,55 @@ function initWidget(config) {
     // Spec: MCP Apps 2026-01-26.
     const host =
         window.parent && window.parent !== window ? window.parent : null;
-    let initId = 0;
+
+    // One id space for every outbound request, and one pending map keyed by it.
+    // Routing by pending id BEFORE anything else matters: a tools/call response
+    // is a bare {id, result} with no `method`, so without this it would fall
+    // through to the lenient payload branch and repaint the widget from the
+    // response.
+    // Ids are namespaced. The spec is SILENT on whether the app's and the host's
+    // request ids share a space, and its own ui/resource-teardown example uses
+    // id: 1 — the id ui/initialize would otherwise take. A string prefix removes
+    // the collision entirely (JSON-RPC ids may be strings and hosts echo them
+    // verbatim).
+    let nextRequestId = 0;
+    const pending = new Map();
+    let painted = false;
+    let hostContext = {};
+    let hostCapabilities = {};
+    let hostInfo = {};
+    const warnedOrigins = new Set();
+
     function post(msg) {
         try {
             if (host) host.postMessage(msg, "*");
         } catch (_) {}
+    }
+    function notify(method, params) {
+        post(
+            params === undefined
+                ? { jsonrpc: "2.0", method }
+                : { jsonrpc: "2.0", method, params },
+        );
+    }
+    function request(method, params, timeoutMs) {
+        if (!host) return Promise.reject(new Error("no host"));
+        const id = "app-" + ++nextRequestId;
+        return new Promise((resolve, reject) => {
+            const timer = setTimeout(() => {
+                pending.delete(id);
+                reject(
+                    new Error(
+                        method +
+                            " timed out after " +
+                            (timeoutMs || 60000) +
+                            "ms",
+                    ),
+                );
+            }, timeoutMs || 60000);
+            pending.set(id, { resolve, reject, timer });
+            post({ jsonrpc: "2.0", id, method, params: params || {} });
+        });
     }
 
     // Report our content height so the host sizes the iframe to fit
@@ -98,10 +156,9 @@ function initWidget(config) {
         el.style.height = "max-content";
         const height = Math.ceil(el.getBoundingClientRect().height);
         el.style.height = prev;
-        post({
-            jsonrpc: "2.0",
-            method: "ui/notifications/size-changed",
-            params: { width: Math.ceil(window.innerWidth), height },
+        notify("ui/notifications/size-changed", {
+            width: Math.ceil(window.innerWidth),
+            height,
         });
     }
     if (host && typeof ResizeObserver !== "undefined") {
@@ -118,37 +175,150 @@ function initWidget(config) {
         ro.observe(document.body);
     }
 
+    const api = {
+        // Call a tool on the SAME server that served this widget. The host
+        // forwards any non-ui/ method on to the server (MCP Apps 2026-01-26).
+        // Resolves with the CallToolResult ({content, structuredContent,
+        // isError}); rejects on a JSON-RPC error or a timeout. A host may
+        // legitimately never answer, so the timeout is the only safety net.
+        callTool(name, args, opts) {
+            return request(
+                "tools/call",
+                { name, arguments: args || {} },
+                (opts && opts.timeoutMs) || 60000,
+            ).then((result) => {
+                if (result && result.isError) {
+                    const text =
+                        (result.content &&
+                            result.content[0] &&
+                            result.content[0].text) ||
+                        "tool reported an error";
+                    const err = new Error(text);
+                    err.toolResult = result;
+                    throw err;
+                }
+                return result;
+            });
+        },
+        // Push a short summary into the model's context. Tool results returned
+        // to the app do NOT reach the model, so without this the model has no
+        // idea what the widget did. Send summaries only, never row data — the
+        // whole point of doing the work in here is keeping bulk data out of the
+        // token stream. Hosts MAY defer this until the user's next message, so
+        // the widget's own UI must stand alone.
+        updateModelContext(text) {
+            // A REQUEST with `content` ContentBlocks — not a notification, and
+            // not `{text}`. A strict host validating the envelope drops the wrong
+            // shape silently, so the model would simply never learn what the
+            // widget did.
+            return request(
+                "ui/update-model-context",
+                { content: [{ type: "text", text: String(text) }] },
+                15000,
+            ).catch((e) => {
+                try {
+                    console.warn(
+                        "[widget] ui/update-model-context failed:",
+                        e.message,
+                    );
+                } catch (_) {}
+            });
+        },
+        canCallTools: false,
+        hostCapabilities,
+        hostContext,
+        // Identifies the host ("MCP-UI Host", "Claude", ...). A SIBLING of
+        // hostContext in the initialize result, not nested inside it.
+        hostInfo,
+    };
+
     window.addEventListener("message", (event) => {
+        // Only the host may drive this widget. window.parent.frames is reachable
+        // cross-origin, so any sibling iframe on the host page could otherwise
+        // forge a tool-result and repaint us with data of its choosing — which
+        // matters when the render IS a confirmation step.
+        if (host && event.source !== host) {
+            // Per-origin and capped, not one-shot: extensions and devtools
+            // bridges post into the page routinely, and a single shared flag
+            // would let the first of those silence every genuine rejection —
+            // leaving a widget stuck on "Loading…" with an empty console.
+            const origin = event.origin || "(opaque)";
+            if (warnedOrigins.size < 5 && !warnedOrigins.has(origin)) {
+                warnedOrigins.add(origin);
+                try {
+                    console.warn(
+                        "[widget] ignoring postMessage from a non-host window",
+                        {
+                            origin,
+                            method: event.data && event.data.method,
+                            id: event.data && event.data.id,
+                        },
+                    );
+                } catch (_) {}
+            }
+            return;
+        }
         const d = event.data;
         if (!d || typeof d !== "object") return;
 
-        // JSON-RPC response to our ui/initialize: carries host context
-        // (theme, container info, capabilities). Per the MCP Apps
-        // handshake we MUST answer with ui/notifications/initialized —
-        // strict hosts (e.g. MCP Inspector) withhold the tool result
-        // until they receive it.
-        if (d.id != null && d.id === initId && d.result) {
-            const t = themeFrom(d.result) || themeFrom(d.result.hostContext);
-            if (t) applyTheme(t);
-            post({
-                jsonrpc: "2.0",
-                method: "ui/notifications/initialized",
-            });
-            return;
-        }
-
-        // Host notifications (tool-input, tool-result, ...).
-        if (typeof d.method === "string") {
-            const p = d.params || {};
-            const t = themeFrom(d) || themeFrom(p);
-            if (t) applyTheme(t);
-            if (d.method.endsWith("tool-result")) {
-                show(p.structuredContent || p);
+        // 1. Response to one of OUR requests (ui/initialize, tools/call, ...).
+        //    The absence of `method` plus the presence of result/error is what
+        //    makes this a response. Matching on the id alone would swallow a
+        //    host→app REQUEST that reuses one of our ids and resolve the pending
+        //    promise with undefined — and the spec's own ui/resource-teardown
+        //    example uses id 1, the id ui/initialize would otherwise hold.
+        if (
+            d.id != null &&
+            d.method === undefined &&
+            ("result" in d || "error" in d)
+        ) {
+            const entry = pending.get(d.id);
+            // A duplicate, or a late answer after our timeout already fired, has
+            // no pending entry. Swallow it rather than letting it fall through to
+            // the payload branch and repaint the widget.
+            if (!entry) return;
+            pending.delete(d.id);
+            clearTimeout(entry.timer);
+            if (d.error) {
+                entry.reject(
+                    new Error(
+                        (d.error && d.error.message) ||
+                            "host returned an error",
+                    ),
+                );
+            } else {
+                entry.resolve(d.result);
             }
             return;
         }
 
-        // Lenient fallback: a host/tool that posts the payload bare.
+        // 2. Host notifications AND host→app requests — both carry `method`.
+        if (typeof d.method === "string") {
+            const p = d.params || {};
+            const t = themeFrom(p);
+            if (t) applyTheme(t);
+            if (d.method.endsWith("tool-result")) {
+                show(p.structuredContent || p);
+            }
+            // A host REQUEST (it has an id) needs an answer: for
+            // ui/resource-teardown the host SHOULD wait for one before tearing
+            // the resource down, so silence risks losing the view.
+            if (d.id != null) {
+                post({ jsonrpc: "2.0", id: d.id, result: {} });
+            }
+            return;
+        }
+
+        // 3. Lenient fallback: a host/tool that posts the payload bare. Kept for
+        //    host compatibility, but it must never swallow JSON-RPC traffic —
+        //    an unmatched response (a late answer after our timeout, say) is not
+        //    widget data.
+        //    Deliberately narrower than "has an id": a tool's own payload may
+        //    legitimately carry a top-level `id`, and discarding those would be a
+        //    latent trap. Only a JSON-RPC envelope is rejected.
+        if ("jsonrpc" in d || ("id" in d && ("result" in d || "error" in d))) {
+            return;
+        }
         const t = themeFrom(d);
         if (t) applyTheme(t);
         show(d.structuredContent || d);
@@ -163,12 +333,9 @@ function initWidget(config) {
         // (appInfo / appCapabilities — NOT the MCP-core clientInfo /
         // capabilities); strict hosts validate this request and silently
         // drop it if the shape is wrong, leaving the iframe on "Loading…".
-        initId = 1;
-        post({
-            jsonrpc: "2.0",
-            id: initId,
-            method: "ui/initialize",
-            params: {
+        request(
+            "ui/initialize",
+            {
                 protocolVersion: "2026-01-26",
                 appInfo: {
                     name: config.name,
@@ -176,7 +343,48 @@ function initWidget(config) {
                 },
                 appCapabilities: {},
             },
-        });
+            15000,
+        )
+            .then((result) => {
+                // FIRST: strict hosts withhold the tool result until they get
+                // this, so it must not sit behind any code that could throw.
+                notify("ui/notifications/initialized");
+
+                const r = result || {};
+                hostContext = r.hostContext || {};
+                hostCapabilities = r.hostCapabilities || r.capabilities || {};
+                hostInfo = r.hostInfo || r.serverInfo || {};
+                api.hostContext = hostContext;
+                api.hostCapabilities = hostCapabilities;
+                api.hostInfo = hostInfo;
+                api.canCallTools = !!hostCapabilities.serverTools;
+
+                // themeFrom already probes obj.hostContext?.theme.
+                const t = themeFrom(r);
+                if (t) applyTheme(t);
+
+                if (typeof config.onReady === "function") {
+                    try {
+                        config.onReady(api);
+                    } catch (_) {}
+                }
+            })
+            .catch((e) => {
+                // A host that never answers ui/initialize will also never send a
+                // tool result, so the widget would sit on "Loading…" forever with
+                // nothing in the console. Say so, in the console and on screen —
+                // this exact silence has cost debugging time before.
+                try {
+                    console.warn("[widget] ui/initialize failed:", e.message);
+                } catch (_) {}
+                const el = root();
+                if (el && !painted) {
+                    el.innerHTML =
+                        '<div class="empty"><div class="big">⚠</div><div>' +
+                        "This view could not connect to its host." +
+                        "</div></div>";
+                }
+            });
 
         // ChatGPT Apps SDK compatibility: data/theme may be exposed on a
         // global and refreshed via a custom event instead of postMessage.
@@ -196,5 +404,10 @@ function initWidget(config) {
         // Opened directly in a browser (no host) — render the sample so the
         // file is previewable on its own.
         paint(window.__WIDGET_DATA__ || config.sample);
+        if (typeof config.onReady === "function") {
+            try {
+                config.onReady(api);
+            } catch (_) {}
+        }
     }
 }
