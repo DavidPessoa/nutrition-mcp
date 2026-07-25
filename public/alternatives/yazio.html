@@ -6,7 +6,7 @@
         <meta charset="utf-8" />
         <meta
             name="description"
-            content="No MCP server for Yazio? Nutrition MCP is a free, open-source alternative that logs meals, macros, and weight inside Claude or ChatGPT."
+            content="No MCP server for Yazio? Nutrition MCP logs meals and macros inside Claude or ChatGPT — free, open source, and it imports your CSV export."
         />
         <meta
             property="og:title"
@@ -14,7 +14,7 @@
         />
         <meta
             property="og:description"
-            content="Yazio has no MCP server. Nutrition MCP is a free, open-source alternative that logs meals, macros, and weight by talking to Claude or ChatGPT."
+            content="Yazio has no MCP server. Nutrition MCP is a free, open-source alternative that logs meals, macros, and weight in Claude or ChatGPT — and imports your Yazio history from a CSV export."
         />
         <meta property="og:type" content="article" />
         <meta property="og:url" content="https://nutrition-mcp.com/yazio-mcp" />
@@ -29,7 +29,7 @@
         />
         <meta
             name="twitter:description"
-            content="Yazio has no MCP server. Nutrition MCP is a free, open-source alternative that logs meals, macros, and weight by talking to Claude or ChatGPT."
+            content="Yazio has no MCP server. Nutrition MCP is a free, open-source alternative that logs meals, macros, and weight in Claude or ChatGPT — and imports your Yazio history from a CSV export."
         />
         <link rel="canonical" href="https://nutrition-mcp.com/yazio-mcp" />
         <link rel="icon" href="/favicon.ico" />
@@ -111,7 +111,15 @@
                         "name": "Can I import my Yazio data?",
                         "acceptedAnswer": {
                             "@type": "Answer",
-                            "text": "There is no automatic Yazio import yet. Because logging is conversational it is quick to start fresh, and you fully own your Nutrition MCP data — export everything to CSV or delete your account at any time."
+                            "text": "Yes, using manual column mapping. Ask to import and an importer opens in the chat: you pick your Yazio CSV export, it's parsed in your browser rather than read by the AI, and you point its columns at date, food, meal, calories, and macros yourself — Yazio isn't one of the four exports recognised by column name, so that mapping is a one-time manual step. Semicolon-delimited European files with comma decimals, DD/MM/YYYY dates, and kilojoules are all handled, and re-importing the same file never creates duplicates. In clients without in-chat panels you can paste your export instead."
+                        }
+                    },
+                    {
+                        "@type": "Question",
+                        "name": "Does the AI read my export file when I import?",
+                        "acceptedAnswer": {
+                            "@type": "Answer",
+                            "text": "Not when the importer opens. It parses the CSV in your browser and shows you a preview of exactly what will be added; only the rows you confirm are sent, and they go as structured data rather than through the AI's reply. That means no row can be mistyped or invented in transit. Each row also carries a content fingerprint, so running the same file again reports those meals as already logged instead of duplicating them. If your client can't display in-chat panels, the fallback is to paste the export — the AI does read it on that path, so prefer the importer when you have the choice."
                         }
                     },
                     {
@@ -315,10 +323,12 @@
                             <span class="feature-icon" aria-hidden="true"
                                 ><i class="fa-solid fa-file-csv"></i
                             ></span>
-                            <h3>Export &amp; own your data</h3>
+                            <h3>Import &amp; own your data</h3>
                             <p>
-                                Export everything to CSV anytime and delete your
-                                account and data whenever you want.
+                                Import your history from another app's CSV
+                                export — parsed in your browser, not by the AI.
+                                Export it all back out, or delete your account,
+                                whenever you want.
                             </p>
                         </article>
                         <article class="card feature">
@@ -383,8 +393,8 @@
                                 </li>
                                 <li>
                                     <i class="fa-solid fa-circle-check"></i>
-                                    Barcode scanning, trends, and exports — all
-                                    free
+                                    Barcode scanning, trends, CSV import &amp;
+                                    export — all free
                                 </li>
                                 <li>
                                     <i class="fa-solid fa-circle-check"></i>
@@ -440,8 +450,67 @@
                 </div>
             </section>
 
+            <!-- Bring your history (per-app, unique content) -->
+            <section class="section band" id="import">
+                <div class="container">
+                    <div class="section-head">
+                        <p class="eyebrow">Your Yazio history</p>
+                        <h2 class="section-title">
+                            Bring the log, map the columns
+                        </h2>
+                        <p class="section-sub">
+                            Ask to import and an importer opens right in the
+                            chat: pick your export, map the columns, preview
+                            exactly what will be added, then confirm. The file
+                            is read in your browser — the AI never sees the
+                            rows. In clients without in-chat panels, paste your
+                            export instead.
+                        </p>
+                    </div>
+                    <div class="prose">
+                        <p>
+                            Your Yazio history can come across, though you'll do
+                            a little of the work. Ask to import and an importer
+                            panel opens in the chat: you pick your CSV export,
+                            it's parsed in your browser, and you point its
+                            columns at date, food, meal, calories, protein,
+                            carbs, and fat yourself. Four apps' exports —
+                            MyFitnessPal, Cronometer, Lose It!, and MacroFactor
+                            — are recognised by their column names; Yazio isn't
+                            one of them, so expect to set that mapping once.
+                            Everything after it is the same: a preview of
+                            exactly what will be added, then your confirmation.
+                        </p>
+                        <p>
+                            The European quirks that defeat most importers are
+                            handled. A semicolon-delimited file whose numbers
+                            use comma decimals — the shape Excel produces in a
+                            German or Austrian locale — is read correctly,
+                            instead of the delimiter being mistaken for a
+                            decimal point or every macro being scaled by a
+                            thousand. Quoted fields, line breaks inside a cell,
+                            blank-ish values, and stray totals rows are handled
+                            too, and the AI never reads the file, so no number
+                            can be mistyped in transit.
+                        </p>
+                        <p>
+                            Dates and energy are confirmed rather than guessed.
+                            A DD/MM/YYYY column is read day-first, and where the
+                            values genuinely can't settle it — 05/06 being
+                            either May or June — the importer shows its reading
+                            beside a row from your own file so you can correct
+                            it. If the energy column is in kilojoules it's
+                            converted to kilocalories, with the unit shown as a
+                            control next to a worked example. Re-importing the
+                            same file adds nothing: each row carries a content
+                            fingerprint, so repeats come back as already logged.
+                        </p>
+                    </div>
+                </div>
+            </section>
+
             <!-- How to switch -->
-            <section class="section band" id="switch">
+            <section class="section" id="switch">
                 <div class="container">
                     <div class="section-head">
                         <p class="eyebrow">How to switch</p>
@@ -495,7 +564,7 @@
             </section>
 
             <!-- FAQ -->
-            <section class="section" id="faq">
+            <section class="section band" id="faq">
                 <div class="container">
                     <div class="section-head">
                         <p class="eyebrow">FAQ</p>
@@ -571,11 +640,40 @@
                         <details>
                             <summary>Can I import my Yazio data?</summary>
                             <p>
-                                There is no automatic Yazio import yet. Because
-                                logging is conversational it is quick to start
-                                fresh, and you fully own your Nutrition MCP data
-                                — export everything to CSV or delete your
-                                account at any time.
+                                Yes, using manual column mapping. Ask to import
+                                and an importer opens in the chat: you pick your
+                                Yazio CSV export, it's parsed in your browser
+                                rather than read by the AI, and you point its
+                                columns at date, food, meal, calories, and
+                                macros yourself — Yazio isn't one of the four
+                                exports recognised by column name, so that
+                                mapping is a one-time manual step.
+                                Semicolon-delimited European files with comma
+                                decimals, DD/MM/YYYY dates, and kilojoules are
+                                all handled, and re-importing the same file
+                                never creates duplicates. In clients without
+                                in-chat panels you can paste your export
+                                instead.
+                            </p>
+                        </details>
+                        <details>
+                            <summary>
+                                Does the AI read my export file when I import?
+                            </summary>
+                            <p>
+                                Not when the importer opens. It parses the CSV
+                                in your browser and shows you a preview of
+                                exactly what will be added; only the rows you
+                                confirm are sent, and they go as structured data
+                                rather than through the AI's reply. That means
+                                no row can be mistyped or invented in transit.
+                                Each row also carries a content fingerprint, so
+                                running the same file again reports those meals
+                                as already logged instead of duplicating them.
+                                If your client can't display in-chat panels, the
+                                fallback is to paste the export — the AI does
+                                read it on that path, so prefer the importer
+                                when you have the choice.
                             </p>
                         </details>
                         <details>

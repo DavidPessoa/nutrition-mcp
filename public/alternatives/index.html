@@ -8,7 +8,7 @@
         <meta charset="utf-8" />
         <meta
             name="description"
-            content="MyFitnessPal, Cronometer, and other nutrition apps have no MCP server. Nutrition MCP is the free, open-source alternative for Claude and ChatGPT."
+            content="MyFitnessPal, Cronometer, and Lose It! have no MCP server. Nutrition MCP is the free, open-source alternative for Claude and ChatGPT — and imports your history."
         />
         <meta
             property="og:title"
@@ -16,7 +16,7 @@
         />
         <meta
             property="og:description"
-            content="Your nutrition app doesn't have an MCP server. Nutrition MCP is a free, open-source alternative that works inside Claude or ChatGPT."
+            content="Your nutrition app doesn't have an MCP server. Nutrition MCP is a free, open-source alternative that works inside Claude or ChatGPT — and imports your history from a CSV export."
         />
         <meta property="og:type" content="website" />
         <meta
@@ -34,7 +34,7 @@
         />
         <meta
             name="twitter:description"
-            content="Your nutrition app doesn't have an MCP server. Nutrition MCP is a free, open-source alternative that works inside Claude or ChatGPT."
+            content="Your nutrition app doesn't have an MCP server. Nutrition MCP is a free, open-source alternative that works inside Claude or ChatGPT — and imports your history from a CSV export."
         />
         <link rel="canonical" href="https://nutrition-mcp.com/alternatives" />
         <link rel="icon" href="/favicon.ico" />
@@ -172,8 +172,8 @@
                         <h2 class="section-title">Pick your current app</h2>
                         <p class="section-sub">
                             See how Nutrition MCP compares to the tracker you
-                            use today — and how to move your logging into your
-                            AI.
+                            use today — and how to move your logging, and your
+                            existing history, into your AI.
                         </p>
                     </div>
                     <div class="features-grid">
@@ -252,6 +252,51 @@
                             >Request a comparison</a
                         >.
                     </p>
+                </div>
+            </section>
+
+            <section class="section" id="import">
+                <div class="container">
+                    <div class="section-head">
+                        <p class="eyebrow">Bringing your history</p>
+                        <h2 class="section-title">
+                            You don't have to start from zero
+                        </h2>
+                        <p class="section-sub">
+                            The usual reason people stay put is the years
+                            already logged. Ask to import and an importer opens
+                            right in the chat: pick your export, map the
+                            columns, preview exactly what will be added, then
+                            confirm — or paste the export if your client has no
+                            in-chat panels.
+                        </p>
+                    </div>
+                    <div class="prose">
+                        <p>
+                            The file is parsed in your browser, not read by the
+                            AI — so the rows can't be mistyped on the way in,
+                            and you see the exact meals before any of them are
+                            written. Exports from MyFitnessPal, Cronometer, Lose
+                            It!, and MacroFactor have their columns recognised
+                            by name; any other CSV works too, you just point the
+                            mapper at each column once.
+                        </p>
+                        <p>
+                            The awkward parts of real export files are handled:
+                            DD/MM/YYYY and MM/DD/YYYY dates, energy in
+                            kilojoules as well as kilocalories,
+                            semicolon-delimited European files whose numbers use
+                            comma decimals, quoted fields with line breaks
+                            inside them, trailing totals rows, and deleted-row
+                            flags. Where a file is genuinely ambiguous — 05/06
+                            could be May or June — the importer shows its
+                            reading next to a row from your own file and asks
+                            you to confirm rather than guessing. And each row
+                            carries a content fingerprint, so re-importing the
+                            same file reports the meals as already logged
+                            instead of duplicating them.
+                        </p>
+                    </div>
                 </div>
             </section>
 

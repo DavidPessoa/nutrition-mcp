@@ -8,7 +8,7 @@
         <meta charset="utf-8" />
         <meta
             name="description"
-            content="No MCP server for MacroFactor? Nutrition MCP is a free, open-source alternative that logs meals, macros, and weight inside Claude or ChatGPT."
+            content="No MCP server for MacroFactor? Nutrition MCP logs meals and macros inside Claude or ChatGPT — free, open source, and it imports your CSV export."
         />
         <meta
             property="og:title"
@@ -16,7 +16,7 @@
         />
         <meta
             property="og:description"
-            content="MacroFactor has no MCP server. Nutrition MCP is a free, open-source alternative that logs meals, macros, and weight by talking to Claude or ChatGPT."
+            content="MacroFactor has no MCP server. Nutrition MCP is a free, open-source alternative that logs meals, macros, and weight in Claude or ChatGPT — and imports your MacroFactor history from a CSV export."
         />
         <meta property="og:type" content="article" />
         <meta
@@ -34,7 +34,7 @@
         />
         <meta
             name="twitter:description"
-            content="MacroFactor has no MCP server. Nutrition MCP is a free, open-source alternative that logs meals, macros, and weight by talking to Claude or ChatGPT."
+            content="MacroFactor has no MCP server. Nutrition MCP is a free, open-source alternative that logs meals, macros, and weight in Claude or ChatGPT — and imports your MacroFactor history from a CSV export."
         />
         <link
             rel="canonical"
@@ -119,7 +119,15 @@
                         "name": "Can I import my MacroFactor data?",
                         "acceptedAnswer": {
                             "@type": "Answer",
-                            "text": "There is no automatic MacroFactor import yet. Because logging is conversational it is quick to start fresh, and you fully own your Nutrition MCP data — export everything to CSV or delete your account at any time."
+                            "text": "Yes. Ask to import and an importer opens in the chat: you pick your MacroFactor CSV export, it's parsed in your browser rather than read by the AI, and you confirm a preview before anything is written. MacroFactor's export is recognised by name, and if it reports energy in kilojoules that's converted to kilocalories once you confirm the unit next to an example from your own file. Re-importing the same file never creates duplicates. In clients without in-chat panels you can paste your export instead."
+                        }
+                    },
+                    {
+                        "@type": "Question",
+                        "name": "Does the AI read my export file when I import?",
+                        "acceptedAnswer": {
+                            "@type": "Answer",
+                            "text": "Not when the importer opens. It parses the CSV in your browser and shows you a preview of exactly what will be added; only the rows you confirm are sent, and they go as structured data rather than through the AI's reply. That means no row can be mistyped or invented in transit. Each row also carries a content fingerprint, so running the same file again reports those meals as already logged instead of duplicating them. If your client can't display in-chat panels, the fallback is to paste the export — the AI does read it on that path, so prefer the importer when you have the choice."
                         }
                     },
                     {
@@ -325,10 +333,12 @@
                             <span class="feature-icon" aria-hidden="true"
                                 ><i class="fa-solid fa-file-csv"></i
                             ></span>
-                            <h3>Export &amp; own your data</h3>
+                            <h3>Import &amp; own your data</h3>
                             <p>
-                                Export everything to CSV anytime and delete your
-                                account and data whenever you want.
+                                Import your history from another app's CSV
+                                export — parsed in your browser, not by the AI.
+                                Export it all back out, or delete your account,
+                                whenever you want.
                             </p>
                         </article>
                         <article class="card feature">
@@ -394,8 +404,8 @@
                                 </li>
                                 <li>
                                     <i class="fa-solid fa-circle-check"></i>
-                                    Barcode scanning, trends, and exports — all
-                                    free
+                                    Barcode scanning, trends, CSV import &amp;
+                                    export — all free
                                 </li>
                                 <li>
                                     <i class="fa-solid fa-circle-check"></i>
@@ -451,8 +461,64 @@
                 </div>
             </section>
 
+            <!-- Bring your history (per-app, unique content) -->
+            <section class="section band" id="import">
+                <div class="container">
+                    <div class="section-head">
+                        <p class="eyebrow">Your MacroFactor history</p>
+                        <h2 class="section-title">
+                            The log moves even if the coaching doesn't
+                        </h2>
+                        <p class="section-sub">
+                            Ask to import and an importer opens right in the
+                            chat: pick your export, map the columns, preview
+                            exactly what will be added, then confirm. The file
+                            is read in your browser — the AI never sees the
+                            rows. In clients without in-chat panels, paste your
+                            export instead.
+                        </p>
+                    </div>
+                    <div class="prose">
+                        <p>
+                            What you'd be leaving is the algorithm, not the
+                            data. Ask to import and an importer panel opens in
+                            the chat: you choose your MacroFactor CSV export,
+                            it's parsed in your browser, the columns it
+                            recognises are mapped for you, and you confirm a
+                            preview before anything is written. The rows never
+                            pass through the AI, so nothing gets mistranscribed
+                            on the way in.
+                        </p>
+                        <p>
+                            MacroFactor's export is recognised by name — its
+                            serving-size column is the giveaway — and its date,
+                            food, meal, calorie, and macro columns map
+                            themselves. If your export reports energy in
+                            kilojoules rather than kilocalories, that's
+                            converted rather than stored 4.184x too high.
+                            Because a column simply headed “Calories” can hold
+                            either unit, the unit is offered as a control next
+                            to a worked example from your own first row, so you
+                            confirm it instead of trusting a guess that would
+                            silently inflate every day.
+                        </p>
+                        <p>
+                            That history is immediately useful rather than just
+                            archived. Once weeks of intake and weight are in,
+                            you can ask the question MacroFactor's algorithm
+                            answered on a schedule — “given the last three
+                            weeks, should I adjust my calories?” — and get a
+                            reasoned answer on demand. A second import of the
+                            same file changes nothing, since each row carries a
+                            content fingerprint and repeats come back reported
+                            as already logged.
+                        </p>
+                    </div>
+                </div>
+            </section>
+
             <!-- How to switch -->
-            <section class="section band" id="switch">
+            <section class="section" id="switch">
                 <div class="container">
                     <div class="section-head">
                         <p class="eyebrow">How to switch</p>
@@ -506,7 +572,7 @@
             </section>
 
             <!-- FAQ -->
-            <section class="section" id="faq">
+            <section class="section band" id="faq">
                 <div class="container">
                     <div class="section-head">
                         <p class="eyebrow">FAQ</p>
@@ -589,11 +655,37 @@
                         <details>
                             <summary>Can I import my MacroFactor data?</summary>
                             <p>
-                                There is no automatic MacroFactor import yet.
-                                Because logging is conversational it is quick to
-                                start fresh, and you fully own your Nutrition
-                                MCP data — export everything to CSV or delete
-                                your account at any time.
+                                Yes. Ask to import and an importer opens in the
+                                chat: you pick your MacroFactor CSV export, it's
+                                parsed in your browser rather than read by the
+                                AI, and you confirm a preview before anything is
+                                written. MacroFactor's export is recognised by
+                                name, and if it reports energy in kilojoules
+                                that's converted to kilocalories once you
+                                confirm the unit next to an example from your
+                                own file. Re-importing the same file never
+                                creates duplicates. In clients without in-chat
+                                panels you can paste your export instead.
+                            </p>
+                        </details>
+                        <details>
+                            <summary>
+                                Does the AI read my export file when I import?
+                            </summary>
+                            <p>
+                                Not when the importer opens. It parses the CSV
+                                in your browser and shows you a preview of
+                                exactly what will be added; only the rows you
+                                confirm are sent, and they go as structured data
+                                rather than through the AI's reply. That means
+                                no row can be mistyped or invented in transit.
+                                Each row also carries a content fingerprint, so
+                                running the same file again reports those meals
+                                as already logged instead of duplicating them.
+                                If your client can't display in-chat panels, the
+                                fallback is to paste the export — the AI does
+                                read it on that path, so prefer the importer
+                                when you have the choice.
                             </p>
                         </details>
                         <details>

@@ -1,15 +1,17 @@
 # Nutrition MCP
 
-> A free, open-source remote MCP (Model Context Protocol) server for personal nutrition tracking. It lets AI assistants like Claude and ChatGPT log meals, macros, water, and body weight, and review nutrition history — entirely through conversation, with no separate app. Connect it at https://nutrition-mcp.com/mcp.
+> A free, open-source remote MCP (Model Context Protocol) server for personal nutrition tracking. It lets AI assistants like Claude and ChatGPT log meals, macros, water, and body weight, review nutrition history, and import an existing food diary from another app — entirely through conversation, with no separate app. Connect it at https://nutrition-mcp.com/mcp.
 
-Nutrition MCP is built as an MCP server from the ground up, so tracking lives inside the AI assistant you already use. You describe a meal in plain language, send a photo, or scan a barcode, and your AI estimates the calories and macros and logs them. Barcode data comes from Open Food Facts. It is free with no premium tier, ads, or paywalled features; you own your data and can export it to CSV or delete your account at any time. Licensed MIT and self-hostable.
+Nutrition MCP is built as an MCP server from the ground up, so tracking lives inside the AI assistant you already use. You describe a meal in plain language, send a photo, or scan a barcode, and your AI estimates the calories and macros and logs them. Barcode data comes from Open Food Facts. It is free with no premium tier, ads, or paywalled features; you own your data and can move it in either direction — import a CSV from another app, export every meal to CSV, or delete your account at any time. Licensed MIT and self-hostable.
 
-Most nutrition apps (MyFitnessPal, Cronometer, Lose It!, MacroFactor, Yazio, Lifesum) do not offer an MCP server, so they cannot be used inside Claude or ChatGPT. The comparison pages below explain, for each app, what Nutrition MCP does differently.
+Data can also come in. `start_meal_import` opens an importer inside the chat (in clients that support in-chat panels): you pick a CSV you exported from another nutrition app, map its columns, check what will be added, and confirm. The file is parsed in the browser, so the AI never transcribes the rows. Exports from MyFitnessPal, Cronometer, Lose It! and MacroFactor are recognised by column name; any other CSV works through manual column mapping. DD/MM/YYYY and MM/DD/YYYY dates, kilojoules as well as kcal, and European semicolon-delimited comma-decimal files are all handled. `bulk_import_meals` is the write path underneath it — up to 50 rows per call, every row validated, problems reported per row, and duplicates recognised and skipped so re-sending the same rows is safe; an AI can also call it directly for meal data pasted into the chat.
+
+Most nutrition apps (MyFitnessPal, Cronometer, Lose It!, MacroFactor, Yazio, Lifesum) do not offer an MCP server, so they cannot be used inside Claude or ChatGPT. Where one of them can export a CSV, that history can be imported, so switching does not have to mean abandoning it. The comparison pages below explain, for each app, what Nutrition MCP does differently.
 
 ## Main pages
 
 - [Home](https://nutrition-mcp.com/): What Nutrition MCP is, how it works, install steps for Claude/ChatGPT/Cursor/VS Code, and examples.
-- [Tools reference](https://nutrition-mcp.com/tools): The full list of MCP tools (log_meal, lookup_barcode, get_nutrition_summary, log_weight, get_trends, and more) with descriptions and example prompts.
+- [Tools reference](https://nutrition-mcp.com/tools): The full list of all 35 MCP tools (log_meal, lookup_barcode, start_meal_import, bulk_import_meals, get_nutrition_summary, log_weight, get_trends, and more) with descriptions and example prompts.
 - [Alternatives overview](https://nutrition-mcp.com/alternatives): How Nutrition MCP compares to popular nutrition-tracking apps that have no MCP server.
 
 ## App comparisons

@@ -1,6 +1,6 @@
 # Nutrition MCP
 
-A remote MCP server for personal nutrition tracking — log meals, track macros, log water and body weight, and review nutrition history through conversation.
+A remote MCP server for personal nutrition tracking — log meals, track macros, log water and body weight, review nutrition history, and import an existing food diary from another app, all through conversation.
 
 [Help me pay for the servers on Patreon][patreon]
 
@@ -18,7 +18,7 @@ https://nutrition-mcp.com/mcp
 
 On first connect you'll be asked to register with an email and password. Your data persists across reconnections.
 
-Switching from another tracker? See the [nutrition-app alternatives](https://nutrition-mcp.com/alternatives) — how it compares to [MyFitnessPal](https://nutrition-mcp.com/myfitnesspal-mcp), [Cronometer](https://nutrition-mcp.com/cronometer-mcp), [Lose It!](https://nutrition-mcp.com/lose-it-mcp), [MacroFactor](https://nutrition-mcp.com/macrofactor-mcp), [Yazio](https://nutrition-mcp.com/yazio-mcp), and [Lifesum](https://nutrition-mcp.com/lifesum-mcp).
+Switching from another tracker? See the [nutrition-app alternatives](https://nutrition-mcp.com/alternatives) — how it compares to [MyFitnessPal](https://nutrition-mcp.com/myfitnesspal-mcp), [Cronometer](https://nutrition-mcp.com/cronometer-mcp), [Lose It!](https://nutrition-mcp.com/lose-it-mcp), [MacroFactor](https://nutrition-mcp.com/macrofactor-mcp), [Yazio](https://nutrition-mcp.com/yazio-mcp), and [Lifesum](https://nutrition-mcp.com/lifesum-mcp). Bring your history with you: say "import my meals" and an importer opens in the chat, where you pick the CSV you exported from your old app, map its columns, and check what will be added before anything is saved. Exports from MyFitnessPal, Cronometer, Lose It! and MacroFactor are recognised automatically; any other CSV works by mapping its columns yourself. In clients that can't show in-chat panels, paste the export instead and the AI imports it for you.
 
 ## Demo
 
@@ -39,6 +39,8 @@ Read the story behind it: [How I Replaced MyFitnessPal and Other Apps with a Sin
 | Tool                       | Description                                                                                              |
 | -------------------------- | -------------------------------------------------------------------------------------------------------- |
 | `log_meal`                 | Log a meal with description, type, calories, macros, notes — from text or a photo of your plate          |
+| `start_meal_import`        | Open the in-chat CSV importer: pick an export from another app, map its columns, preview, confirm        |
+| `bulk_import_meals`        | Write up to 50 imported rows per call — each row validated, duplicates skipped so a re-send is safe      |
 | `lookup_barcode`           | Look up a packaged product's verified macros by barcode via Open Food Facts (read from a photo or typed) |
 | `get_meals_today`          | Get all meals logged today                                                                               |
 | `get_meals_by_date`        | Get meals for a specific date (YYYY-MM-DD)                                                               |

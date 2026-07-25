@@ -2,52 +2,55 @@
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
     <url>
         <loc>https://nutrition-mcp.com/</loc>
+        <lastmod>2026-07-25</lastmod>
         <changefreq>weekly</changefreq>
         <priority>1.0</priority>
     </url>
     <url>
         <loc>https://nutrition-mcp.com/tools</loc>
+        <lastmod>2026-07-25</lastmod>
         <changefreq>monthly</changefreq>
         <priority>0.8</priority>
     </url>
     <url>
         <loc>https://nutrition-mcp.com/alternatives</loc>
+        <lastmod>2026-07-25</lastmod>
         <changefreq>monthly</changefreq>
         <priority>0.7</priority>
     </url>
     <url>
         <loc>https://nutrition-mcp.com/myfitnesspal-mcp</loc>
-        <lastmod>2026-07-17</lastmod>
+        <lastmod>2026-07-25</lastmod>
         <changefreq>monthly</changefreq>
         <priority>0.8</priority>
     </url>
     <url>
         <loc>https://nutrition-mcp.com/cronometer-mcp</loc>
-        <lastmod>2026-07-17</lastmod>
+        <lastmod>2026-07-25</lastmod>
         <changefreq>monthly</changefreq>
         <priority>0.8</priority>
     </url>
     <url>
         <loc>https://nutrition-mcp.com/lose-it-mcp</loc>
-        <lastmod>2026-07-17</lastmod>
+        <lastmod>2026-07-25</lastmod>
         <changefreq>monthly</changefreq>
         <priority>0.8</priority>
     </url>
     <url>
         <loc>https://nutrition-mcp.com/macrofactor-mcp</loc>
-        <lastmod>2026-07-17</lastmod>
+        <lastmod>2026-07-25</lastmod>
         <changefreq>monthly</changefreq>
         <priority>0.8</priority>
     </url>
     <url>
         <loc>https://nutrition-mcp.com/yazio-mcp</loc>
-        <lastmod>2026-07-17</lastmod>
+        <lastmod>2026-07-25</lastmod>
         <changefreq>monthly</changefreq>
         <priority>0.8</priority>
     </url>
     <url>
         <loc>https://nutrition-mcp.com/lifesum-mcp</loc>
-        <lastmod>2026-07-17</lastmod>
+        <lastmod>2026-07-25</lastmod>
         <changefreq>monthly</changefreq>
         <priority>0.8</priority>
     </url>

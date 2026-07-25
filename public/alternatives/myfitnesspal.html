@@ -8,7 +8,7 @@
         <meta charset="utf-8" />
         <meta
             name="description"
-            content="No MCP server for MyFitnessPal? Nutrition MCP is a free, open-source alternative that logs meals, macros, and weight inside Claude or ChatGPT."
+            content="No MCP server for MyFitnessPal? Nutrition MCP logs meals and macros inside Claude or ChatGPT — free, open source, and it imports your CSV export."
         />
         <meta
             property="og:title"
@@ -16,7 +16,7 @@
         />
         <meta
             property="og:description"
-            content="MyFitnessPal has no MCP server. Nutrition MCP is a free, open-source alternative that logs meals, macros, and weight by talking to Claude or ChatGPT."
+            content="MyFitnessPal has no MCP server. Nutrition MCP is a free, open-source alternative that logs meals, macros, and weight in Claude or ChatGPT — and imports your MyFitnessPal history from a CSV export."
         />
         <meta property="og:type" content="article" />
         <meta
@@ -34,7 +34,7 @@
         />
         <meta
             name="twitter:description"
-            content="MyFitnessPal has no MCP server. Nutrition MCP is a free, open-source alternative that logs meals, macros, and weight by talking to Claude or ChatGPT."
+            content="MyFitnessPal has no MCP server. Nutrition MCP is a free, open-source alternative that logs meals, macros, and weight in Claude or ChatGPT — and imports your MyFitnessPal history from a CSV export."
         />
         <link
             rel="canonical"
@@ -119,7 +119,15 @@
                         "name": "Can I import my MyFitnessPal data?",
                         "acceptedAnswer": {
                             "@type": "Answer",
-                            "text": "There is no automatic MyFitnessPal import yet. Because logging is conversational it is quick to start fresh, and you fully own your Nutrition MCP data — export everything to CSV or delete your account at any time."
+                            "text": "Yes. Ask to import your history and an importer opens in the chat: you pick the CSV MyFitnessPal exports, it's parsed in your browser rather than read by the AI, you map or confirm the columns, preview exactly what will be added, and confirm. MyFitnessPal's export is recognised by name — including its byte-order mark, its trailing totals rows, and the fact that it writes one aggregated row per meal per day with no food name, which get labelled by meal slot. Re-importing the same file never creates duplicates. In clients without in-chat panels you can paste your export instead."
+                        }
+                    },
+                    {
+                        "@type": "Question",
+                        "name": "Does the AI read my export file when I import?",
+                        "acceptedAnswer": {
+                            "@type": "Answer",
+                            "text": "Not when the importer opens. It parses the CSV in your browser and shows you a preview of exactly what will be added; only the rows you confirm are sent, and they go as structured data rather than through the AI's reply. That means no row can be mistyped or invented in transit. Each row also carries a content fingerprint, so running the same file again reports those meals as already logged instead of duplicating them. If your client can't display in-chat panels, the fallback is to paste the export — the AI does read it on that path, so prefer the importer when you have the choice."
                         }
                     },
                     {
@@ -325,10 +333,12 @@
                             <span class="feature-icon" aria-hidden="true"
                                 ><i class="fa-solid fa-file-csv"></i
                             ></span>
-                            <h3>Export &amp; own your data</h3>
+                            <h3>Import &amp; own your data</h3>
                             <p>
-                                Export everything to CSV anytime and delete your
-                                account and data whenever you want.
+                                Import your history from another app's CSV
+                                export — parsed in your browser, not by the AI.
+                                Export it all back out, or delete your account,
+                                whenever you want.
                             </p>
                         </article>
                         <article class="card feature">
@@ -396,8 +406,8 @@
                                 </li>
                                 <li>
                                     <i class="fa-solid fa-circle-check"></i>
-                                    Barcode scanning, trends, and exports — all
-                                    free
+                                    Barcode scanning, trends, CSV import &amp;
+                                    export — all free
                                 </li>
                                 <li>
                                     <i class="fa-solid fa-circle-check"></i>
@@ -436,11 +446,10 @@
                             estimates the macros.
                         </p>
                         <p>
-                            There's no one-click import of your MyFitnessPal
-                            diary yet, but starting over is quick when logging
-                            is a single sentence. Tell your AI the handful of
-                            meals you eat on repeat and it will log them in
-                            seconds — and everything you record is yours to
+                            You don't have to leave the diary behind to do it: a
+                            MyFitnessPal CSV export imports directly, quirks and
+                            all, so the years you've already logged come with
+                            you. Everything you record from then on is yours to
                             export as CSV whenever you want.
                         </p>
                         <p>
@@ -455,8 +464,65 @@
                 </div>
             </section>
 
+            <!-- Bring your history (per-app, unique content) -->
+            <section class="section band" id="import">
+                <div class="container">
+                    <div class="section-head">
+                        <p class="eyebrow">Your MyFitnessPal history</p>
+                        <h2 class="section-title">Bring the diary with you</h2>
+                        <p class="section-sub">
+                            Ask to import and an importer opens right in the
+                            chat: pick your export, map the columns, preview
+                            exactly what will be added, then confirm. The file
+                            is read in your browser — the AI never sees the
+                            rows. In clients without in-chat panels, paste your
+                            export instead.
+                        </p>
+                    </div>
+                    <div class="prose">
+                        <p>
+                            Years of logged history is the real reason people
+                            stay, and you don't have to abandon it. Ask to
+                            import and an importer panel opens in the chat: you
+                            choose the CSV MyFitnessPal exports, it's parsed in
+                            your browser, the columns it recognises are matched
+                            for you, and you see exactly what will be added
+                            before anything is written. The rows never pass
+                            through the AI, so there's nothing for it to
+                            mistype.
+                        </p>
+                        <p>
+                            A MyFitnessPal export is handled by name, quirks
+                            included. The file arrives with a byte-order mark
+                            that would otherwise corrupt the first column
+                            heading; its notes can contain line breaks inside a
+                            quoted cell, which naive line-splitting would shred
+                            along with every row after it; and each day's block
+                            ends with a totals row that must not become a meal.
+                            The one that matters most: MyFitnessPal exports one
+                            aggregated row per meal per day and no food-name
+                            column at all, so rather than rejecting those rows
+                            for having no description, the importer recognises
+                            the shape and labels them by their slot — they
+                            arrive as “Breakfast (imported from MyFitnessPal)”.
+                        </p>
+                        <p>
+                            Dates are confirmed, not assumed. A column of
+                            05/06/2024 is genuinely undecidable — May or June —
+                            so the importer shows you its reading next to a real
+                            row from your own file and lets you correct it
+                            before writing. And every row carries a content
+                            fingerprint, so re-running the same file reports
+                            those meals as already logged instead of duplicating
+                            them. Import a partial export, spot a column you
+                            mapped wrongly, and simply do it again.
+                        </p>
+                    </div>
+                </div>
+            </section>
+
             <!-- How to switch -->
-            <section class="section band" id="switch">
+            <section class="section" id="switch">
                 <div class="container">
                     <div class="section-head">
                         <p class="eyebrow">How to switch</p>
@@ -510,7 +576,7 @@
             </section>
 
             <!-- FAQ -->
-            <section class="section" id="faq">
+            <section class="section band" id="faq">
                 <div class="container">
                     <div class="section-head">
                         <p class="eyebrow">FAQ</p>
@@ -594,11 +660,39 @@
                                 Can I import my MyFitnessPal data?
                             </summary>
                             <p>
-                                There is no automatic MyFitnessPal import yet.
-                                Because logging is conversational it is quick to
-                                start fresh, and you fully own your Nutrition
-                                MCP data — export everything to CSV or delete
-                                your account at any time.
+                                Yes. Ask to import your history and an importer
+                                opens in the chat: you pick the CSV MyFitnessPal
+                                exports, it's parsed in your browser rather than
+                                read by the AI, you map or confirm the columns,
+                                preview exactly what will be added, and confirm.
+                                MyFitnessPal's export is recognised by name —
+                                including its byte-order mark, its trailing
+                                totals rows, and the fact that it writes one
+                                aggregated row per meal per day with no food
+                                name, which get labelled by meal slot.
+                                Re-importing the same file never creates
+                                duplicates. In clients without in-chat panels
+                                you can paste your export instead.
+                            </p>
+                        </details>
+                        <details>
+                            <summary>
+                                Does the AI read my export file when I import?
+                            </summary>
+                            <p>
+                                Not when the importer opens. It parses the CSV
+                                in your browser and shows you a preview of
+                                exactly what will be added; only the rows you
+                                confirm are sent, and they go as structured data
+                                rather than through the AI's reply. That means
+                                no row can be mistyped or invented in transit.
+                                Each row also carries a content fingerprint, so
+                                running the same file again reports those meals
+                                as already logged instead of duplicating them.
+                                If your client can't display in-chat panels, the
+                                fallback is to paste the export — the AI does
+                                read it on that path, so prefer the importer
+                                when you have the choice.
                             </p>
                         </details>
                         <details>

@@ -8,7 +8,7 @@
         <meta charset="utf-8" />
         <meta
             name="description"
-            content="No MCP server for Cronometer? Nutrition MCP is a free, open-source alternative that logs meals, macros, and weight inside Claude or ChatGPT."
+            content="No MCP server for Cronometer? Nutrition MCP logs meals and macros inside Claude or ChatGPT — free, open source, and it imports your CSV export."
         />
         <meta
             property="og:title"
@@ -16,7 +16,7 @@
         />
         <meta
             property="og:description"
-            content="Cronometer has no MCP server. Nutrition MCP is a free, open-source alternative that logs meals, macros, and weight by talking to Claude or ChatGPT."
+            content="Cronometer has no MCP server. Nutrition MCP is a free, open-source alternative that logs meals, macros, and weight in Claude or ChatGPT — and imports your Cronometer history from a CSV export."
         />
         <meta property="og:type" content="article" />
         <meta
@@ -34,7 +34,7 @@
         />
         <meta
             name="twitter:description"
-            content="Cronometer has no MCP server. Nutrition MCP is a free, open-source alternative that logs meals, macros, and weight by talking to Claude or ChatGPT."
+            content="Cronometer has no MCP server. Nutrition MCP is a free, open-source alternative that logs meals, macros, and weight in Claude or ChatGPT — and imports your Cronometer history from a CSV export."
         />
         <link rel="canonical" href="https://nutrition-mcp.com/cronometer-mcp" />
         <link rel="icon" href="/favicon.ico" />
@@ -116,7 +116,15 @@
                         "name": "Can I import my Cronometer data?",
                         "acceptedAnswer": {
                             "@type": "Answer",
-                            "text": "There is no automatic Cronometer import yet. Because logging is conversational it is quick to start fresh, and you fully own your Nutrition MCP data — export everything to CSV or delete your account at any time."
+                            "text": "Yes. Ask to import and an importer opens in the chat: you choose your Cronometer CSV, it's parsed in your browser rather than read by the AI, and you preview exactly what will be added before confirming. Cronometer's export is recognised by name — its separate date and time columns are both read, and its repeated “Amount” heading can't collide because columns are keyed by position. The date and time, food name, meal, calories, protein, carbs, fat, and notes come across; micronutrients and portion amounts don't. Re-importing the same file never creates duplicates. In clients without in-chat panels you can paste your export instead."
+                        }
+                    },
+                    {
+                        "@type": "Question",
+                        "name": "Does the AI read my export file when I import?",
+                        "acceptedAnswer": {
+                            "@type": "Answer",
+                            "text": "Not when the importer opens. It parses the CSV in your browser and shows you a preview of exactly what will be added; only the rows you confirm are sent, and they go as structured data rather than through the AI's reply. That means no row can be mistyped or invented in transit. Each row also carries a content fingerprint, so running the same file again reports those meals as already logged instead of duplicating them. If your client can't display in-chat panels, the fallback is to paste the export — the AI does read it on that path, so prefer the importer when you have the choice."
                         }
                     },
                     {
@@ -321,10 +329,12 @@
                             <span class="feature-icon" aria-hidden="true"
                                 ><i class="fa-solid fa-file-csv"></i
                             ></span>
-                            <h3>Export &amp; own your data</h3>
+                            <h3>Import &amp; own your data</h3>
                             <p>
-                                Export everything to CSV anytime and delete your
-                                account and data whenever you want.
+                                Import your history from another app's CSV
+                                export — parsed in your browser, not by the AI.
+                                Export it all back out, or delete your account,
+                                whenever you want.
                             </p>
                         </article>
                         <article class="card feature">
@@ -388,8 +398,8 @@
                                 </li>
                                 <li>
                                     <i class="fa-solid fa-circle-check"></i>
-                                    Barcode scanning, trends, and exports — all
-                                    free
+                                    Barcode scanning, trends, CSV import &amp;
+                                    export — all free
                                 </li>
                                 <li>
                                     <i class="fa-solid fa-circle-check"></i>
@@ -446,8 +456,63 @@
                 </div>
             </section>
 
+            <!-- Bring your history (per-app, unique content) -->
+            <section class="section band" id="import">
+                <div class="container">
+                    <div class="section-head">
+                        <p class="eyebrow">Your Cronometer history</p>
+                        <h2 class="section-title">
+                            Ten years of entries, kept
+                        </h2>
+                        <p class="section-sub">
+                            Ask to import and an importer opens right in the
+                            chat: pick your export, map the columns, preview
+                            exactly what will be added, then confirm. The file
+                            is read in your browser — the AI never sees the
+                            rows. In clients without in-chat panels, paste your
+                            export instead.
+                        </p>
+                    </div>
+                    <div class="prose">
+                        <p>
+                            Precision is why you used Cronometer, so a sloppy
+                            import would be worse than none. Ask to import and a
+                            panel opens in the chat: you pick your Cronometer
+                            CSV, it's parsed in your browser, and you approve a
+                            preview before a single row is written. The numbers
+                            are read straight out of the file — the AI never
+                            sees the rows, so it can't round or retype one.
+                        </p>
+                        <p>
+                            Cronometer's export shape is recognised by name. It
+                            splits the timestamp across separate date and time
+                            columns, and both are read, so a breakfast logged at
+                            07:12 keeps its time instead of landing at a default
+                            midday. It writes a quantity with the unit inside
+                            the same cell — “58.00 g”, “1.00 cup” — and a value
+                            written that way still reads as the number it is
+                            rather than as nothing. And it repeats the “Amount”
+                            heading more than once, so columns are keyed by
+                            position rather than by name: the duplicates can't
+                            silently collide, and the mapper tells you which one
+                            you're pointing at.
+                        </p>
+                        <p>
+                            Be clear about what crosses over: the date and time,
+                            food name, meal, calories, protein, carbs, fat, and
+                            notes. Portion amounts and Cronometer's 80-plus
+                            micronutrients don't — that depth stays in
+                            Cronometer's own export. Re-importing is harmless:
+                            each row carries a content fingerprint, so a second
+                            run of the same file reports the meals as already
+                            logged rather than adding them twice.
+                        </p>
+                    </div>
+                </div>
+            </section>
+
             <!-- How to switch -->
-            <section class="section band" id="switch">
+            <section class="section" id="switch">
                 <div class="container">
                     <div class="section-head">
                         <p class="eyebrow">How to switch</p>
@@ -501,7 +566,7 @@
             </section>
 
             <!-- FAQ -->
-            <section class="section" id="faq">
+            <section class="section band" id="faq">
                 <div class="container">
                     <div class="section-head">
                         <p class="eyebrow">FAQ</p>
@@ -583,11 +648,40 @@
                         <details>
                             <summary>Can I import my Cronometer data?</summary>
                             <p>
-                                There is no automatic Cronometer import yet.
-                                Because logging is conversational it is quick to
-                                start fresh, and you fully own your Nutrition
-                                MCP data — export everything to CSV or delete
-                                your account at any time.
+                                Yes. Ask to import and an importer opens in the
+                                chat: you choose your Cronometer CSV, it's
+                                parsed in your browser rather than read by the
+                                AI, and you preview exactly what will be added
+                                before confirming. Cronometer's export is
+                                recognised by name — its separate date and time
+                                columns are both read, and its repeated “Amount”
+                                heading can't collide because columns are keyed
+                                by position. The date and time, food name, meal,
+                                calories, protein, carbs, fat, and notes come
+                                across; micronutrients and portion amounts
+                                don't. Re-importing the same file never creates
+                                duplicates. In clients without in-chat panels
+                                you can paste your export instead.
+                            </p>
+                        </details>
+                        <details>
+                            <summary>
+                                Does the AI read my export file when I import?
+                            </summary>
+                            <p>
+                                Not when the importer opens. It parses the CSV
+                                in your browser and shows you a preview of
+                                exactly what will be added; only the rows you
+                                confirm are sent, and they go as structured data
+                                rather than through the AI's reply. That means
+                                no row can be mistyped or invented in transit.
+                                Each row also carries a content fingerprint, so
+                                running the same file again reports those meals
+                                as already logged instead of duplicating them.
+                                If your client can't display in-chat panels, the
+                                fallback is to paste the export — the AI does
+                                read it on that path, so prefer the importer
+                                when you have the choice.
                             </p>
                         </details>
                         <details>
