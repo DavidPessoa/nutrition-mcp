@@ -7,18 +7,21 @@
 
     1. Does the host advertise hostCapabilities.serverTools?
     2. Does an app-initiated tools/call actually reach the server and come back?
-    3. Does the host prompt the user for approval per call? (Time each call and
-       watch: a prompt shows up as multi-second latency plus a visible dialog.)
+    3. Does the host prompt the user for approval per call? (Time each call: a
+       prompt shows up as multi-second latency plus a visible dialog.)
     4. Does the host impose hostContext.containerDimensions (fixed/max height)?
-    5. Do sequential calls work, and at what pace before the rate limiter bites?
+    5. Do sequential calls work, and at what pace?
 
-  Deliberately does NOT touch shared/bridge.js: that partial is inlined verbatim
-  into all five shipped widgets, so changing it for a throwaway probe would put
-  production widgets at risk. The JSON-RPC client below is local to this file.
+  Now drives the SHARED bridge client (api.callTool) rather than its own copy —
+  so running this also verifies the code the import widget will rely on.
+
+  MCP Inspector results (2026-07-25): serverTools yes, containerDimensions none,
+  round-trip 839ms cold then ~370ms steady, three sequential calls with no
+  approval prompt.
 
   Registered only when ENABLE_WIDGET_PROBE is set, so merging this is inert.
   Delete the template, the WIDGET_TEMPLATES entry, and the tool once the spike
-  has answered the questions above.
+  has answered the questions above for the shipping hosts.
 -->
 <html lang="en">
     <head>
@@ -29,6 +32,8 @@
             /*@include shared/tokens.css@*/
 
             /*@include shared/base.css@*/
+
+            /*@include shared/form.css@*/
 
             .probe-row {
                 display: flex;
@@ -53,27 +58,7 @@
                 color: var(--accent);
             }
             .no {
-                color: #c0392b;
-            }
-            .probe-btn {
-                appearance: none;
-                border: 1px solid var(--panel-border);
-                background: var(--panel);
-                color: var(--text);
-                border-radius: 8px;
-                padding: 8px 12px;
-                font: inherit;
-                font-size: 13px;
-                font-weight: 600;
-                cursor: pointer;
-                margin: 4px 6px 4px 0;
-            }
-            .probe-btn:hover {
-                border-color: var(--accent);
-            }
-            .probe-btn:disabled {
-                opacity: 0.5;
-                cursor: default;
+                color: var(--over);
             }
             .probe-log {
                 margin-top: 10px;
@@ -88,6 +73,10 @@
                 max-height: 220px;
                 overflow: auto;
             }
+            .probe-card {
+                padding: 14px;
+                margin: 12px;
+            }
         </style>
     </head>
     <body>
@@ -95,26 +84,8 @@
         <script>
             /*@include shared/bridge.js@*/
 
-            // ---- local JSON-RPC client (app -> host -> server) ---------------
-            // The shared bridge implements only ui/initialize, initialized,
-            // tool-result and size-changed. There is no tools/call path, so the
-            // import widget needs one; this is the minimum viable version, kept
-            // here rather than in the shared partial.
-            const HOST =
-                window.parent && window.parent !== window
-                    ? window.parent
-                    : null;
-            // Start well above the bridge's initialize id (1) so responses are
-            // unambiguous.
-            let nextId = 1000;
-            const pending = new Map();
             const lines = [];
-            const observed = {
-                handshake: false,
-                serverTools: null,
-                containerDimensions: null,
-                hostName: null,
-            };
+            let API = null;
 
             function log(msg) {
                 const t = new Date().toISOString().slice(11, 23);
@@ -123,89 +94,6 @@
                 repaint();
             }
 
-            function callTool(name, args, timeoutMs) {
-                if (!HOST) return Promise.reject(new Error("no host"));
-                const id = ++nextId;
-                const started = performance.now();
-                return new Promise((resolve, reject) => {
-                    const timer = setTimeout(() => {
-                        pending.delete(id);
-                        reject(
-                            new Error(
-                                `timed out after ${timeoutMs || 30000}ms — host may not proxy tools/call`,
-                            ),
-                        );
-                    }, timeoutMs || 30000);
-                    pending.set(id, { resolve, reject, timer, started, name });
-                    HOST.postMessage(
-                        {
-                            jsonrpc: "2.0",
-                            id,
-                            method: "tools/call",
-                            params: { name, arguments: args || {} },
-                        },
-                        "*",
-                    );
-                    log(`-> tools/call ${name} (id ${id})`);
-                });
-            }
-
-            // Our own listener. The bridge's listener also sees these events; it
-            // ignores ids it does not recognise EXCEPT via its lenient bare-object
-            // fallback, which is why coerce() below rejects JSON-RPC shapes.
-            window.addEventListener("message", (event) => {
-                const d = event.data;
-                if (!d || typeof d !== "object") return;
-
-                // Capture the initialize result for the capability questions.
-                if (d.id === 1 && d.result) {
-                    const r = d.result;
-                    observed.handshake = true;
-                    observed.hostName =
-                        r.hostInfo?.name || r.serverInfo?.name || "(unnamed)";
-                    observed.serverTools = !!(
-                        r.hostCapabilities?.serverTools ||
-                        r.capabilities?.serverTools
-                    );
-                    observed.containerDimensions =
-                        r.hostContext?.containerDimensions || null;
-                    log(
-                        `<- ui/initialize result: host=${observed.hostName} serverTools=${observed.serverTools}`,
-                    );
-                    if (observed.containerDimensions) {
-                        log(
-                            `   containerDimensions=${JSON.stringify(observed.containerDimensions)}`,
-                        );
-                    }
-                    repaint();
-                    return;
-                }
-
-                const entry = d.id != null ? pending.get(d.id) : null;
-                if (!entry) return;
-                pending.delete(d.id);
-                clearTimeout(entry.timer);
-                const ms = Math.round(performance.now() - entry.started);
-                if (d.error) {
-                    log(
-                        `<- error (id ${d.id}, ${ms}ms): ${d.error.message || JSON.stringify(d.error)}`,
-                    );
-                    entry.reject(new Error(d.error.message || "rpc error"));
-                    return;
-                }
-                const res = d.result || {};
-                log(
-                    `<- result (id ${d.id}, ${ms}ms) isError=${!!res.isError} structured=${!!res.structuredContent}`,
-                );
-                if (ms > 1500) {
-                    log(
-                        `   NOTE ${ms}ms is slow for a read — a per-call approval prompt is likely.`,
-                    );
-                }
-                entry.resolve(res);
-            });
-
-            // ---- UI ----------------------------------------------------------
             function esc(s) {
                 return String(s == null ? "" : s)
                     .replace(/&/g, "&amp;")
@@ -215,7 +103,8 @@
                     .replace(/'/g, "&#39;");
             }
             function flag(v) {
-                if (v === null) return '<span class="probe-v">unknown</span>';
+                if (v === null || v === undefined)
+                    return '<span class="probe-v">unknown</span>';
                 return v
                     ? '<span class="probe-v yes">yes</span>'
                     : '<span class="probe-v no">no</span>';
@@ -224,49 +113,87 @@
                 return `<div class="probe-row"><span class="probe-k">${esc(k)}</span>${vHtml}</div>`;
             }
 
+            // One timed call through the SHARED bridge client.
+            async function timedCall(label, timeoutMs) {
+                if (!API) return log("!! bridge not ready");
+                const started = performance.now();
+                log(`-> ${label} tools/call get_goal_progress`);
+                try {
+                    const res = await API.callTool(
+                        "get_goal_progress",
+                        {},
+                        timeoutMs ? { timeoutMs } : undefined,
+                    );
+                    const ms = Math.round(performance.now() - started);
+                    log(
+                        `<- ok (${ms}ms) structured=${!!res.structuredContent}`,
+                    );
+                    if (ms > 1500) {
+                        log(
+                            `   NOTE ${ms}ms is slow for a read — a per-call approval prompt is likely.`,
+                        );
+                    }
+                } catch (e) {
+                    const ms = Math.round(performance.now() - started);
+                    log(`!! failed after ${ms}ms: ${e.message}`);
+                }
+            }
+
             function repaint() {
                 const el = document.getElementById("root");
                 if (!el) return;
+                const dims =
+                    API &&
+                    API.hostContext &&
+                    API.hostContext.containerDimensions;
                 el.innerHTML = `
-          <div class="card">
+          <div class="card probe-card">
             <h2 style="margin:0 0 8px;font-size:15px">Widget capability probe</h2>
-            ${row("in a host", flag(!!HOST))}
-            ${row("handshake completed", flag(observed.handshake))}
-            ${row("hostCapabilities.serverTools", flag(observed.serverTools))}
+            ${row("in a host", flag(window.parent !== window))}
+            ${row("handshake completed", flag(!!API))}
+            ${row("hostCapabilities.serverTools", flag(API ? API.canCallTools : null))}
             ${row(
                 "containerDimensions",
+                `<span class="probe-v">${esc(dims ? JSON.stringify(dims) : "none")}</span>`,
+            )}
+            ${row(
+                "host",
                 `<span class="probe-v">${esc(
-                    observed.containerDimensions
-                        ? JSON.stringify(observed.containerDimensions)
-                        : "none",
+                    (API && API.hostInfo && API.hostInfo.name) || "unknown",
                 )}</span>`,
             )}
-            ${row("host", `<span class="probe-v">${esc(observed.hostName || "unknown")}</span>`)}
-            <div style="margin-top:10px">
-              <button class="probe-btn" id="p1">1 read call</button>
-              <button class="probe-btn" id="p2">3 sequential calls</button>
-              <button class="probe-btn" id="p3">clear log</button>
+            <div class="actions">
+              <button class="btn btn-primary" id="p1">1 read call</button>
+              <button class="btn" id="p2">3 sequential calls</button>
+              <button class="btn" id="p4">timeout test (3s)</button>
+              <button class="btn" id="p5">push model context</button>
+              <button class="btn" id="p3">clear log</button>
             </div>
             <div class="probe-log">${esc(lines.join("\n")) || "no activity yet"}</div>
           </div>`;
                 const b1 = document.getElementById("p1");
                 const b2 = document.getElementById("p2");
                 const b3 = document.getElementById("p3");
-                if (b1)
-                    b1.onclick = () =>
-                        callTool("get_goal_progress", {}).catch((e) =>
-                            log(`!! ${e.message}`),
-                        );
+                const b4 = document.getElementById("p4");
+                const b5 = document.getElementById("p5");
+                if (b1) b1.onclick = () => timedCall("single");
                 if (b2)
                     b2.onclick = async () => {
-                        for (let i = 1; i <= 3; i++) {
-                            try {
-                                await callTool("get_goal_progress", {});
-                            } catch (e) {
-                                log(`!! call ${i}: ${e.message}`);
-                                break;
-                            }
-                        }
+                        for (let i = 1; i <= 3; i++)
+                            await timedCall(`seq ${i}`);
+                    };
+                // Detects a host that accepts tools/call but never answers —
+                // the failure mode that otherwise looks like a hung widget.
+                if (b4) b4.onclick = () => timedCall("timeout-probe", 3000);
+                // Does the host accept ui/update-model-context? Silent failure
+                // here means the model never learns what the widget did.
+                if (b5)
+                    b5.onclick = async () => {
+                        log("-> ui/update-model-context");
+                        await API.updateModelContext(
+                            "Probe pushed a summary into model context.",
+                        );
+                        log("<- update-model-context settled");
                     };
                 if (b3)
                     b3.onclick = () => {
@@ -275,34 +202,26 @@
                     };
             }
 
-            // The bridge's bare-object fallback would hand a tools/call RESPONSE
-            // to coerce() and repaint the widget from it. Reject anything that
-            // looks like JSON-RPC so the probe's own UI survives — the import
-            // widget will need the same guard until the shared bridge routes by
-            // pending id first.
-            function coerce(payload) {
-                if (!payload || typeof payload !== "object") return null;
-                if (
-                    "jsonrpc" in payload ||
-                    "id" in payload ||
-                    "result" in payload ||
-                    "error" in payload
-                ) {
-                    return null;
-                }
-                return payload;
-            }
-
             initWidget({
                 name: "import-probe-widget",
                 loading: '<div class="empty">Probing host capabilities…</div>',
-                coerce,
+                // The probe's own UI is the point; tool data is irrelevant to it.
+                coerce: () => ({ probe: true }),
                 render: () => repaint(),
                 sample: { probe: true },
+                onReady: (api) => {
+                    API = api;
+                    log(
+                        `handshake ok — serverTools=${api.canCallTools} host=${
+                            (api.hostInfo && api.hostInfo.name) || "unknown"
+                        }`,
+                    );
+                    repaint();
+                },
             });
 
-            // Paint immediately: the probe is useful before any tool result
-            // arrives, and in a host the bridge only paints on tool-result.
+            // Paint immediately: useful before any tool result arrives, and in a
+            // host the bridge only paints on tool-result.
             repaint();
         </script>
     </body>

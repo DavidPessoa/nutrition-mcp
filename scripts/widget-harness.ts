@@ -52,27 +52,95 @@ function hostPage(widget: string, params: URLSearchParams): string {
     const maxHeight = params.get("maxHeight");
     const failCalls = params.get("fail") === "1";
 
-    // A representative tool result, so widgets that render structuredContent
-    // have something to paint.
-    const toolResult = {
-        date: "2026-01-15",
-        totals: {
-            calories: 1850,
-            protein_g: 120,
-            carbs_g: 190,
-            fat_g: 62,
-            water_ml: 1500,
-        },
-        has_goals: true,
-        goals: {
-            calories: 2200,
-            protein_g: 140,
-            carbs_g: 220,
-            fat_g: 70,
-            water_ml: 2500,
-        },
-        meals: [],
+    // Per-widget canned tool results. One shared fixture does NOT work: each
+    // widget's coerce() checks for its own shape, so a payload shaped for
+    // goal-progress leaves trends stuck on "Loading…" — which looks exactly like
+    // a broken handshake. Keep these in step with each template's SAMPLE.
+    const day = (d: string, kcal: number) => ({
+        date: d,
+        calories: kcal,
+        protein_g: Math.round(kcal * 0.07),
+        carbs_g: Math.round(kcal * 0.11),
+        fat_g: Math.round(kcal * 0.03),
+        water_ml: 1800,
+    });
+    const days = [
+        day("2026-07-09", 1980),
+        day("2026-07-10", 2210),
+        day("2026-07-11", 1875),
+        day("2026-07-12", 2340),
+        day("2026-07-13", 2050),
+        day("2026-07-14", 1920),
+        day("2026-07-15", 2160),
+    ];
+    const goals = {
+        calories: 2200,
+        protein_g: 160,
+        carbs_g: 220,
+        fat_g: 70,
+        water_ml: 2500,
     };
+    const totals = {
+        calories: 1850,
+        protein_g: 120,
+        carbs_g: 190,
+        fat_g: 62,
+        water_ml: 1500,
+    };
+
+    const RESULTS: Record<string, unknown> = {
+        "nutrition-summary": {
+            start_date: "2026-07-09",
+            end_date: "2026-07-15",
+            logged_days: days.length,
+            goals,
+            averages: {
+                calories: 2076,
+                protein_g: 145,
+                carbs_g: 228,
+                fat_g: 62,
+                water_ml: 1800,
+            },
+            days,
+        },
+        "goal-progress": {
+            date: "2026-07-15",
+            meal_count: 4,
+            water_entries: 6,
+            goals,
+            totals,
+            has_goals: true,
+            meals: [],
+        },
+        "meal-logged": {
+            action: "logged",
+            date: "2026-07-15",
+            logged_meal: {
+                description: "Grilled chicken salad",
+                meal_type: "lunch",
+                calories: 520,
+                protein_g: 42,
+                carbs_g: 28,
+                fat_g: 22,
+            },
+            has_goals: true,
+            goals,
+            totals,
+            meals: [],
+        },
+        trends: { range_days: 7, days, goals },
+        "weight-trends": {
+            range_days: 7,
+            unit: "kg",
+            days: days.map((d, i) => ({
+                date: d.date,
+                weight_kg: 82.4 - i * 0.1,
+                weight: 82.4 - i * 0.1,
+            })),
+        },
+    };
+    // Probe and gallery paint their own UI; anything non-null will do.
+    const toolResult = RESULTS[widget] ?? { probe: true };
 
     return `<!doctype html>
 <html><head><meta charset="utf-8"><title>host: ${widget}</title>
@@ -87,6 +155,11 @@ function hostPage(widget: string, params: URLSearchParams): string {
   <strong>${widget}</strong>
   <span class="cfg">serverTools=${serverTools} answerTools=${answerTools} delay=${delay}ms${maxHeight ? " maxHeight=" + maxHeight : ""}${failCalls ? " fail=1" : ""}</span>
   <div style="margin-top:8px"><iframe id="frame" sandbox="allow-scripts" src="/widget/${encodeURIComponent(widget)}"></iframe></div>
+  <div style="margin-top:8px">
+    <button onclick="hostRequest(1)">host req id=1</button>
+    <button onclick="hostRequest(2)">host req id=2</button>
+    <button onclick="hostNotify()">host-context-changed (dark)</button>
+  </div>
   <div id="log">host ready — iframe starts at 130px and grows only on size-changed</div>
 <script>
 const CFG = {
@@ -103,6 +176,19 @@ const log = (m) => { logEl.textContent += "\\n" + m; logEl.scrollTop = logEl.scr
 let initialized = false;
 
 function send(msg) { frame.contentWindow.postMessage(msg, "*"); }
+
+// A host->app REQUEST. The spec's ui/resource-teardown example uses id 1, which
+// collides with the app's own first request unless the app namespaces its ids.
+// The app must answer, and must NOT treat this as a response.
+function hostRequest(id) {
+  log("-> host REQUEST ui/resource-teardown (id " + id + ")");
+  send({ jsonrpc: "2.0", id, method: "ui/resource-teardown", params: { reason: "test" } });
+}
+function hostNotify() {
+  log("-> host-context-changed theme=dark");
+  send({ jsonrpc: "2.0", method: "ui/notifications/host-context-changed",
+         params: { hostContext: { theme: "dark" } } });
+}
 
 window.addEventListener("message", (e) => {
   if (e.source !== frame.contentWindow) return;   // what bridge.js should also do
@@ -149,6 +235,16 @@ window.addEventListener("message", (e) => {
     return;
   }
 
+  // ---- ui/update-model-context (a REQUEST, params.content ContentBlocks) ----
+  if (d.method === "ui/update-model-context") {
+    const p = d.params || {};
+    const shapeOk = Array.isArray(p.content) || !!p.structuredContent;
+    log("<- ui/update-model-context id=" + d.id + " shapeOk=" + shapeOk +
+        " " + JSON.stringify(p).slice(0, 120));
+    if (d.id != null) send({ jsonrpc: "2.0", id: d.id, result: {} });
+    return;
+  }
+
   // ---- app-initiated tools/call ----
   if (d.method === "tools/call") {
     const name = d.params && d.params.name;
@@ -170,6 +266,11 @@ window.addEventListener("message", (e) => {
     return;
   }
 
+  // App answering one of OUR requests.
+  if (d.id != null && d.method === undefined) {
+    log("<- app answered id " + d.id + " " + JSON.stringify(d.result || d.error));
+    return;
+  }
   log("<- (unhandled) " + JSON.stringify(d).slice(0, 160));
 });
 </script>
