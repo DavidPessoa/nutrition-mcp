@@ -20,6 +20,23 @@
 // Nothing here is served by the production app; scripts/ is dev-only.
 
 import { getWidgetHtml, WIDGET_TEMPLATES } from "../src/widgets.js";
+import { runImport } from "../src/import.js";
+import type { MealInput, MealInsertResult } from "../src/supabase.js";
+
+// In-memory stand-in for insertMeal, mirroring its dedup contract, so the harness
+// can execute the REAL bulk_import_meals logic instead of returning canned data.
+// That is what makes an end-to-end widget run meaningful: the same validation,
+// idempotency keys and per-row report a client would get.
+const store = new Map<string, MealInput & { id: string }>();
+let mealSeq = 0;
+async function fakeInsert(input: MealInput): Promise<MealInsertResult> {
+    const key = input.idempotency_key!;
+    const existing = store.get(key);
+    if (existing) return { meal: existing as never, deduplicated: true };
+    const meal = { id: `harness-${++mealSeq}`, ...input };
+    store.set(key, meal);
+    return { meal: meal as never, deduplicated: false };
+}
 
 const PORT = Number(process.env.HARNESS_PORT ?? 8787);
 const KEYS = Object.keys(WIDGET_TEMPLATES);
@@ -251,17 +268,39 @@ window.addEventListener("message", (e) => {
     log("<- tools/call " + name + " (id " + d.id + ")");
     if (!initialized) log("!! app called a tool before the handshake finished");
     if (!CFG.answerTools) { log("   (answerTools=0: dropping, app should time out)"); return; }
-    setTimeout(() => {
+    setTimeout(async () => {
       if (CFG.fail) {
         send({ jsonrpc: "2.0", id: d.id, error: { code: -32603, message: "harness: simulated failure" } });
         log("-> error for id " + d.id);
-      } else {
-        send({ jsonrpc: "2.0", id: d.id, result: {
-          content: [{ type: "text", text: "harness canned result for " + name }],
-          structuredContent: TOOL_RESULT,
-        }});
-        log("-> result for id " + d.id + (CFG.delay ? " after " + CFG.delay + "ms" : ""));
+        return;
       }
+      // bulk_import_meals runs for real, server-side, against an in-memory store.
+      if (name === "bulk_import_meals") {
+        try {
+          const r = await fetch("/tool/bulk_import_meals", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(d.params.arguments || {}),
+          });
+          const sc = await r.json();
+          send({ jsonrpc: "2.0", id: d.id, result: {
+            content: [{ type: "text", text: "see structuredContent" }],
+            structuredContent: sc,
+          }});
+          log("-> real import result id " + d.id + ": status=" + sc.status +
+              " created=" + sc.summary.created + " dedup=" + sc.summary.deduplicated +
+              " failed=" + sc.summary.failed + (sc.dry_run ? " (dry run)" : ""));
+        } catch (e) {
+          send({ jsonrpc: "2.0", id: d.id, error: { code: -32603, message: String(e) } });
+          log("-> error for id " + d.id + ": " + e);
+        }
+        return;
+      }
+      send({ jsonrpc: "2.0", id: d.id, result: {
+        content: [{ type: "text", text: "harness canned result for " + name }],
+        structuredContent: TOOL_RESULT,
+      }});
+      log("-> result for id " + d.id + (CFG.delay ? " after " + CFG.delay + "ms" : ""));
     }, CFG.delay);
     return;
   }
@@ -297,6 +336,28 @@ Bun.serve({
             return new Response(hostPage(widget, url.searchParams), {
                 headers: { "content-type": "text/html; charset=utf-8" },
             });
+        }
+        if (
+            url.pathname === "/tool/bulk_import_meals" &&
+            req.method === "POST"
+        ) {
+            const args = (await req.json()) as Parameters<typeof runImport>[0];
+            const result = await runImport(args, {
+                userId: "harness-user",
+                tz: "Europe/Kyiv",
+                tzConfigured: true,
+                nowMs: Date.now(),
+                insert: fakeInsert,
+                async existingKeys(keys) {
+                    return new Set(keys.filter((k) => store.has(k)));
+                },
+            });
+            return Response.json(result);
+        }
+        if (url.pathname === "/tool/reset" && req.method === "POST") {
+            store.clear();
+            mealSeq = 0;
+            return Response.json({ ok: true, cleared: true });
         }
         if (url.pathname.startsWith("/widget/")) {
             const key = decodeURIComponent(

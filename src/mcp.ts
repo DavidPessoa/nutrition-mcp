@@ -86,6 +86,7 @@ const MEAL_LOGGED_WIDGET_URI = "ui://widget/meal-logged.html";
 const TRENDS_WIDGET_URI = "ui://widget/trends.html";
 const WEIGHT_TRENDS_WIDGET_URI = "ui://widget/weight-trends.html";
 const IMPORT_PROBE_WIDGET_URI = "ui://widget/import-probe.html";
+const IMPORT_MEALS_WIDGET_URI = "ui://widget/import-meals.html";
 
 // Temporary: gates the bulk-import capability probe (widget + debug tool) so
 // merging it is inert. Set ENABLE_WIDGET_PROBE in the deploy environment to run
@@ -537,6 +538,96 @@ function registerTools(
                                 text: `${header}\n${formatMeal(meal)}${progressSection}`,
                             },
                         ],
+                        structuredContent,
+                    };
+                },
+                { userId },
+            );
+        },
+    );
+
+    // UI resource for the import widget. Registered unconditionally, like every
+    // other widget resource — only the tool's _meta.ui link is gated per user.
+    server.registerResource(
+        "import-meals-widget",
+        IMPORT_MEALS_WIDGET_URI,
+        {
+            title: "Import Meals",
+            description:
+                "Interactive importer for a meal-history export: reads the file in the browser, maps its columns, previews the rows, then writes them via bulk_import_meals.",
+            mimeType: APP_UI_MIME_TYPE,
+        },
+        async (uri) => {
+            return {
+                contents: [
+                    {
+                        uri: uri.href,
+                        mimeType: APP_UI_MIME_TYPE,
+                        text: await getWidgetHtml("import-meals"),
+                        _meta: { ui: { prefersBorder: true } },
+                    },
+                ],
+            };
+        },
+    );
+
+    server.registerTool(
+        "start_meal_import",
+        {
+            title: "Import Meals from a File",
+            description:
+                "Open an importer the user can drive themselves to load a meal-history export (MyFitnessPal, Cronometer, Lose It!, MacroFactor). Prefer this over bulk_import_meals whenever the user has an actual file: the importer reads and maps it in the browser, so the rows never pass through you and cannot be mistranscribed, and it handles column mapping, batching and retries. Call it when the user says they want to import, upload, or bring in their history from another app. Fall back to bulk_import_meals if the user cannot use the importer, if they have already pasted the data into the conversation, or if the importer reports that this client will not let it save.",
+            inputSchema: {},
+            outputSchema: {
+                // Real content: the widget needs all of this. With no
+                // structuredContent the bridge never paints and the iframe sits
+                // on its loading state forever.
+                tz: z.string(),
+                tz_configured: z.boolean(),
+                today: z.string(),
+                max_rows_per_call: z.number(),
+                import_tool_name: z.string(),
+                known_source_apps: z.array(z.string()),
+                widgets_enabled: z.boolean(),
+            },
+            annotations: {
+                title: "Import Meals from a File",
+                readOnlyHint: true,
+                destructiveHint: false,
+                idempotentHint: true,
+            },
+            ...uiMeta(IMPORT_MEALS_WIDGET_URI),
+        },
+        async () => {
+            return withAnalytics(
+                "start_meal_import",
+                async () => {
+                    const profile = await getProfile(userId);
+                    const tz = profile?.timezone ?? "UTC";
+                    const structuredContent = {
+                        // The widget must resolve dates the same way the server
+                        // will, so it is told the timezone rather than guessing.
+                        tz,
+                        tz_configured: profile !== null,
+                        today: todayInTz(tz),
+                        max_rows_per_call: MAX_ROWS_PER_CALL,
+                        import_tool_name: "bulk_import_meals",
+                        known_source_apps: [
+                            "myfitnesspal",
+                            "cronometer",
+                            "loseit",
+                            "macrofactor",
+                        ],
+                        widgets_enabled: widgetsEnabled,
+                    };
+                    const text = widgetsEnabled
+                        ? "Importer ready — pick your export file in the panel above. Nothing is saved until you confirm the preview." +
+                          (profile === null
+                              ? " Note: this account has no timezone set, so times will be read as UTC. Offer to set it first."
+                              : "")
+                        : "This account has widgets turned off, so the importer cannot be shown. Ask the user to paste their export (or enable widgets with set_widget_display), then import it yourself with bulk_import_meals.";
+                    return {
+                        content: [{ type: "text" as const, text }],
                         structuredContent,
                     };
                 },
