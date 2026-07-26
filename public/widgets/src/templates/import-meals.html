@@ -11,6 +11,11 @@
 
   Four steps: file -> map columns -> preview -> import.
 
+  Alcohol is opt-in and the opt-in reaches this far: start_meal_import sends
+  drink_unit, and with it null the widget neither maps, previews nor sends an
+  alcohol column, however loudly the file advertises one. See gatedField below
+  for why nothing is written either.
+
   The CSV parser is NOT written here. `@inlinets src/csv.ts` splices in the real
   tested module (src/csv.test.ts), because a parser facing arbitrary user files
   must not live as untested inline template JS.
@@ -106,6 +111,16 @@
             /*@inlinets src/csv.ts@*/
 
             // ---- config from start_meal_import -------------------------------
+            //
+            // drink_unit is the alcohol opt-in, exactly as every other
+            // widget-backed tool carries it: "us" / "uk" when the user tracks
+            // alcohol, null when they do not. It DEFAULTS to null and an absent
+            // field therefore reads as tracking-off, deliberately: a widget is
+            // assembled from source by the same process that serves the tool, so
+            // a payload with no drink_unit means a host or harness synthesised
+            // it, and guessing "on" there would surface per-row ethanol to the
+            // one user the opt-in exists to protect. Failing closed costs a
+            // column; failing open costs the thing the gate is for.
             let CFG = {
                 tz: "UTC",
                 today: "",
@@ -113,8 +128,15 @@
                 import_tool_name: "bulk_import_meals",
                 known_source_apps: [],
                 tz_configured: true,
+                drink_unit: null,
             };
             let API = null;
+
+            // Strict allowlist, not truthiness: only the two values the server's
+            // schema can emit turn alcohol on.
+            function alcoholTracked() {
+                return CFG.drink_unit === "us" || CFG.drink_unit === "uk";
+            }
 
             // Support contact, shown only when something has actually gone wrong.
             // Plain text, NOT a mailto: link — the widget runs in a
@@ -215,6 +237,10 @@
                 { key: "protein_g", label: "Protein (g)" },
                 { key: "carbs_g", label: "Carbs (g)" },
                 { key: "fat_g", label: "Fat (g)" },
+                { key: "fiber_g", label: "Fiber (g)" },
+                { key: "sugar_g", label: "Sugar, total (g)" },
+                // Only offered when the user tracks alcohol — see gatedField.
+                { key: "alcohol_g", label: "Alcohol (g)", alcoholOnly: true },
                 { key: "notes", label: "Notes" },
                 { key: "time", label: "Time (separate column)" },
                 { key: "deleted", label: "Deleted flag" },
@@ -251,9 +277,117 @@
                     "kohlenhydrate",
                 ],
                 fat_g: ["fat_g", "fat", "total_fat", "fett"],
+                // normalizeHeader turns "Fiber (g)" into "fiber_g" but leaves
+                // "Fiber" as "fiber", so both spellings are listed. Localised
+                // headers usually ship the unit too ("Ballaststoffe (g)"), so
+                // the non-English words get the _g form as well.
+                fiber_g: [
+                    "fiber_g",
+                    "fiber",
+                    "fibre_g",
+                    "fibre",
+                    "dietary_fiber",
+                    "dietary_fibre",
+                    "total_fiber",
+                    "total_fibre",
+                    "ballaststoffe",
+                    "ballaststoffe_g",
+                    "fibra",
+                    "fibres",
+                ],
+                // TOTAL sugars only. "Added sugar" / "free sugars" is a
+                // different quantity and is deliberately absent here — see
+                // ADDED_SUGAR_RE below. Matching is exact per normalized
+                // header, so Cronometer's "Sugar Alcohols (g)" (a polyol, not
+                // sugar and not ethanol) cannot land in this field either.
+                sugar_g: [
+                    "sugar_g",
+                    "sugar",
+                    "sugars_g",
+                    "sugars",
+                    "total_sugar",
+                    "total_sugars",
+                    "total_sugars_g",
+                    "zucker",
+                    "zucker_g",
+                    "azucar",
+                    "azucares",
+                    "sucres",
+                    "zuccheri",
+                    "suikers",
+                ],
+                // Grams of pure ethanol. NOT a drink volume, an ABV percentage
+                // or a sugar-alcohol count, so "abv" / "alcohol_by_volume" /
+                // "sugar_alcohols" are excluded on purpose. "alcohol_ethyl" is
+                // the USDA field name Cronometer inherits.
+                alcohol_g: [
+                    "alcohol_g",
+                    "alcohol",
+                    "alcohol_ethyl",
+                    "ethanol",
+                    "ethanol_g",
+                    "alkohol",
+                    "alkohol_g",
+                ],
                 notes: ["note", "notes", "comment", "kommentar"],
                 deleted: ["deleted"],
             };
+
+            // Columns that hold ADDED sugar rather than total sugar. The server
+            // stores total sugars (including what is naturally in fruit and
+            // milk), so an added-sugar column is not a substitute: mapping it
+            // would under-report every row while looking like a clean import.
+            // It never auto-maps; when a file has one and nothing filled the
+            // Sugar row, say why rather than leaving a silent blank.
+            const ADDED_SUGAR_RE =
+                /added_sugar|sugar_added|free_sugar|zugesetzt|zusatz/;
+            function addedSugarColumns() {
+                if (!S.table) return [];
+                return S.table.headers.filter((h) =>
+                    ADDED_SUGAR_RE.test(normalizeHeader(h)),
+                );
+            }
+
+            // Alcohol is opt-in (CONTRACT §7). With tracking off this widget
+            // does not auto-map an alcohol column, does not offer one to map,
+            // does not preview one, and — the decision worth stating — does not
+            // SEND one either.
+            //
+            // The "never silently drop user data" rule governs values a caller
+            // explicitly passes: bulk_import_meals still stores alcohol_g for
+            // anyone who supplies it, tracking or not, so the write layer stays
+            // ungated. Here the widget IS the caller, and declining to map a
+            // column is a mapping decision, not a dropped field. Writing it
+            // anyway would put a number into the user's log that never appeared
+            // in the preview they confirmed — this whole flow exists so that
+            // what is written is what was shown — and it would sit there
+            // unreviewable until the day they turn tracking on. Turning
+            // tracking on first and importing then is the supported path.
+            function gatedField(f) {
+                return f.alcoholOnly && !alcoholTracked();
+            }
+            // The gate is silent by construction — with tracking off the field
+            // is never offered, so a file's alcohol column simply is not there
+            // to notice. That silence is only safe if the data can be got back,
+            // and it cannot: alcohol_g is deliberately outside the import
+            // idempotency digest (CONTRACT §2), so importing now and re-running
+            // the same file after turning tracking on is a clean no-op that
+            // back-fills nothing. The user would have to delete and re-import.
+            // So say it once, here, while the choice is still free.
+            //
+            // Same ALIASES entry the gate maps by, so the notice cannot drift
+            // from what would actually have been imported. It fires on the
+            // column's PRESENCE only and names its header — the user's own file
+            // text. It never reads a cell: per-row ethanol figures are the one
+            // thing the opt-in exists to keep off this screen.
+            function alcoholColumn() {
+                if (!S.table) return "";
+                const i = findColumn(S.table.headers, ALIASES.alcohol_g);
+                return i >= 0 ? S.table.headers[i] : "";
+            }
+            function mappableFields() {
+                return FIELDS.filter((f) => !gatedField(f));
+            }
 
             const S = {
                 step: "file", // file | map | preview | done
@@ -316,10 +450,15 @@
             function autoMap() {
                 S.mapping = {};
                 for (const f of FIELDS) {
-                    S.mapping[f.key] = findColumn(
-                        S.table.headers,
-                        ALIASES[f.key] || [f.key],
-                    );
+                    // A gated field is pinned to -1 rather than skipped: every
+                    // key must exist, because buildRows' num() only treats a
+                    // real negative index as "not in this file".
+                    S.mapping[f.key] = gatedField(f)
+                        ? -1
+                        : findColumn(
+                              S.table.headers,
+                              ALIASES[f.key] || [f.key],
+                          );
                 }
             }
             // A MyFitnessPal export has a Meal column but no food name; knowing
@@ -489,7 +628,8 @@
                     const time = cell(r, m.time) || timeInDateCell(rawWhen);
                     if (time) when = when + " " + time;
 
-                    // Calories only: protein/carbs/fat are grams in every export.
+                    // Calories only: protein/carbs/fat/fiber/sugar/alcohol are
+                    // all grams in every export, so none of them convert.
                     const energy = num(r, m.calories);
 
                     rows.push({
@@ -504,6 +644,14 @@
                         protein_g: num(r, m.protein_g),
                         carbs_g: num(r, m.carbs_g),
                         fat_g: num(r, m.fat_g),
+                        fiber_g: num(r, m.fiber_g),
+                        sugar_g: num(r, m.sugar_g),
+                        // The mapping is already -1 when tracking is off; this
+                        // is the belt to that braces, because this line is the
+                        // one that decides what leaves the browser.
+                        alcohol_g: alcoholTracked()
+                            ? num(r, m.alcohol_g)
+                            : undefined,
                         notes: cell(r, m.notes),
                     });
                 }
@@ -849,27 +997,47 @@
                               )
                               .join("")
                         : "") +
+                    (S.mapping.sugar_g === -1 && addedSugarColumns().length
+                        ? '<div class="notice"><span>i</span><span>' +
+                          esc(
+                              "This file has an added-sugar column (" +
+                                  addedSugarColumns()[0] +
+                                  ") but no total-sugar column, so Sugar was left unmapped. Sugar is stored as TOTAL sugars, including what occurs naturally in fruit and milk, so mapping added sugar into it would under-report every row.",
+                          ) +
+                          "</span></div>"
+                        : "") +
+                    (!alcoholTracked() && alcoholColumn()
+                        ? '<div class="notice"><span>i</span><span>' +
+                          esc(
+                              "This file has an alcohol column (" +
+                                  alcoholColumn() +
+                                  "), but alcohol tracking is off for this account, so it will not be imported. Re-importing the same file later will not fill it in — those rows will already be logged and will be skipped as duplicates. To keep this data, ask Claude to turn on alcohol tracking (set_alcohol_tracking) before importing.",
+                          ) +
+                          "</span></div>"
+                        : "") +
                     '<div class="map-grid">' +
-                    FIELDS.map((f) => {
-                        const sel = S.mapping[f.key];
-                        const sample =
-                            sel >= 0 && t.rows[0] ? t.rows[0][sel] : "";
-                        return (
-                            '<div><div class="map-src">' +
-                            esc(f.label) +
-                            (f.required
-                                ? ' <span style="color:var(--over)">*</span>'
-                                : "") +
-                            '</div><div class="map-sample">' +
-                            esc(sample ? "e.g. " + sample : "") +
-                            "</div></div>" +
-                            '<select class="select map-sel" data-field="' +
-                            f.key +
-                            '">' +
-                            opts(sel) +
-                            "</select>"
-                        );
-                    }).join("") +
+                    mappableFields()
+                        .map((f) => {
+                            const sel = S.mapping[f.key];
+                            const sample =
+                                sel >= 0 && t.rows[0] ? t.rows[0][sel] : "";
+                            return (
+                                '<div><div class="map-src">' +
+                                esc(f.label) +
+                                (f.required
+                                    ? ' <span style="color:var(--over)">*</span>'
+                                    : "") +
+                                '</div><div class="map-sample">' +
+                                esc(sample ? "e.g. " + sample : "") +
+                                "</div></div>" +
+                                '<select class="select map-sel" data-field="' +
+                                f.key +
+                                '">' +
+                                opts(sel) +
+                                "</select>"
+                            );
+                        })
+                        .join("") +
                     "</div>" +
                     formatFieldsHtml() +
                     '<div class="field"><label class="label">Source app (optional)</label>' +
@@ -890,6 +1058,23 @@
                     (r) => !/\d\d:\d\d/.test(String(r.logged_at)),
                 ).length;
                 const chunks = chunkRows(S.rows, CFG.max_rows_per_call).length;
+                // Fiber, sugar and alcohol are missing from most exports, so
+                // their columns appear only when this file actually carries
+                // them — three columns of "—" would push the macros that do
+                // have values off the visible width for no information.
+                // Alcohol additionally never appears with tracking off: the
+                // rows carry none by then, but the column is filtered by the
+                // opt-in as well as by the data, so a stray value could not
+                // put ethanol on screen.
+                const extra = [
+                    ["fiber_g", "Fib"],
+                    ["sugar_g", "Sug"],
+                    ["alcohol_g", "Alc", true],
+                ].filter(
+                    (c) =>
+                        (!c[2] || alcoholTracked()) &&
+                        S.rows.some((r) => r[c[0]] !== undefined),
+                );
                 return (
                     '<section class="card"><h3>Preview</h3>' +
                     '<div class="stat-row"><span><b>' +
@@ -942,6 +1127,9 @@
                     '<div class="tscroll"><table class="tbl"><thead><tr>' +
                     "<th>Line</th><th>When</th><th>Meal</th><th class='wide'>Food</th>" +
                     '<th class="num">kcal</th><th class="num">P</th><th class="num">C</th><th class="num">F</th>' +
+                    extra
+                        .map((c) => '<th class="num">' + c[1] + "</th>")
+                        .join("") +
                     "</tr></thead><tbody>" +
                     shown
                         .map(
@@ -965,7 +1153,16 @@
                                 (r.carbs_g ?? "—") +
                                 '</td><td class="num">' +
                                 (r.fat_g ?? "—") +
-                                "</td></tr>",
+                                "</td>" +
+                                extra
+                                    .map(
+                                        (c) =>
+                                            '<td class="num">' +
+                                            (r[c[0]] ?? "—") +
+                                            "</td>",
+                                    )
+                                    .join("") +
+                                "</tr>",
                         )
                         .join("") +
                     "</tbody></table>" +
@@ -1209,6 +1406,9 @@
                     import_tool_name: "bulk_import_meals",
                     known_source_apps: ["myfitnesspal", "cronometer"],
                     tz_configured: true,
+                    // Tracking off is the default account state, so it is what
+                    // the standalone preview shows.
+                    drink_unit: null,
                 },
                 onReady: (api) => {
                     API = api;

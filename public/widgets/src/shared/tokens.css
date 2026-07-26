@@ -14,7 +14,10 @@
     --calories: #ff9f0a;
     --protein: #8b5cf6;
     --carbs: #10b981;
+    --fiber: #0d9488;
+    --sugar: #65a30d;
     --fat: #f43f7e;
+    --alcohol: #a21caf;
     --water: #0ea5e9;
     --over: #d0452b;
     --warn: #b26a00;
@@ -40,7 +43,10 @@
         --calories: #ffab2e;
         --protein: #a78bfa;
         --carbs: #34d399;
+        --fiber: #14b8a6;
+        --sugar: #a3e635;
         --fat: #fb7199;
+        --alcohol: #e879f9;
         --water: #38bdf8;
         --over: #ff6b52;
         --warn: #e0a030;
@@ -61,7 +67,10 @@
     --calories: #ff9f0a;
     --protein: #8b5cf6;
     --carbs: #10b981;
+    --fiber: #0d9488;
+    --sugar: #65a30d;
     --fat: #f43f7e;
+    --alcohol: #a21caf;
     --water: #0ea5e9;
     --over: #d0452b;
     --warn: #b26a00;
@@ -79,7 +88,10 @@
     --calories: #ffab2e;
     --protein: #a78bfa;
     --carbs: #34d399;
+    --fiber: #14b8a6;
+    --sugar: #a3e635;
     --fat: #fb7199;
+    --alcohol: #e879f9;
     --water: #38bdf8;
     --over: #ff6b52;
     --warn: #e0a030;
