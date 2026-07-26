@@ -8,6 +8,7 @@
 // dependency for logging a meal.
 
 import { getSupabase } from "./supabase.js";
+import { gramsFromDrink, formatAlcohol, type DrinkUnit } from "./alcohol.js";
 
 const OFF_PRODUCT_URL = "https://world.openfoodfacts.org/api/v2/product";
 const REQUEST_TIMEOUT_MS = 8_000;
@@ -39,6 +40,9 @@ export interface FoodResult {
     protein_g: number | null;
     carbs_g: number | null;
     fat_g: number | null;
+    fiber_g: number | null;
+    sugar_g: number | null; // TOTAL sugars, incl. naturally occurring
+    alcohol_g: number | null; // pure ethanol; often null — see resolveAlcoholGrams
     source: string; // stable id, e.g. "off:737628064502"
     source_name: typeof SOURCE_OFF;
     barcode: string;
@@ -64,7 +68,81 @@ interface OFFProduct {
     product_name?: string;
     brands?: string;
     serving_size?: string;
+    // OFF's machine-parsed reading of serving_size ("33 cl" -> 330 + "ml").
+    serving_quantity?: unknown;
+    serving_quantity_unit?: unknown;
     nutriments?: Record<string, unknown>;
+}
+
+// The only alcohol unit Open Food Facts actually emits (see below).
+const OFF_ABV_UNIT = "% vol";
+
+// Serving volume in millilitres, or null when OFF did not parse one or parsed
+// it in some other unit (grams, or an empty/garbage unit — both occur).
+function servingVolumeMl(product: OFFProduct): number | null {
+    const unit = String(product.serving_quantity_unit ?? "")
+        .trim()
+        .toLowerCase();
+    if (unit !== "ml") return null;
+    const ml = num(product.serving_quantity);
+    if (ml == null || ml <= 0) return null;
+    return ml;
+}
+
+// Open Food Facts reports alcohol as ABV — percent by VOLUME — and NOT as grams
+// per serving or per 100 g the way every other nutriment is reported.
+//
+// Verified against the live API rather than assumed: of 164 products carrying an
+// `alcohol` nutriment, 164 declared `alcohol_unit: "% vol"` and none declared
+// grams. Decisively, all 164 also had
+// `alcohol === alcohol_100g === alcohol_serving`. That equality is the proof: a
+// genuine gram nutriment scales with the serving — the same product (1664,
+// barcode 3080216052885, 250 mL serving) reports `carbohydrates_100g: 3` but
+// `carbohydrates_serving: 7.5` — so a value that flatly refuses to scale with
+// serving size is a dimensionless percentage, not a mass.
+//
+// Copying that number into `alcohol_g` would therefore be garbage: a 40% vodka
+// would log "40 g of ethanol" no matter the pour, and the 250 mL 1664 above
+// would log 5.5 g instead of its true ~10.8 g. So we populate `alcohol_g` only
+// when we can honestly convert, which needs the serving VOLUME:
+// grams = mL x ABV/100 x 0.789 (gramsFromDrink, src/alcohol.ts).
+//
+// All three conditions must hold; any miss yields null, never a guess:
+//   1. the declared unit really is "% vol" — an unrecognized unit means OFF
+//      changed something, and null beats a misread number;
+//   2. OFF parsed a serving quantity AND it is in mL. Only ~1/3 of alcoholic
+//      products have one; most carry no serving quantity at all;
+//   3. we resolved on the per-serving basis. On the per-100 g fallback basis
+//      every other field is per 100 GRAMS while ABV is per unit VOLUME, so
+//      converting would need the beverage's density — which OFF does not
+//      publish. Mixing two bases inside one FoodResult is worse than a null.
+//
+// Net effect: a real number for products that declare a millilitre serving, and
+// null (rendered "n/a", so the caller can fall back to estimation) for the rest.
+// A null is correct; a wrong number is not.
+function resolveAlcoholGrams(
+    product: OFFProduct,
+    n: Record<string, unknown>,
+    hasServing: boolean,
+): number | null {
+    if (!hasServing) return null;
+
+    const unit =
+        typeof n["alcohol_unit"] === "string"
+            ? n["alcohol_unit"].trim().toLowerCase()
+            : null;
+    if (unit !== OFF_ABV_UNIT) return null;
+
+    // All three keys carry the same ABV; prefer the most specific that is set.
+    const abv = num(n["alcohol_serving"] ?? n["alcohol_100g"] ?? n["alcohol"]);
+    // Bounds-check before calling gramsFromDrink, which throws on nonsense — a
+    // corrupt community-edited value must degrade to null, not blow up a lookup.
+    if (abv == null || abv < 0 || abv > 100) return null;
+
+    const ml = servingVolumeMl(product);
+    if (ml == null) return null;
+
+    return num(gramsFromDrink(ml, abv));
 }
 
 // Normalize an OFF product into our shape. Prefer per-serving values when the
@@ -85,6 +163,15 @@ function normalizeOFFProduct(product: OFFProduct, barcode: string): FoodResult {
         protein_g: pick("proteins_serving", "proteins_100g"),
         carbs_g: pick("carbohydrates_serving", "carbohydrates_100g"),
         fat_g: pick("fat_serving", "fat_100g"),
+        // OFF spells it "fiber" (American) — no "fibre_*" key exists; confirmed
+        // across 100 products, where only fiber_100g / fiber_serving appear.
+        fiber_g: pick("fiber_serving", "fiber_100g"),
+        // "sugars", plural. This is TOTAL sugars including naturally occurring
+        // sugar from fruit and milk. OFF also carries a separate
+        // `added-sugars_*`; we deliberately do not read it — the canonical
+        // stored field is total sugar.
+        sugar_g: pick("sugars_serving", "sugars_100g"),
+        alcohol_g: resolveAlcoholGrams(product, n, hasServing),
         source: `off:${barcode}`,
         source_name: SOURCE_OFF,
         barcode,
@@ -120,6 +207,14 @@ export async function fetchProductFromOFF(
     // for our purposes — returning it would report the product as "found" with
     // every macro n/a (suppressing the caller's estimation fallback) and pin a
     // useless record in the cache for the full TTL. Treat it as not found.
+    //
+    // Deliberately still keyed on the four core macros only, not on the newer
+    // fiber/sugar/alcohol fields. A product with sugar but no calories, protein,
+    // carbs or fat is a broken record, not a usable hit, and returning it would
+    // suppress exactly the estimation fallback this check exists to preserve.
+    // (Adding alcohol_g here would be a no-op regardless: it is only ever
+    // non-null on the per-serving basis, which requires energy-kcal_serving,
+    // which makes calories non-null.)
     if (
         food.calories == null &&
         food.protein_g == null &&
@@ -151,7 +246,20 @@ async function getCachedFood(
         if (error || !data) return null;
         const ageMs = Date.now() - new Date(data.fetched_at).getTime();
         if (ageMs > ttlMs) return null;
-        return data.payload as FoodResult;
+        const payload = data.payload as FoodResult;
+        // Rows cached before fiber/sugar/alcohol shipped have no such keys, and
+        // stay servable for the whole TTL after deploy. Deserialized they would
+        // be `undefined`, not `null` — and an undefined field is an ABSENT one
+        // once it reaches a structuredContent literal, which for a .nullable()
+        // (hence *required*) schema field is a validation failure rather than a
+        // null. Backfill explicitly so a cache hit and a fresh fetch are always
+        // the same shape.
+        return {
+            ...payload,
+            fiber_g: payload.fiber_g ?? null,
+            sugar_g: payload.sugar_g ?? null,
+            alcohol_g: payload.alcohol_g ?? null,
+        };
     } catch {
         return null;
     }
@@ -197,9 +305,23 @@ function macro(value: number | null, unit: string): string {
     return value == null ? "n/a" : `${value} ${unit}`;
 }
 
-export function formatFoodResult(food: FoodResult): string {
+/**
+ * Render a lookup for the model. `alcoholUnit` is the user's drink unit, or null
+ * when alcohol tracking is off for them — in which case the alcohol line is
+ * omitted entirely, matching every other display path. The value is still
+ * returned in the FoodResult and still stored if the meal is logged; only the
+ * rendering is gated.
+ *
+ * Fiber and sugar are never gated, and are shown even when null ("n/a"): a food
+ * with no fiber figure in Open Food Facts is a fact worth stating, since the
+ * alternative is the model quietly assuming zero.
+ */
+export function formatFoodResult(
+    food: FoodResult,
+    alcoholUnit: DrinkUnit | null = null,
+): string {
     const title = food.brand ? `${food.name} (${food.brand})` : food.name;
-    return [
+    const lines = [
         title,
         `Serving: ${food.serving ?? "n/a"}`,
         `Calories: ${macro(food.calories, "kcal")} · Protein: ${macro(
@@ -209,6 +331,14 @@ export function formatFoodResult(food: FoodResult): string {
             food.fat_g,
             "g",
         )}`,
-        `Source: Open Food Facts (barcode ${food.barcode})`,
-    ].join("\n");
+        `Fiber: ${macro(food.fiber_g, "g")} · Sugar (total): ${macro(
+            food.sugar_g,
+            "g",
+        )}`,
+    ];
+    if (alcoholUnit && food.alcohol_g != null) {
+        lines.push(`Alcohol: ${formatAlcohol(food.alcohol_g, alcoholUnit)}`);
+    }
+    lines.push(`Source: Open Food Facts (barcode ${food.barcode})`);
+    return lines.join("\n");
 }

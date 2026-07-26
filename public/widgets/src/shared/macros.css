@@ -1,4 +1,6 @@
-/* Macro panel — calories hero, protein/carbs/fat row, water bar.
+/* Macro panel — calories hero, protein/carbs/fat row, water bar, alcohol stat
+   line, plus the disclosure that reveals a macro's sub-components (carbs →
+   fiber + sugar) and the meals behind it.
    Pairs with shared/ring.css (the gauge) and shared/macros.js (the markup).
    Include ring.css as well as this file. */
 
@@ -131,6 +133,16 @@
     outline: 1.5px solid color-mix(in srgb, var(--accent) 45%, transparent);
     outline-offset: -1px;
 }
+/* The open tile's own captions go full-strength. --text-dim over the accent
+   tint measures 4.36:1 in light (5.07:1 on the plain panel), under the 4.5:1
+   floor — and the selected tile reading brighter than its neighbours is the
+   right emphasis anyway. */
+.macro-cell.open .mlabel,
+.macro-cell.open .mgoal,
+.macro-hero.open .mlabel,
+.macro-hero.open .mgoal {
+    color: var(--text);
+}
 
 /* Breakdown region — the per-meal list a tapped tile reveals. */
 .macro-detail {
@@ -232,45 +244,125 @@
     padding: 8px 0 1px;
 }
 
-/* Water — full-width horizontal progress bar. */
-.macro-water {
-    padding: 15px 18px 16px;
-    margin-bottom: 20px;
+/* Sub-components inside a disclosure (fiber + sugar under carbs), and the
+   heading that separates them from the per-meal list below. */
+/* No opacity here, deliberately. --text-dim on --panel measures 5.07:1 in
+   light and 5.93:1 in dark; an extra 0.75 dropped that to 3.09 / 3.93, under
+   the 4.5:1 WCAG AA floor for text this small. Dim it further and it fails
+   again — use size and weight to rank it below .md-title instead. */
+.md-subtitle {
+    font-size: 10.5px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-dim);
+    margin: 10px 0 8px;
 }
-.macro-water .wtop {
+.md-head + .md-subs .md-subtitle {
+    margin-top: 4px;
+}
+.macro-sub + .macro-sub {
+    margin-top: 12px;
+}
+
+/* Bar stat — label + value line, thin progress bar, goal caption. One idiom at
+   two sizes: full-width on its own card for water (.macro-water), compact
+   inside a disclosure for each sub-component (.macro-sub). */
+.barstat .wtop {
     display: flex;
     align-items: baseline;
     justify-content: space-between;
     gap: 12px;
     margin-bottom: 11px;
 }
-.macro-water .wval {
+.barstat .wval {
     font-size: 15px;
     font-weight: 800;
     letter-spacing: -0.02em;
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
 }
-.macro-water .wval .wsub {
+.barstat .wval .wsub {
     font-size: 12px;
     font-weight: 500;
     color: var(--text-dim);
     margin-left: 3px;
 }
-.macro-water .wbar {
+.barstat .wbar {
     position: relative;
     height: 10px;
     border-radius: 999px;
     background: var(--track);
     overflow: hidden;
 }
-.macro-water .wfill {
+.barstat .wfill {
     position: absolute;
     top: 0;
     bottom: 0;
     left: 0;
     border-radius: 999px;
 }
-.macro-water .wgoal {
+.barstat .wgoal {
     margin-top: 8px;
+}
+
+/* Water — full-width horizontal progress bar on its own card. */
+.macro-water {
+    padding: 15px 18px 16px;
+    margin-bottom: 20px;
+}
+
+/* Compact bar stat: no card of its own, it sits on the disclosure surface. */
+.macro-sub .wtop {
+    margin-bottom: 8px;
+}
+.macro-sub .wval {
+    font-size: 13.5px;
+}
+.macro-sub .wval .wsub {
+    font-size: 11px;
+}
+.macro-sub .wbar {
+    height: 7px;
+}
+.macro-sub .wgoal {
+    margin-top: 6px;
+}
+
+/* Alcohol — a plain stat line, never a ring. Hidden entirely when the payload
+   sends null (alcohol tracking off); a 0 from a tracking user still shows. */
+.macro-stat {
+    padding: 14px 18px 15px;
+    margin-bottom: 20px;
+}
+.macro-stat .stop {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 4px 12px;
+    /* The value is nowrap ("2.0 US drinks · 27.7 g" must not break mid-figure),
+       so on a very narrow host it drops to its own line rather than spilling
+       out of the card. */
+    flex-wrap: wrap;
+}
+.macro-stat .sval {
+    font-size: 15px;
+    font-weight: 800;
+    letter-spacing: -0.02em;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+.macro-stat .sval .ssub {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-dim);
+    margin-left: 3px;
+}
+.macro-stat .sval .ssep {
+    color: var(--text-dim);
+    font-weight: 500;
+    margin: 0 5px;
+}
+.macro-stat .sgoal {
+    margin-top: 7px;
 }

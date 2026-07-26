@@ -76,7 +76,7 @@
                     <h1 class="auth-title">Privacy Policy</h1>
                 </div>
 
-                <p class="legal-updated">Last updated: July 23, 2026</p>
+                <p class="legal-updated">Last updated: July 26, 2026</p>
 
                 <div class="legal-section">
                     <h2 class="legal-heading">What we collect</h2>
@@ -91,8 +91,9 @@
                     <ul>
                         <li>
                             <strong>Meal logs</strong> — description, meal type,
-                            calories, macros, notes, and timestamps. Food photos
-                            are interpreted by your AI assistant and are never
+                            calories, macros, fiber, total sugar, grams of
+                            alcohol, notes, and timestamps. Food photos are
+                            interpreted by your AI assistant and are never
                             uploaded to or stored by us.
                         </li>
                         <li>
@@ -106,13 +107,15 @@
                         </li>
                         <li>
                             <strong>Goals</strong> — your daily calorie,
-                            protein, carb, fat, and water targets, and your
-                            target weight.
+                            protein, carb, fat, fiber, sugar, alcohol, and water
+                            targets, and your target weight.
                         </li>
                         <li>
                             <strong>Profile settings</strong> — your IANA
-                            timezone, preferred weight unit, and whether in-chat
-                            widgets are enabled.
+                            timezone, preferred weight unit, whether alcohol
+                            tracking is switched on and which standard drink it
+                            is shown in, and whether in-chat widgets are
+                            enabled.
                         </li>
                         <li>
                             <strong>Tool-usage telemetry</strong> — for each MCP
@@ -124,6 +127,24 @@
                             logs.
                         </li>
                     </ul>
+                    <p>
+                        <strong>Alcohol is health data too</strong>, and of a
+                        more sensitive kind than a calorie count, so it works
+                        differently from everything above. Alcohol tracking is
+                        off by default, and we only ever record alcohol when it
+                        comes from you — a drink you log, or a column in a file
+                        you import. Nothing infers it on your behalf. Switching
+                        the setting off does two things: the bulk importer stops
+                        reading the alcohol column out of files you upload, and
+                        everything else stops showing alcohol in the meals,
+                        goals, progress and widgets you see. It is not a delete
+                        switch. Alcohol you logged directly is still recorded
+                        whether the setting is on or off, anything already
+                        stored stays in the database, and all of it still
+                        appears in your CSV export. To actually remove an
+                        alcohol figure, delete the meal it belongs to, or delete
+                        your account.
+                    </p>
                     <p>
                         We also keep the OAuth access and refresh tokens and
                         authorization codes that let your AI assistant stay
@@ -202,7 +223,9 @@
                         irreversible. It removes your meals, water and weight
                         logs, goals, profile settings, any stored CSV export,
                         your tool-usage telemetry, your access tokens, and the
-                        account itself.
+                        account itself. That includes every alcohol figure you
+                        ever logged, whether or not alcohol tracking was
+                        switched on.
                     </p>
                 </div>
 

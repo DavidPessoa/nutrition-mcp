@@ -2,6 +2,7 @@ import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { zonedDayStartUtc, zonedNextDayStartUtc } from "./tz.js";
 import { decodeEscapeSequences } from "./normalize.js";
 import { isWeightUnit, type WeightUnit } from "./units.js";
+import { isDrinkUnit, type DrinkUnit } from "./alcohol.js";
 import { escapeLikePattern, tokenizeQuery } from "./search.js";
 
 let supabase: SupabaseClient;
@@ -85,6 +86,10 @@ export async function signInWithGoogleIdToken(
 // are never wrongly merged. A retry replays the same args — including the same
 // logged_at — and therefore lands on the same key. The "auto:" prefix marks
 // server-derived keys, distinguishing them from client-supplied ones.
+//
+// The digest is POSITIONAL over whatever the caller passes, so the field list
+// at each call site is frozen: see the warning inside mealIdempotencyKey before
+// touching one.
 function deriveIdempotencyKey(
     parts: (string | number | null | undefined)[],
 ): string {
@@ -106,6 +111,10 @@ export interface Meal {
     protein_g: number | null;
     carbs_g: number | null;
     fat_g: number | null;
+    // Total sugars (not added sugar); alcohol is pure ethanol in grams.
+    fiber_g: number | null;
+    sugar_g: number | null;
+    alcohol_g: number | null;
     notes: string | null;
     idempotency_key: string | null;
 }
@@ -117,6 +126,9 @@ export interface MealInput {
     protein_g?: number;
     carbs_g?: number;
     fat_g?: number;
+    fiber_g?: number;
+    sugar_g?: number;
+    alcohol_g?: number;
     logged_at?: string;
     notes?: string;
     idempotency_key?: string;
@@ -125,6 +137,43 @@ export interface MealInput {
 export interface MealInsertResult {
     meal: Meal;
     deduplicated: boolean;
+}
+
+/**
+ * The server-derived idempotency key for a meal write, over the resolved
+ * logged_at (so the digest and the persisted row agree). Exported and pure so
+ * the frozen field list below is testable directly — see
+ * src/supabase.test.ts — exactly as rowContentDigest is in src/import.ts.
+ */
+export function mealIdempotencyKey(
+    userId: string,
+    input: MealInput,
+    loggedAt: string,
+): string {
+    // DO NOT ADD FIELDS TO THIS ARRAY. It is deliberately incomplete:
+    // fiber_g, sugar_g and alcohol_g are EXCLUDED on purpose, and any future
+    // meal column must be too. The digest is positional over exactly these
+    // values, so appending one changes the derived key of every future write —
+    // a user re-logging or re-importing something they already have would get a
+    // duplicate row instead of a clean no-op. This repo has shipped that bug
+    // once already (see CLAUDE.md, "Bulk meal import"); the mirror of this array
+    // is rowContentDigest in src/import.ts, which carries the same warning.
+    //
+    // Accepted consequence: two meals identical except for their fiber (or
+    // sugar, or alcohol) dedupe to one. Dedup stability beats precision here,
+    // and a caller who needs distinct rows can pass an explicit
+    // idempotency_key.
+    return deriveIdempotencyKey([
+        userId,
+        input.description,
+        input.meal_type,
+        input.calories,
+        input.protein_g,
+        input.carbs_g,
+        input.fat_g,
+        input.notes,
+        loggedAt,
+    ]);
 }
 
 export async function insertMeal(
@@ -136,20 +185,9 @@ export async function insertMeal(
     // Resolve logged_at once so the digest and the persisted row agree.
     const loggedAt = input.logged_at ?? new Date().toISOString();
     // Always populate the key: use the client's if given, otherwise derive a
-    // stable one from the request content (see deriveIdempotencyKey).
+    // stable one from the request content (see mealIdempotencyKey).
     const idempotencyKey =
-        input.idempotency_key ??
-        deriveIdempotencyKey([
-            userId,
-            input.description,
-            input.meal_type,
-            input.calories,
-            input.protein_g,
-            input.carbs_g,
-            input.fat_g,
-            input.notes,
-            loggedAt,
-        ]);
+        input.idempotency_key ?? mealIdempotencyKey(userId, input, loggedAt);
 
     const { data: existing, error: selErr } = await sb
         .from("meals")
@@ -170,6 +208,9 @@ export async function insertMeal(
             protein_g: input.protein_g ?? null,
             carbs_g: input.carbs_g ?? null,
             fat_g: input.fat_g ?? null,
+            fiber_g: input.fiber_g ?? null,
+            sugar_g: input.sugar_g ?? null,
+            alcohol_g: input.alcohol_g ?? null,
             logged_at: loggedAt,
             notes:
                 input.notes != null ? decodeEscapeSequences(input.notes) : null,
@@ -365,6 +406,9 @@ export async function updateMeal(
     if (fields.protein_g !== undefined) update.protein_g = fields.protein_g;
     if (fields.carbs_g !== undefined) update.carbs_g = fields.carbs_g;
     if (fields.fat_g !== undefined) update.fat_g = fields.fat_g;
+    if (fields.fiber_g !== undefined) update.fiber_g = fields.fiber_g;
+    if (fields.sugar_g !== undefined) update.sugar_g = fields.sugar_g;
+    if (fields.alcohol_g !== undefined) update.alcohol_g = fields.alcohol_g;
     if (fields.logged_at !== undefined) update.logged_at = fields.logged_at;
     if (fields.notes !== undefined)
         update.notes =
@@ -391,6 +435,8 @@ export interface Profile {
     timezone: string;
     preferred_weight_unit: WeightUnit | null;
     widgets_enabled: boolean;
+    alcohol_tracking_enabled: boolean;
+    preferred_drink_unit: DrinkUnit | null;
     created_at: string;
     updated_at: string;
 }
@@ -422,12 +468,64 @@ export async function getPreferredWeightUnit(
     return isWeightUnit(unit) ? unit : null;
 }
 
+// The three display preferences below come in two halves: a pure
+// *FromProfile derivation over an already-fetched row, and a thin fetching
+// wrapper kept for existing call sites. A caller that needs more than one of
+// them (buildMcpServer needs all three) should call getProfile once and derive
+// locally — each wrapper is its own `select * from profiles` round trip, so
+// chaining them multiplies an identical query by the number of preferences
+// read.
+
 // Whether in-chat widgets should be shown for this user. Defaults to true when
 // no profile exists yet, or (for backward compatibility) when the column is
 // absent — widgets are on for everyone until a user explicitly opts out.
-export async function getWidgetsEnabled(userId: string): Promise<boolean> {
-    const profile = await getProfile(userId);
+export function widgetsEnabledFromProfile(
+    profile: Profile | null | undefined,
+): boolean {
     return profile?.widgets_enabled ?? true;
+}
+
+export async function getWidgetsEnabled(userId: string): Promise<boolean> {
+    return widgetsEnabledFromProfile(await getProfile(userId));
+}
+
+// Whether alcohol should be surfaced for this user. Defaults to false when no
+// profile exists yet, or when the column is absent — alcohol tracking is opt-in,
+// so the fallback must be "off". Storage is unaffected: alcohol explicitly
+// passed is always persisted, this only gates display.
+//
+// The `?? false` is not a stylistic default: flipping it turns the opt-in into
+// an opt-out and starts surfacing alcohol — including the trace alcohol that
+// third-party recipe exports carry — to users who never asked to see it, which
+// is the documented harm this toggle exists to prevent.
+export function alcoholTrackingEnabledFromProfile(
+    profile: Profile | null | undefined,
+): boolean {
+    return profile?.alcohol_tracking_enabled ?? false;
+}
+
+export async function getAlcoholTrackingEnabled(
+    userId: string,
+): Promise<boolean> {
+    return alcoholTrackingEnabledFromProfile(await getProfile(userId));
+}
+
+// Returns the user's saved drink-unit preference, or null if they have never
+// chosen one. Display paths coalesce null to "us"; storage stays in grams of
+// ethanol either way. The isDrinkUnit guard is load-bearing: the column is
+// free-form text to the client, so anything unrecognised must degrade to "no
+// preference" rather than flow into a Record<DrinkUnit, …> lookup as undefined.
+export function preferredDrinkUnitFromProfile(
+    profile: Profile | null | undefined,
+): DrinkUnit | null {
+    const unit = profile?.preferred_drink_unit;
+    return isDrinkUnit(unit) ? unit : null;
+}
+
+export async function getPreferredDrinkUnit(
+    userId: string,
+): Promise<DrinkUnit | null> {
+    return preferredDrinkUnitFromProfile(await getProfile(userId));
 }
 
 // Upsert the fields provided in `patch`, leaving other columns untouched. On
@@ -438,6 +536,8 @@ export async function upsertProfile(
         timezone?: string;
         preferred_weight_unit?: WeightUnit | null;
         widgets_enabled?: boolean;
+        alcohol_tracking_enabled?: boolean;
+        preferred_drink_unit?: DrinkUnit | null;
     },
 ): Promise<Profile> {
     const payload: Record<string, unknown> = {
@@ -450,6 +550,11 @@ export async function upsertProfile(
         payload.preferred_weight_unit = patch.preferred_weight_unit;
     if (patch.widgets_enabled !== undefined)
         payload.widgets_enabled = patch.widgets_enabled;
+    if (patch.alcohol_tracking_enabled !== undefined)
+        payload.alcohol_tracking_enabled = patch.alcohol_tracking_enabled;
+    // null is meaningful here too (clears the preference).
+    if (patch.preferred_drink_unit !== undefined)
+        payload.preferred_drink_unit = patch.preferred_drink_unit;
 
     const { data, error } = await getSupabase()
         .from("profiles")
@@ -469,6 +574,11 @@ export interface NutritionGoals {
     daily_protein_g: number | null;
     daily_carbs_g: number | null;
     daily_fat_g: number | null;
+    daily_fiber_g: number | null;
+    // Total sugars, and pure ethanol. Both are ceilings ("stay under"), unlike
+    // every other goal here, which is a floor — see formatGoalLine in mcp.ts.
+    daily_sugar_g: number | null;
+    daily_alcohol_g: number | null;
     daily_water_ml: number | null;
     target_weight_g: number | null;
     updated_at: string;
@@ -479,6 +589,9 @@ export interface NutritionGoalsInput {
     daily_protein_g?: number | null;
     daily_carbs_g?: number | null;
     daily_fat_g?: number | null;
+    daily_fiber_g?: number | null;
+    daily_sugar_g?: number | null;
+    daily_alcohol_g?: number | null;
     daily_water_ml?: number | null;
     target_weight_g?: number | null;
 }
@@ -496,6 +609,9 @@ export async function upsertNutritionGoals(
                 daily_protein_g: input.daily_protein_g ?? null,
                 daily_carbs_g: input.daily_carbs_g ?? null,
                 daily_fat_g: input.daily_fat_g ?? null,
+                daily_fiber_g: input.daily_fiber_g ?? null,
+                daily_sugar_g: input.daily_sugar_g ?? null,
+                daily_alcohol_g: input.daily_alcohol_g ?? null,
                 daily_water_ml: input.daily_water_ml ?? null,
                 target_weight_g: input.target_weight_g ?? null,
                 updated_at: new Date().toISOString(),

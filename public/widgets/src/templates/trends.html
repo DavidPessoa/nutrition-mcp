@@ -64,12 +64,19 @@
                     date = d.toISOString().slice(0, 10);
                     const w = Math.sin(i / 3);
                     const skip = i === 4 || i === 11; // a couple of unlogged days
+                    const r = (n) => Math.round(n * 10) / 10;
                     days.push({
                         date,
                         calories: skip ? 0 : Math.round(2010 + w * 250),
                         protein_g: skip ? 0 : Math.round(150 + w * 18),
                         carbs_g: skip ? 0 : Math.round(212 + w * 28),
                         fat_g: skip ? 0 : Math.round(68 + w * 9),
+                        fiber_g: skip ? 0 : r(26 + w * 6),
+                        sugar_g: skip ? 0 : r(58 + w * 14),
+                        // Alcohol tracking ON in this sample, and 0 on most
+                        // days — a real alcohol-free day, which still shows.
+                        // null on every day (tracking off) hides the stat line.
+                        alcohol_g: skip || i % 7 ? 0 : r(13.9 + w * 4),
                         water_ml: skip ? 0 : Math.round(2200 + w * 320),
                     });
                 }
@@ -81,6 +88,9 @@
                         protein_g: 160,
                         carbs_g: 220,
                         fat_g: 70,
+                        fiber_g: 30,
+                        sugar_g: 45,
+                        alcohol_g: 20,
                         water_ml: 2500,
                     },
                     days,
@@ -107,10 +117,21 @@
             }
             // Trailing average over exactly the days shown: sum / count, empty
             // days included as 0 — matches the tool's text trailingAverage.
+            //
+            // A key that is null on EVERY day averages to null, not 0. That is
+            // the alcohol opt-in: alcohol_g arrives null when the user has
+            // tracking off, and a 0 there would claim an alcohol-free window
+            // instead of hiding the metric.
             function avgOf(days, key) {
                 if (!days.length) return 0;
                 let sum = 0;
-                for (const d of days) sum += d[key] || 0;
+                let seen = 0;
+                for (const d of days) {
+                    if (d[key] == null) continue;
+                    seen++;
+                    sum += d[key] || 0;
+                }
+                if (!seen) return null;
                 return sum / days.length;
             }
 
@@ -205,17 +226,14 @@
                 // The tool sends a bucket for every calendar day (zeros for
                 // unlogged days), so the array is basically never empty — treat
                 // an all-zero series (nothing logged) as empty too.
+                // dayHasData (shared/macros.js) derives the test from MACROS,
+                // so it covers exactly the top-level metrics — fiber, sugar and
+                // alcohol never appear without a meal that already contributes
+                // calories, and a null alcohol_g must not count as a logged day.
                 const anyLogged =
                     data &&
                     Array.isArray(data.days) &&
-                    data.days.some(
-                        (d) =>
-                            (d.calories || 0) > 0 ||
-                            (d.protein_g || 0) > 0 ||
-                            (d.carbs_g || 0) > 0 ||
-                            (d.fat_g || 0) > 0 ||
-                            (d.water_ml || 0) > 0,
-                    );
+                    data.days.some(dayHasData);
                 if (!anyLogged) {
                     root.innerHTML = `
             <div class="empty">
@@ -243,21 +261,24 @@
                 const avg = {};
                 for (const m of MACROS) avg[m.key] = avgOf(slice, m.key);
 
-                const logged = slice.filter(
-                    (d) =>
-                        (d.calories || 0) > 0 ||
-                        (d.protein_g || 0) > 0 ||
-                        (d.carbs_g || 0) > 0 ||
-                        (d.fat_g || 0) > 0 ||
-                        (d.water_ml || 0) > 0,
-                ).length;
+                const logged = slice.filter(dayHasData).length;
 
                 const seg = RANGES.map(
                     (r) =>
                         `<button class="seg-btn${r === range ? " active" : ""}" data-n="${r}" role="tab" aria-selected="${r === range}">${r} days</button>`,
                 ).join("");
 
-                const panel = macroPanel(avg, data.goals, { under: "under" });
+                // No per-meal rows in a trends payload, so only carbs is
+                // tappable — for the window's average fiber and sugar.
+                const panel = macroPanel(
+                    avg,
+                    data.goals,
+                    { under: "under" },
+                    null,
+                    {
+                        drinkUnit: data.drink_unit,
+                    },
+                );
                 const chart = trendChart(slice, data.goals?.calories ?? null);
 
                 root.innerHTML = `

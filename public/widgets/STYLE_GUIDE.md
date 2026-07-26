@@ -137,10 +137,20 @@ repaint a whole series with it (see the ring convention below).
 | `--calories` | `#ff9f0a` | `#ffab2e` |
 | `--protein`  | `#8b5cf6` | `#a78bfa` |
 | `--carbs`    | `#10b981` | `#34d399` |
+| `--fiber`    | `#0d9488` | `#14b8a6` |
+| `--sugar`    | `#65a30d` | `#a3e635` |
 | `--fat`      | `#f43f7e` | `#fb7199` |
+| `--alcohol`  | `#a21caf` | `#e879f9` |
 | `--water`    | `#0ea5e9` | `#38bdf8` |
 | `--over`     | `#d0452b` | `#ff6b52` |
 | `--warn`     | `#b26a00` | `#e0a030` |
+
+`--fiber` and `--sugar` are deliberately inside the carbs green family (a
+deeper teal and a lime), because fiber and sugar are _parts of_ carbs and only
+ever appear inside the carbs disclosure — they should read as related to
+`--carbs`, not compete with it. `--alcohol` is the one series with no
+neighbour, so it takes the otherwise-unused plum/fuchsia slot, well clear of
+`--protein` (violet) and `--fat` (rose).
 
 Two additions the block above elides for brevity, both present in all four theme
 blocks in `tokens.css`:
@@ -385,13 +395,64 @@ bar (`.macro-water`). All of it — CSS and markup — lives in `shared/macros.c
 on) and call one function:
 
 ```js
-// vals / goal: objects keyed by calories, protein_g, carbs_g, fat_g, water_ml
-//   (a day's totals, a range's averages, a computed slice…)
+// vals / goal: objects keyed by calories, protein_g, carbs_g, fat_g, fiber_g,
+//   sugar_g, alcohol_g, water_ml (a day's totals, a range's averages, a slice…)
 // wording: { under: "left" | "under", over: "over" } — default "left" / "over".
-//          trends uses { under: "under" } ("421 kcal under").
+//          trends uses { under: "under" } ("421 kcal under"). FLOORS only;
+//          a ceiling always reads "under" / "over" / "at limit".
+// meals:   optional per-meal breakdown rows → tiles become tappable.
+// opts:    optional { drinkUnit: "us" | "uk" } for the alcohol line.
 // Requires fmt(n, decimals) and esc(s) in scope.
-root.innerHTML = `… ${macroPanel(vals, goal, wording)} …`;
+root.innerHTML = `… ${macroPanel(vals, goal, wording, meals, opts)} …`;
 ```
+
+**The layout is driven by each MACROS entry's `role`, never by a hardcoded key
+list**, so adding a nutrient puts it exactly where its role says and an entry
+with no role renders nowhere: `hero` (the calorie ring), `ring` (a cell of the
+protein/carbs/fat row), `bar` (the water bar), `sub` (a sub-component of
+`parent`, shown inside the parent's disclosure) and `stat` (a plain value line,
+no gauge). `TOP_LEVEL_MACRO_KEYS` / `dayHasData()` are derived the same way, so
+"was anything logged this day?" stays a question about top-level metrics only.
+
+Three rules the newer nutrients encode:
+
+- **Fiber and sugar are `sub`s of carbs, not rings.** Tapping carbs opens the
+  same disclosure that lists contributing meals, with an "of which" block of
+  compact bar stats above the list. A six-ring panel was explicitly rejected.
+- **Alcohol is a `stat` line** — grams with the drink count as a gloss
+  ("2.0 US drinks · 27.7 g"). `alcohol_g: null` means the user has alcohol
+  tracking off and the line is dropped entirely; `0` from a tracking user is a
+  real alcohol-free day and stays on screen. (Contrast the water bar, which
+  hides at 0 — water has no opt-in, so its 0 cannot mean anything but
+  "untracked".)
+- **`direction: "ceiling"`** (sugar, alcohol) mirrors `GoalDirection` in
+  `src/mcp.ts`: the caption reads "limit 45 g · 16 g over" and only a ceiling
+  turns `var(--over)` when exceeded — passing a fiber goal is the goal being
+  met, not a warning. A ceiling never says "left": staying under a limit is not
+  a budget to spend, and "12 g left" is meaningless over an averaged window. It
+  reads "limit 45 g · 29 g under" / "· 16 g over" / "· at limit", the same
+  under/over vocabulary as "Days over limit" in the trends text. A ceiling
+  target of **0** is a real limit and is rendered as one (any amount is over
+  it); a floor of 0 still means "no goal set".
+
+**A tile that discloses something is a button, and a button hides its children.**
+`role="button"` makes every descendant presentational, so the ring's `aria-label`,
+the macro name and the goal caption all drop out of the accessibility tree. An
+interactive tile therefore carries the whole lot in its own name — value first,
+action last: _"Carbs 205 g, of 220 g, 15 g left. Show fiber and sugar, and the
+meals that contributed."_ (`tileLabel` in `shared/macros.js`; `·` becomes a comma
+because screen readers either skip it or say "middle dot"). Do not shorten that
+name back to the action alone — a static tile reads out its numbers, and the
+interactive one beside it must not read out fewer. The open tile also gets
+`aria-expanded`, and the disclosure region is `aria-live="polite"`.
+
+**Contrast: `--text-dim` has ~0.5 of headroom over AA and no more.** It is 5.07:1
+on `--panel` in light and 5.93:1 in dark, so anything that dims it further —
+an `opacity`, or a tinted surface underneath — drops small text under the 4.5:1
+floor. Two rules in `macros.css` exist only for that: `.md-subtitle` carries no
+opacity (0.75 made it 3.09:1 / 3.93:1), and an open tile's `.mlabel` / `.mgoal`
+switch to `var(--text)` because the accent tint behind them costs 4.36:1 in
+light. Rank text by size and weight, not by fading it.
 
 The gauge keeps the over-goal convention from §4 (ring stays its macro colour; the
 % caption / water value turns `var(--over)` past 100%). Ring sizes come from the

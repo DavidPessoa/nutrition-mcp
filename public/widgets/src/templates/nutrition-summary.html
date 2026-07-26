@@ -46,6 +46,9 @@
                     protein_g: 160,
                     carbs_g: 220,
                     fat_g: 70,
+                    fiber_g: 30,
+                    sugar_g: 45,
+                    alcohol_g: 20,
                     water_ml: 2500,
                 },
                 averages: {
@@ -53,6 +56,11 @@
                     protein_g: 148,
                     carbs_g: 205,
                     fat_g: 74,
+                    fiber_g: 26.4,
+                    sugar_g: 58.2,
+                    // Alcohol tracking ON in this sample. null here (the
+                    // opt-in's "off") drops the stat line entirely.
+                    alcohol_g: 12.5,
                     water_ml: 2100,
                 },
                 days: [
@@ -63,6 +71,9 @@
                         protein_g: 155,
                         carbs_g: 230,
                         fat_g: 72,
+                        fiber_g: 31.2,
+                        sugar_g: 64.5,
+                        alcohol_g: 27.7,
                         water_ml: 2400,
                     },
                     {
@@ -72,6 +83,9 @@
                         protein_g: 138,
                         carbs_g: 188,
                         fat_g: 68,
+                        fiber_g: 22.8,
+                        sugar_g: 51.4,
+                        alcohol_g: 0,
                         water_ml: 1800,
                     },
                     {
@@ -81,6 +95,9 @@
                         protein_g: 151,
                         carbs_g: 197,
                         fat_g: 82,
+                        fiber_g: 25.1,
+                        sugar_g: 58.8,
+                        alcohol_g: 9.8,
                         water_ml: 2100,
                     },
                 ],
@@ -93,6 +110,9 @@
                         protein_g: 52,
                         carbs_g: 78,
                         fat_g: 16,
+                        fiber_g: 6.2,
+                        sugar_g: 9.4,
+                        alcohol_g: 0,
                     },
                     {
                         description: "Salmon with quinoa & veg",
@@ -102,6 +122,9 @@
                         protein_g: 55,
                         carbs_g: 74,
                         fat_g: 30,
+                        fiber_g: 7.1,
+                        sugar_g: 6.8,
+                        alcohol_g: 13.9,
                     },
                     {
                         description: "Overnight oats with berries",
@@ -111,6 +134,9 @@
                         protein_g: 19,
                         carbs_g: 63,
                         fat_g: 12,
+                        fiber_g: 9.4,
+                        sugar_g: 24.6,
+                        alcohol_g: 0,
                     },
                     {
                         description: "Steak burrito",
@@ -120,6 +146,9 @@
                         protein_g: 48,
                         carbs_g: 66,
                         fat_g: 30,
+                        fiber_g: 8.2,
+                        sugar_g: 7.9,
+                        alcohol_g: 13.8,
                     },
                     {
                         description: "Protein shake",
@@ -129,6 +158,9 @@
                         protein_g: 40,
                         carbs_g: 8,
                         fat_g: 3,
+                        fiber_g: 0.8,
+                        sugar_g: 4.2,
+                        alcohol_g: 0,
                     },
                     {
                         description: "Egg & avocado toast",
@@ -138,6 +170,9 @@
                         protein_g: 24,
                         carbs_g: 42,
                         fat_g: 26,
+                        fiber_g: 5.4,
+                        sugar_g: 3.1,
+                        alcohol_g: 0,
                     },
                     {
                         description: "Turkey & hummus wrap",
@@ -147,6 +182,9 @@
                         protein_g: 44,
                         carbs_g: 58,
                         fat_g: 18,
+                        fiber_g: 6.9,
+                        sugar_g: 11.2,
+                        alcohol_g: 0,
                     },
                     {
                         description: "Greek yogurt & almonds",
@@ -156,6 +194,9 @@
                         protein_g: 22,
                         carbs_g: 14,
                         fat_g: 14,
+                        fiber_g: 1.1,
+                        sugar_g: 12.6,
+                        alcohol_g: 9.8,
                     },
                 ],
             };
@@ -280,12 +321,17 @@
                     ? `${data.start_date} → ${data.end_date} · ${data.logged_days} day${data.logged_days === 1 ? "" : "s"} logged`
                     : days[0].date;
 
-                // Calories hero + protein/carbs/fat row + water bar.
+                // Calories hero + protein/carbs/fat row + water bar + alcohol
+                // stat line. Tapping carbs also reveals fiber and sugar.
                 const panel = macroPanel(
                     data.averages,
                     data.goals,
                     undefined,
                     data.meals,
+                    // Not in the tool's output schema today (it carries
+                    // canonical grams); honoured the moment it is, and "us"
+                    // until then — the server's own default.
+                    { drinkUnit: data.drink_unit },
                 );
                 const trend =
                     multi && days.length >= 2

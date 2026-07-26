@@ -177,6 +177,9 @@
                     protein_g: 160,
                     carbs_g: 220,
                     fat_g: 70,
+                    fiber_g: 30,
+                    sugar_g: 45,
+                    alcohol_g: 20,
                     water_ml: 2500,
                 },
                 totals: {
@@ -184,6 +187,12 @@
                     protein_g: 148,
                     carbs_g: 231,
                     fat_g: 74,
+                    fiber_g: 24.6,
+                    // Over its ceiling, so the sub-row flags it with --over.
+                    sugar_g: 61.3,
+                    // Alcohol tracking ON in this sample; null would mean the
+                    // user has it off and the stat line disappears.
+                    alcohol_g: 27.7,
                     water_ml: 2100,
                 },
                 weight: {
@@ -201,6 +210,9 @@
                         protein_g: 18,
                         carbs_g: 62,
                         fat_g: 12,
+                        fiber_g: 9.4,
+                        sugar_g: 24.6,
+                        alcohol_g: 0,
                     },
                     {
                         description: "Grilled chicken & rice bowl",
@@ -210,6 +222,9 @@
                         protein_g: 52,
                         carbs_g: 78,
                         fat_g: 16,
+                        fiber_g: 6.2,
+                        sugar_g: 9.4,
+                        alcohol_g: 0,
                     },
                     {
                         description: "Greek yogurt & almonds",
@@ -219,6 +234,9 @@
                         protein_g: 22,
                         carbs_g: 14,
                         fat_g: 14,
+                        fiber_g: 1.1,
+                        sugar_g: 12.6,
+                        alcohol_g: 0,
                     },
                     {
                         description: "Salmon with quinoa & veg",
@@ -228,6 +246,9 @@
                         protein_g: 56,
                         carbs_g: 77,
                         fat_g: 32,
+                        fiber_g: 7.9,
+                        sugar_g: 14.7,
+                        alcohol_g: 27.7,
                     },
                 ],
             };
@@ -406,6 +427,10 @@
                     data.goals,
                     undefined,
                     data.meals,
+                    // Not in the tool's output schema today (it carries
+                    // canonical grams); honoured the moment it is, and "us"
+                    // until then — the server's own default.
+                    { drinkUnit: data.drink_unit },
                 );
                 const dayEmpty =
                     meals === 0 && water === 0

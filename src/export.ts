@@ -11,6 +11,15 @@ const EXPORT_BUCKET = "exports";
 const EXPORT_TTL_SECONDS = 60 * 60; // 60 minutes
 const SWEEP_INTERVAL_MS = 10 * 60 * 1000; // every 10 minutes
 
+/**
+ * Column order for the export. This list and the positional row builder in
+ * `buildMealsCsv` are parallel arrays: adding a column here without adding the
+ * matching `csvEscape(...)` at the same index silently shifts every later field
+ * in every row. `src/export.test.ts` guards the alignment — keep it that way.
+ *
+ * Header names deliberately match the importer's column aliases (`protein_g`,
+ * `carbs_g`, `fiber_g`, …) so an export can be re-imported without remapping.
+ */
 const CSV_COLUMNS = [
     "id",
     "logged_at",
@@ -21,6 +30,9 @@ const CSV_COLUMNS = [
     "protein_g",
     "carbs_g",
     "fat_g",
+    "fiber_g",
+    "sugar_g",
+    "alcohol_g",
     "notes",
 ] as const;
 
@@ -53,6 +65,9 @@ export function buildMealsCsv(meals: Meal[], tz: string): string {
                 csvEscape(m.protein_g),
                 csvEscape(m.carbs_g),
                 csvEscape(m.fat_g),
+                csvEscape(m.fiber_g),
+                csvEscape(m.sugar_g),
+                csvEscape(m.alcohol_g),
                 csvEscape(m.notes),
             ].join(","),
         );

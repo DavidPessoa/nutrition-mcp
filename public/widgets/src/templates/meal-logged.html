@@ -62,6 +62,11 @@
                     protein_g: 42,
                     carbs_g: 28,
                     fat_g: 22,
+                    fiber_g: 7.4,
+                    sugar_g: 6.1,
+                    // null = this user has alcohol tracking off, which is also
+                    // why the panel below shows no alcohol stat line.
+                    alcohol_g: null,
                 },
                 has_goals: true,
                 goals: {
@@ -69,6 +74,9 @@
                     protein_g: 160,
                     carbs_g: 220,
                     fat_g: 70,
+                    fiber_g: 30,
+                    sugar_g: 45,
+                    alcohol_g: null,
                     water_ml: 2500,
                 },
                 totals: {
@@ -76,6 +84,13 @@
                     protein_g: 118,
                     carbs_g: 165,
                     fat_g: 52,
+                    fiber_g: 21.8,
+                    sugar_g: 38.4,
+                    // Alcohol tracking OFF in this sample (the other widgets'
+                    // samples have it on): null is the opt-in's "hide this
+                    // entirely", distinct from a 0 that means an alcohol-free
+                    // day. No stat line renders.
+                    alcohol_g: null,
                     water_ml: 1600,
                 },
                 meals: [
@@ -87,6 +102,9 @@
                         protein_g: 18,
                         carbs_g: 62,
                         fat_g: 12,
+                        fiber_g: 9.4,
+                        sugar_g: 24.6,
+                        alcohol_g: null,
                     },
                     {
                         description: "Greek yogurt & almonds",
@@ -96,6 +114,9 @@
                         protein_g: 22,
                         carbs_g: 14,
                         fat_g: 14,
+                        fiber_g: 1.1,
+                        sugar_g: 12.6,
+                        alcohol_g: null,
                     },
                     {
                         description: "Turkey sandwich",
@@ -105,6 +126,9 @@
                         protein_g: 36,
                         carbs_g: 61,
                         fat_g: 4,
+                        fiber_g: 3.8,
+                        sugar_g: 5.2,
+                        alcohol_g: null,
                     },
                     {
                         description: "Grilled chicken salad",
@@ -114,6 +138,9 @@
                         protein_g: 42,
                         carbs_g: 28,
                         fat_g: 22,
+                        fiber_g: 7.4,
+                        sugar_g: 6.1,
+                        alcohol_g: null,
                     },
                 ],
             };
@@ -154,6 +181,10 @@
                     data.goals,
                     undefined,
                     data.meals,
+                    // Not in the tool's output schema today (it carries
+                    // canonical grams); honoured the moment it is, and "us"
+                    // until then — the server's own default.
+                    { drinkUnit: data.drink_unit },
                 );
 
                 const meal = data.logged_meal;

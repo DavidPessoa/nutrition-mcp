@@ -86,6 +86,274 @@ describe("fetchProductFromOFF", () => {
         expect(food!.source).toBe("off:737628064502");
     });
 
+    test("maps fiber and total sugars per serving", async () => {
+        // Real shape from OFF barcode 3229820129488 (Muesli): OFF spells the key
+        // "fiber" (American) and "sugars" (plural), both in grams, both scaled
+        // to the serving alongside the other macros.
+        mockFetch(() =>
+            jsonResponse({
+                status: 1,
+                product: {
+                    product_name: "Muesli Raisin, Figue, Datte, Abricot",
+                    serving_size: "60g",
+                    nutriments: {
+                        "energy-kcal_serving": 220,
+                        "energy-kcal_100g": 367,
+                        fiber_100g: 10,
+                        fiber_serving: 6,
+                        fiber_unit: "g",
+                        sugars_100g: 14,
+                        sugars_serving: 8.4,
+                        sugars_unit: "g",
+                        // Present in OFF but deliberately ignored: we store
+                        // TOTAL sugars, never added sugars.
+                        "added-sugars_serving": 1.2,
+                    },
+                },
+            }),
+        );
+
+        const food = await fetchProductFromOFF("3229820129488");
+        expect(food!.serving).toBe("60g");
+        expect(food!.fiber_g).toBe(6);
+        expect(food!.sugar_g).toBe(8.4);
+        expect(food!.alcohol_g).toBeNull();
+    });
+
+    test("falls back to per-100g fiber and sugars", async () => {
+        mockFetch(() =>
+            jsonResponse({
+                status: 1,
+                product: {
+                    product_name: "Bran",
+                    nutriments: {
+                        "energy-kcal_100g": 250,
+                        fiber_100g: 42.55,
+                        sugars_100g: 0.7,
+                    },
+                },
+            }),
+        );
+
+        const food = await fetchProductFromOFF("123456789");
+        expect(food!.serving).toBe("100 g");
+        expect(food!.fiber_g).toBe(42.6); // rounded to one decimal
+        expect(food!.sugar_g).toBe(0.7);
+    });
+
+    test("leaves fiber and sugar null when OFF carries neither", async () => {
+        mockFetch(() =>
+            jsonResponse({
+                status: 1,
+                product: {
+                    product_name: "Olive Oil",
+                    nutriments: { "energy-kcal_100g": 884, fat_100g: 100 },
+                },
+            }),
+        );
+
+        const food = await fetchProductFromOFF("123456789");
+        expect(food!.fiber_g).toBeNull();
+        expect(food!.sugar_g).toBeNull();
+    });
+});
+
+// Open Food Facts reports alcohol as ABV ("% vol"), never as grams — the raw
+// value must never be copied into alcohol_g. See resolveAlcoholGrams in
+// src/foods.ts for the evidence behind these rules.
+describe("fetchProductFromOFF alcohol (ABV, not grams)", () => {
+    // Shape copied from a real OFF beer record: note that alcohol does NOT
+    // scale with the serving the way carbohydrates does — that is what proves
+    // it is a percentage rather than a mass.
+    function beer(over: Record<string, unknown> = {}) {
+        return {
+            status: 1,
+            product: {
+                product_name: "Cerveza Heineken",
+                serving_size: "330ml",
+                serving_quantity: 330,
+                serving_quantity_unit: "ml",
+                nutriments: {
+                    "energy-kcal_serving": 139,
+                    "energy-kcal_100g": 42,
+                    carbohydrates_100g: 3,
+                    carbohydrates_serving: 9.9,
+                    alcohol: 5,
+                    alcohol_100g: 5,
+                    alcohol_serving: 5,
+                    alcohol_unit: "% vol",
+                },
+                ...over,
+            },
+        };
+    }
+
+    test("converts ABV to grams of ethanol using the mL serving volume", async () => {
+        mockFetch(() => jsonResponse(beer()));
+
+        const food = await fetchProductFromOFF("75041670");
+        // 330 mL x 5% = 16.5 mL ethanol x 0.789 g/mL = 13.02 g.
+        expect(food!.alcohol_g).toBe(13);
+        // The raw ABV must never leak through as if it were grams.
+        expect(food!.alcohol_g).not.toBe(5);
+    });
+
+    test("keeps a genuine 0% ABV as 0 g, distinct from unknown", async () => {
+        mockFetch(() =>
+            jsonResponse(
+                beer({
+                    product_name: "Bière Blonde sans alcool 1664",
+                    nutriments: {
+                        "energy-kcal_serving": 60,
+                        alcohol: 0,
+                        alcohol_serving: 0,
+                        alcohol_100g: 0,
+                        alcohol_unit: "% vol",
+                    },
+                }),
+            ),
+        );
+
+        const food = await fetchProductFromOFF("3080216055428");
+        expect(food!.alcohol_g).toBe(0);
+    });
+
+    test("is null when OFF parsed no serving quantity", async () => {
+        // Corona Extra is exactly this: a real ABV, but no serving volume at
+        // all, so there is nothing to multiply by.
+        mockFetch(() =>
+            jsonResponse(
+                beer({ serving_quantity: null, serving_quantity_unit: "ml" }),
+            ),
+        );
+
+        expect((await fetchProductFromOFF("75041670"))!.alcohol_g).toBeNull();
+    });
+
+    test("is null when the serving quantity is a mass, not a volume", async () => {
+        // ABV is per unit volume; converting from grams would need the
+        // beverage's density, which OFF does not publish.
+        mockFetch(() =>
+            jsonResponse(
+                beer({ serving_quantity: 330, serving_quantity_unit: "g" }),
+            ),
+        );
+
+        expect((await fetchProductFromOFF("75041670"))!.alcohol_g).toBeNull();
+    });
+
+    test("is null on the per-100g basis, which would mix bases", async () => {
+        // No serving_size / no per-serving energy => the 100 g fallback. Every
+        // other field is then per 100 GRAMS, so a volume-derived alcohol figure
+        // would not belong to the same basis.
+        mockFetch(() =>
+            jsonResponse({
+                status: 1,
+                product: {
+                    product_name: "Vin blanc sec",
+                    serving_quantity: 250,
+                    serving_quantity_unit: "ml",
+                    nutriments: {
+                        "energy-kcal_100g": 73,
+                        alcohol: 11,
+                        alcohol_100g: 11,
+                        alcohol_unit: "% vol",
+                    },
+                },
+            }),
+        );
+
+        const food = await fetchProductFromOFF("3175520036338");
+        expect(food!.serving).toBe("100 g");
+        expect(food!.alcohol_g).toBeNull();
+    });
+
+    test("is null when the unit is not '% vol'", async () => {
+        // If OFF ever changes the unit we must not silently reinterpret it.
+        mockFetch(() =>
+            jsonResponse(
+                beer({ nutriments: { ...beer().product.nutriments } }),
+            ),
+        );
+        // sanity: the shared fixture does convert
+        expect((await fetchProductFromOFF("75041670"))!.alcohol_g).toBe(13);
+
+        mockFetch(() =>
+            jsonResponse(
+                beer({
+                    nutriments: {
+                        "energy-kcal_serving": 139,
+                        alcohol: 5,
+                        alcohol_serving: 5,
+                        alcohol_unit: "g",
+                    },
+                }),
+            ),
+        );
+        expect((await fetchProductFromOFF("75041670"))!.alcohol_g).toBeNull();
+
+        mockFetch(() =>
+            jsonResponse(
+                beer({
+                    nutriments: {
+                        "energy-kcal_serving": 139,
+                        alcohol: 5,
+                        alcohol_serving: 5,
+                    },
+                }),
+            ),
+        );
+        expect((await fetchProductFromOFF("75041670"))!.alcohol_g).toBeNull();
+    });
+
+    test("is null for an out-of-range ABV instead of throwing", async () => {
+        // gramsFromDrink throws on nonsense; a corrupt community-edited value
+        // must degrade to null rather than break the whole lookup.
+        for (const bad of [120, -1, "not a number"]) {
+            mockFetch(() =>
+                jsonResponse(
+                    beer({
+                        nutriments: {
+                            "energy-kcal_serving": 139,
+                            alcohol: bad,
+                            alcohol_serving: bad,
+                            alcohol_unit: "% vol",
+                        },
+                    }),
+                ),
+            );
+            const food = await fetchProductFromOFF("75041670");
+            expect(food!.alcohol_g).toBeNull();
+        }
+    });
+
+    test("a spirit's ABV is never mistaken for grams", async () => {
+        // The failure this whole design exists to prevent: 40 would be a
+        // plausible-looking gram figure, and it is wrong by 3.5x for a 40 mL
+        // measure.
+        mockFetch(() =>
+            jsonResponse(
+                beer({
+                    product_name: "Vodka",
+                    serving_size: "40 ml",
+                    serving_quantity: 40,
+                    serving_quantity_unit: "ml",
+                    nutriments: {
+                        "energy-kcal_serving": 90,
+                        alcohol: 40,
+                        alcohol_serving: 40,
+                        alcohol_100g: 40,
+                        alcohol_unit: "% vol",
+                    },
+                }),
+            ),
+        );
+
+        const food = await fetchProductFromOFF("75041670");
+        // 40 mL x 40% x 0.789 = 12.62 g -> 12.6
+        expect(food!.alcohol_g).toBe(12.6);
+    });
+
     test("falls back to per-100g basis when no serving energy", async () => {
         mockFetch(() =>
             jsonResponse({
@@ -183,6 +451,9 @@ describe("formatFoodResult", () => {
         protein_g: 1.2,
         carbs_g: 2,
         fat_g: 12,
+        fiber_g: 0.5,
+        sugar_g: 1.8,
+        alcohol_g: null,
         source: "off:737628064502",
         source_name: "openfoodfacts",
         barcode: "737628064502",

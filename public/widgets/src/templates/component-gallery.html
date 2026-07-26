@@ -25,6 +25,10 @@
 
             /*@include shared/table.css@*/
 
+            /*@include shared/ring.css@*/
+
+            /*@include shared/macros.css@*/
+
             .gal {
                 padding: 16px;
                 display: grid;
@@ -51,6 +55,103 @@
         <div id="root"></div>
         <script>
             /*@include shared/bridge.js@*/
+
+            // macros.js needs these two in scope (same contract as every widget).
+            function fmt(n, decimals) {
+                if (n == null || isNaN(n)) return "0";
+                const r = decimals ? n.toFixed(decimals) : Math.round(n);
+                return Number(r).toLocaleString();
+            }
+            function esc(s) {
+                return String(s).replace(
+                    /[&<>"]/g,
+                    (c) =>
+                        ({
+                            "&": "&amp;",
+                            "<": "&lt;",
+                            ">": "&gt;",
+                            '"': "&quot;",
+                        })[c],
+                );
+            }
+
+            /*@include shared/macros.js@*/
+
+            // One day's worth of fixture data for the macro components below.
+            const GOALS = {
+                calories: 2200,
+                protein_g: 160,
+                carbs_g: 220,
+                fat_g: 70,
+                fiber_g: 30,
+                sugar_g: 45,
+                alcohol_g: 20,
+                water_ml: 2500,
+            };
+            const TOTALS = {
+                calories: 1980,
+                protein_g: 148,
+                carbs_g: 231,
+                fat_g: 74,
+                fiber_g: 24.6,
+                sugar_g: 61.3,
+                alcohol_g: 27.7,
+                water_ml: 2100,
+            };
+            const MEALS = [
+                {
+                    description: "Overnight oats with berries",
+                    meal_type: "breakfast",
+                    date: null,
+                    calories: 420,
+                    protein_g: 18,
+                    carbs_g: 62,
+                    fat_g: 12,
+                    fiber_g: 9.4,
+                    sugar_g: 24.6,
+                    alcohol_g: 0,
+                },
+                {
+                    description: "Grilled chicken & rice bowl",
+                    meal_type: "lunch",
+                    date: null,
+                    calories: 650,
+                    protein_g: 52,
+                    carbs_g: 78,
+                    fat_g: 16,
+                    fiber_g: 6.2,
+                    sugar_g: 9.4,
+                    alcohol_g: 0,
+                },
+                {
+                    description: "Salmon with quinoa & veg",
+                    meal_type: "dinner",
+                    date: null,
+                    calories: 650,
+                    protein_g: 56,
+                    carbs_g: 77,
+                    fat_g: 32,
+                    fiber_g: 7.9,
+                    sugar_g: 14.7,
+                    alcohol_g: 27.7,
+                },
+            ];
+            const CARBS = MACROS.find((m) => m.key === "carbs_g");
+            const ALCOHOL = MACROS.find((m) => m.key === "alcohol_g");
+            // The alcohol line in each of its states, including the two that
+            // are easy to conflate: null (tracking off → nothing renders) and
+            // 0 (a tracked, alcohol-free day → the line stays).
+            const alcoholStates = [
+                ["over the limit", { alcohol_g: 27.7 }, GOALS],
+                ["under the limit", { alcohol_g: 9.9 }, GOALS],
+                ["no limit set", { alcohol_g: 13.9 }, null],
+                ["tracked, zero", { alcohol_g: 0 }, GOALS],
+                [
+                    "tracking off (null → renders nothing)",
+                    { alcohol_g: null },
+                    GOALS,
+                ],
+            ];
 
             function render() {
                 document.getElementById("root").innerHTML = `
@@ -124,6 +225,32 @@
                 <button class="seg-btn">14d</button>
                 <button class="seg-btn">30d</button>
               </div>
+            </section>
+
+            <section class="card">
+              <h3>Macro panel — hero ring, ring row, water bar, alcohol stat line</h3>
+              ${macroPanel(TOTALS, GOALS, undefined, MEALS)}
+            </section>
+
+            <section class="card">
+              <h3>Carbs disclosure (shown open — tap carbs above for the real thing)</h3>
+              <div class="macro-detail" style="margin-bottom:0">${macroDetailBody(
+                  CARBS,
+                  macroCtxOf(TOTALS, GOALS, undefined, MEALS),
+              )}</div>
+            </section>
+
+            <section class="card">
+              <h3>Alcohol stat line — every state</h3>
+              ${alcoholStates
+                  .map(
+                      ([caption, vals, goal]) =>
+                          `<div class="hint" style="margin-bottom:6px">${caption}</div>${
+                              macroStat(ALCOHOL, macroCtxOf(vals, goal)) ||
+                              '<div class="hint" style="opacity:.6;margin-bottom:20px">(nothing)</div>'
+                          }`,
+                  )
+                  .join("")}
             </section>
 
             <section class="card">

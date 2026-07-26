@@ -16,6 +16,7 @@
 //   ?delay=3000         delay every tools/call, standing in for an approval prompt
 //   ?maxHeight=600      impose hostContext.containerDimensions.maxHeight
 //   ?fail=1             answer tools/call with a JSON-RPC error
+//   ?drinkUnit=us       alcohol tracking ON for import-meals (default: off/null)
 //
 // Nothing here is served by the production app; scripts/ is dev-only.
 
@@ -57,7 +58,7 @@ function indexPage(): string {
   <h1>MCP Apps widget harness</h1>
   <p>Pick a widget. Append query flags to simulate host behaviour:
      <code>?serverTools=0</code>, <code>?tools=0</code>, <code>?delay=3000</code>,
-     <code>?maxHeight=600</code>, <code>?fail=1</code>.</p>
+     <code>?maxHeight=600</code>, <code>?fail=1</code>, <code>?drinkUnit=us</code>.</p>
   <ul>${links}</ul>
 </body></html>`;
 }
@@ -68,6 +69,14 @@ function hostPage(widget: string, params: URLSearchParams): string {
     const delay = Number(params.get("delay") ?? 0);
     const maxHeight = params.get("maxHeight");
     const failCalls = params.get("fail") === "1";
+    // The alcohol opt-in, as start_meal_import sends it: "us"/"uk" when the
+    // user tracks alcohol, null when they do not. Default null, because that is
+    // the default account state and the state the importer must never leak in.
+    const drinkUnitParam = params.get("drinkUnit");
+    const drinkUnit =
+        drinkUnitParam === "us" || drinkUnitParam === "uk"
+            ? drinkUnitParam
+            : null;
 
     // Per-widget canned tool results. One shared fixture does NOT work: each
     // widget's coerce() checks for its own shape, so a payload shaped for
@@ -79,6 +88,11 @@ function hostPage(widget: string, params: URLSearchParams): string {
         protein_g: Math.round(kcal * 0.07),
         carbs_g: Math.round(kcal * 0.11),
         fat_g: Math.round(kcal * 0.03),
+        fiber_g: Math.round(kcal * 0.013 * 10) / 10,
+        sugar_g: Math.round(kcal * 0.028 * 10) / 10,
+        // Alcohol tracking ON in these fixtures except where noted; 0 is a
+        // tracked alcohol-free day, null (see "meal-logged") is tracking off.
+        alcohol_g: kcal > 2100 ? 13.9 : 0,
         water_ml: 1800,
     });
     const days = [
@@ -95,6 +109,9 @@ function hostPage(widget: string, params: URLSearchParams): string {
         protein_g: 160,
         carbs_g: 220,
         fat_g: 70,
+        fiber_g: 30,
+        sugar_g: 45,
+        alcohol_g: 20,
         water_ml: 2500,
     };
     const totals = {
@@ -102,8 +119,53 @@ function hostPage(widget: string, params: URLSearchParams): string {
         protein_g: 120,
         carbs_g: 190,
         fat_g: 62,
+        fiber_g: 24.6,
+        // Over its ceiling, so the sub-row inside the carbs disclosure flags it.
+        sugar_g: 61.3,
+        alcohol_g: 27.7,
         water_ml: 1500,
     };
+    // Per-meal breakdown rows: what makes the panel's tiles tappable.
+    const meals = [
+        {
+            description: "Overnight oats with berries",
+            meal_type: "breakfast",
+            date: null,
+            calories: 420,
+            protein_g: 18,
+            carbs_g: 62,
+            fat_g: 12,
+            fiber_g: 9.4,
+            sugar_g: 24.6,
+            alcohol_g: 0,
+        },
+        {
+            description: "Grilled chicken & rice bowl",
+            meal_type: "lunch",
+            date: null,
+            calories: 650,
+            protein_g: 52,
+            carbs_g: 78,
+            fat_g: 16,
+            fiber_g: 6.2,
+            sugar_g: 9.4,
+            alcohol_g: 0,
+        },
+        {
+            description: "Salmon with quinoa & veg",
+            meal_type: "dinner",
+            date: null,
+            calories: 780,
+            protein_g: 56,
+            carbs_g: 77,
+            fat_g: 32,
+            fiber_g: 7.9,
+            sugar_g: 14.7,
+            alcohol_g: 27.7,
+        },
+    ];
+    // Same rows with alcohol tracking OFF: null, not 0, everywhere.
+    const mealsNoAlcohol = meals.map((m) => ({ ...m, alcohol_g: null }));
 
     const RESULTS: Record<string, unknown> = {
         "nutrition-summary": {
@@ -116,9 +178,13 @@ function hostPage(widget: string, params: URLSearchParams): string {
                 protein_g: 145,
                 carbs_g: 228,
                 fat_g: 62,
+                fiber_g: 27.4,
+                sugar_g: 58.1,
+                alcohol_g: 7.9,
                 water_ml: 1800,
             },
             days,
+            meals: meals.map((m, i) => ({ ...m, date: days[i]!.date })),
         },
         "goal-progress": {
             date: "2026-07-15",
@@ -127,6 +193,8 @@ function hostPage(widget: string, params: URLSearchParams): string {
             goals,
             totals,
             has_goals: true,
+            // Deliberately empty: with no per-meal rows only CARBS is tappable
+            // (for fiber + sugar), which is the other disclosure path.
             meals: [],
         },
         "meal-logged": {
@@ -139,13 +207,36 @@ function hostPage(widget: string, params: URLSearchParams): string {
                 protein_g: 42,
                 carbs_g: 28,
                 fat_g: 22,
+                fiber_g: 7.4,
+                sugar_g: 6.1,
+                alcohol_g: null,
             },
             has_goals: true,
-            goals,
-            totals,
-            meals: [],
+            // Alcohol tracking OFF for this one, so the panel must show no
+            // alcohol stat line at all (null, not 0).
+            goals: { ...goals, alcohol_g: null },
+            totals: { ...totals, alcohol_g: null },
+            meals: mealsNoAlcohol,
         },
         trends: { range_days: 7, days, goals },
+        // start_meal_import's payload. Without it the importer would fall back
+        // to its built-in defaults and the alcohol gate would never be
+        // exercised here — which is exactly how the leak shipped.
+        "import-meals": {
+            tz: "Europe/Kyiv",
+            tz_configured: true,
+            today: "2026-07-15",
+            max_rows_per_call: 50,
+            import_tool_name: "bulk_import_meals",
+            known_source_apps: [
+                "myfitnesspal",
+                "cronometer",
+                "loseit",
+                "macrofactor",
+            ],
+            widgets_enabled: true,
+            drink_unit: drinkUnit,
+        },
         "weight-trends": {
             range_days: 7,
             unit: "kg",
@@ -170,7 +261,7 @@ function hostPage(widget: string, params: URLSearchParams): string {
 </style></head>
 <body>
   <strong>${widget}</strong>
-  <span class="cfg">serverTools=${serverTools} answerTools=${answerTools} delay=${delay}ms${maxHeight ? " maxHeight=" + maxHeight : ""}${failCalls ? " fail=1" : ""}</span>
+  <span class="cfg">serverTools=${serverTools} answerTools=${answerTools} delay=${delay}ms${maxHeight ? " maxHeight=" + maxHeight : ""}${failCalls ? " fail=1" : ""} drinkUnit=${drinkUnit ?? "null (tracking off)"}</span>
   <div style="margin-top:8px"><iframe id="frame" sandbox="allow-scripts" src="/widget/${encodeURIComponent(widget)}"></iframe></div>
   <div style="margin-top:8px">
     <button onclick="hostRequest(1)">host req id=1</button>
@@ -276,6 +367,13 @@ window.addEventListener("message", (e) => {
       }
       // bulk_import_meals runs for real, server-side, against an in-memory store.
       if (name === "bulk_import_meals") {
+        // What the widget actually decided to send, before the server sees it:
+        // the field list settles arguments like "is alcohol still written when
+        // tracking is off?" by inspection rather than by belief.
+        const rows = (d.params.arguments && d.params.arguments.meals) || [];
+        const fields = [...new Set(rows.flatMap((r) => Object.keys(r)))];
+        log("   " + rows.length + " rows, fields: " + fields.join(",") +
+            " | alcohol_g on " + rows.filter((r) => r.alcohol_g != null).length + " row(s)");
         try {
           const r = await fetch("/tool/bulk_import_meals", {
             method: "POST",
