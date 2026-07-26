@@ -115,7 +115,15 @@
                         "name": "What can I track?",
                         "acceptedAnswer": {
                             "@type": "Answer",
-                            "text": "Calories, protein, carbohydrates, fat, and water for every entry — described in plain language or pulled from a product barcode via Open Food Facts. You can also log your body weight in kg or lb and track trends toward a target weight. View daily summaries, query meals by date range, update or delete past entries, set goals, and monitor trends over time."
+                            "text": "Calories, protein, carbohydrates, fat, fiber, total sugar, and water for every entry — described in plain language or pulled from a product barcode via Open Food Facts. Alcohol is tracked too, in grams of pure ethanol, once you switch it on. You can also log your body weight in kg or lb and track trends toward a target weight. View daily summaries, query meals by date range, update or delete past entries, set goals, and monitor trends over time."
+                        }
+                    },
+                    {
+                        "@type": "Question",
+                        "name": "Does it track alcohol?",
+                        "acceptedAnswer": {
+                            "@type": "Answer",
+                            "text": "Only if you turn it on — alcohol tracking is off by default. Switched on, drinks are recorded in grams of pure ethanol and shown as US standard drinks or UK units, whichever you prefer. Nothing infers alcohol for you: it comes from a drink you log or an alcohol column in a file you import. Switching it back off hides alcohol from your meals, goals, and summaries and stops the importer reading alcohol columns — it is not a delete switch, and your CSV export always includes what you logged."
                         }
                     },
                     {
@@ -889,7 +897,7 @@
                         ></span>
                         <span class="tools-cta-text">
                             <strong>Curious what it can actually do?</strong>
-                            Browse all 35 tools — logging, barcodes, water,
+                            Browse all 37 tools — logging, barcodes, water,
                             weight, goals, and trends — with a description and
                             an example prompt for each.
                         </span>
@@ -2431,7 +2439,8 @@
                             <h3>Meals in plain language</h3>
                             <p>
                                 Describe what you ate — your AI estimates
-                                calories, protein, carbs, and fat and logs it.
+                                calories, protein, carbs, fat, fiber, and total
+                                sugar and logs it.
                             </p>
                         </article>
                         <article class="card feature">
@@ -2440,9 +2449,9 @@
                             ></span>
                             <h3>Scan a barcode</h3>
                             <p>
-                                Snap or type a product barcode and pull verified
-                                macros from Open Food Facts, scaled to how much
-                                you ate.
+                                Snap or type a product barcode and pull macros,
+                                fiber, and sugar from Open Food Facts, scaled to
+                                how much you ate.
                             </p>
                         </article>
                         <article class="card feature">
@@ -2451,8 +2460,9 @@
                             ></span>
                             <h3>Goals &amp; progress</h3>
                             <p>
-                                Set daily calorie, macro, and water targets and
-                                check live progress toward them.
+                                Set daily calorie, macro, fiber, and water
+                                targets — plus sugar and alcohol limits to stay
+                                under — and check live progress toward them.
                             </p>
                         </article>
                         <article class="card feature">
@@ -2802,14 +2812,32 @@
                         <details>
                             <summary>What can I track?</summary>
                             <p>
-                                Calories, protein, carbohydrates, fat, and water
-                                for every entry — described in plain language or
-                                pulled from a product barcode via Open Food
-                                Facts. You can also log your body weight in kg
-                                or lb and track trends toward a target weight.
-                                View daily summaries, query meals by date range,
-                                update or delete past entries, set goals, and
-                                monitor trends over time.
+                                Calories, protein, carbohydrates, fat, fiber,
+                                total sugar, and water for every entry —
+                                described in plain language or pulled from a
+                                product barcode via Open Food Facts. Alcohol is
+                                tracked too, in grams of pure ethanol, once you
+                                switch it on. You can also log your body weight
+                                in kg or lb and track trends toward a target
+                                weight. View daily summaries, query meals by
+                                date range, update or delete past entries, set
+                                goals, and monitor trends over time.
+                            </p>
+                        </details>
+                        <details>
+                            <summary>Does it track alcohol?</summary>
+                            <p>
+                                Only if you turn it on — alcohol tracking is off
+                                by default. Switched on, drinks are recorded in
+                                grams of pure ethanol and shown as US standard
+                                drinks or UK units, whichever you prefer.
+                                Nothing infers alcohol for you: it comes from a
+                                drink you log or an alcohol column in a file you
+                                import. Switching it back off hides alcohol from
+                                your meals, goals, and summaries and stops the
+                                importer reading alcohol columns — it is not a
+                                delete switch, and your CSV export always
+                                includes what you logged.
                             </p>
                         </details>
                         <details>
