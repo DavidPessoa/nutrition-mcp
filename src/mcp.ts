@@ -25,6 +25,11 @@ import {
     getUserTimezone,
     getPreferredWeightUnit,
     getWidgetsEnabled,
+    getAlcoholTrackingEnabled,
+    getPreferredDrinkUnit,
+    widgetsEnabledFromProfile,
+    alcoholTrackingEnabledFromProfile,
+    preferredDrinkUnitFromProfile,
     upsertProfile,
     getProfile,
     countMeals,
@@ -48,6 +53,9 @@ import {
     computeMealPatterns,
     computeWeeklyDigest,
     computeWeightTrend,
+    dayCarries,
+    coveredDailyAverage,
+    type DailyBucket,
 } from "./insights.js";
 import {
     toGrams,
@@ -58,6 +66,7 @@ import {
     isPlausibleWeightGrams,
     type WeightUnit,
 } from "./units.js";
+import { formatAlcohol, isDrinkUnit, type DrinkUnit } from "./alcohol.js";
 import { exportMeals } from "./export.js";
 import {
     runImport,
@@ -65,6 +74,9 @@ import {
     serializeImportResult,
     BULK_IMPORT_OUTPUT_SCHEMA,
     MAX_ROWS_PER_CALL,
+    MAX_CALORIES,
+    MAX_MACRO_G,
+    MAX_ALCOHOL_G,
     type BulkImportArgs,
 } from "./import.js";
 import { normalizeBarcode, lookupBarcode, formatFoodResult } from "./foods.js";
@@ -124,29 +136,163 @@ Importing history from another app — when the user wants to bring in past meal
 4. Check get_timezone before any sizeable import and offer set_timezone if it is unset. Times without an explicit UTC offset are placed using the saved timezone, so correcting it afterwards moves every imported meal — onto an adjacent day for anything logged near midnight.
 5. Show the user what was resolved before treating an import as done: the dry run echoes back the date, time and meal type for every row, and a misread date column shows up there rather than in the totals. Re-sending the same rows is safe — the server recognises them and skips them — so a retry after a failure or a timeout never duplicates anything.`;
 
+// How alcohol should be rendered for the current user: the drink unit to gloss
+// grams with, or null when alcohol tracking is OFF. Null is the gate, not a
+// missing preference — an enabled user with no saved preference gets "us". See
+// the alcohol opt-in note on registerTools: alcohol is always STORED, and this
+// value decides only whether it is ever shown.
+type AlcoholDisplay = DrinkUnit | null;
+
+// ---------- Numeric bounds for the write tools ----------
+//
+// Why these live in the Zod schema and not in the handler: CLAUDE.md's rule
+// ("bounds live in the handler, not in Zod") is specifically about
+// bulk_import_meals, where a schema-level rejection fires BEFORE the handler and
+// throws away the structured per-row report, the warnings and the analytics row
+// — for what is that tool's single most common caller mistake. log_meal,
+// update_meal and set_nutrition_goals have no such report to lose: their whole
+// output is the one row they just wrote. There, rejecting in the schema is
+// strictly better, because the alternative is a raw Postgres `check (fiber_g >=
+// 0)` violation surfaced verbatim to the model.
+//
+// The upper bound is not cosmetic. zod 4's z.number() rejects Infinity but
+// accepts 1e308 — and Math.round(1e308 * 10) / 10 IS Infinity, so a single
+// absurd meal made every later get_nutrition_summary / get_goal_progress /
+// log_meal for that date fail the SDK's outputSchema validation (those schemas
+// are z.number(), which refuses Infinity) until the row was deleted by hand.
+//
+// The ceilings themselves live in src/import.ts and are re-exported here, so
+// the same figure is accepted whichever way a meal arrives. They were briefly
+// duplicated with a test that grepped the other file to catch drift; sharing
+// one declaration removes the drift instead of detecting it.
+export { MAX_CALORIES, MAX_MACRO_G, MAX_ALCOHOL_G };
+// nutrition_goals stores every gram target as numeric(6,2), so anything from
+// 10000 up is a Postgres "numeric field overflow" rather than a saved goal.
+export const MAX_GOAL_G = 9_999.99;
+
 interface DailyTotals {
     calories: number;
     protein_g: number;
     carbs_g: number;
     fat_g: number;
+    fiber_g: number;
+    sugar_g: number;
+    alcohol_g: number;
     water_ml: number;
 }
 
-function sumMeals(meals: Meal[]): DailyTotals {
-    const totals: DailyTotals = {
+function emptyTotals(): DailyTotals {
+    return {
         calories: 0,
         protein_g: 0,
         carbs_g: 0,
         fat_g: 0,
+        fiber_g: 0,
+        sugar_g: 0,
+        alcohol_g: 0,
         water_ml: 0,
     };
+}
+
+export function sumMeals(meals: Meal[]): DailyTotals {
+    const totals = emptyTotals();
     for (const m of meals) {
         totals.calories += m.calories ?? 0;
         totals.protein_g += m.protein_g ?? 0;
         totals.carbs_g += m.carbs_g ?? 0;
         totals.fat_g += m.fat_g ?? 0;
+        // Summed regardless of the alcohol opt-in: the flag gates display, and
+        // gating here would make the total depend on when it was computed.
+        // The `?? 0` here is a SUM, which is fine — a missing value adds
+        // nothing. It is only the AVERAGE that needs to know a null from a
+        // zero, and that is what nutrientPresence below is for.
+        totals.fiber_g += m.fiber_g ?? 0;
+        totals.sugar_g += m.sugar_g ?? 0;
+        totals.alcohol_g += m.alcohol_g ?? 0;
     }
     return totals;
+}
+
+// Which of the three post-launch nutrients a day's meals actually carry. Every
+// meal logged before this feature existed has NULL fiber/sugar/alcohol, and so
+// does every row imported from an export whose file had no such column; `?? 0`
+// cannot tell that apart from a genuine zero. A thin adapter over dayCarries in
+// insights.ts — the rule itself lives there, once, so trends and the summary
+// cannot drift apart (measured drift: 30 g/day of fiber shown as "30d avg: 5g"
+// against a "Target: 30g").
+export interface NutrientPresence {
+    fiber_g: boolean;
+    sugar_g: boolean;
+    alcohol_g: boolean;
+}
+
+export function nutrientPresence(meals: Meal[]): NutrientPresence {
+    return {
+        fiber_g: dayCarries(meals, "fiber_g"),
+        sugar_g: dayCarries(meals, "sugar_g"),
+        alcohol_g: dayCarries(meals, "alcohol_g"),
+    };
+}
+
+// Per-day means over a date range, and the denominator each one used.
+//
+// THE RULE, and it is insights.ts's rule rather than a second copy of it:
+// calories, protein, carbs, fat and water divide by EVERY logged day, exactly
+// as they always have (users have history built on those figures), while fiber,
+// sugar and alcohol go through coveredDailyAverage — a day carrying no value
+// for a nutrient is excluded from both its numerator and its denominator. A
+// nutrient nobody recorded reports 0 over 0 days, which callers must render as
+// "not recorded" rather than as a genuine zero.
+export function rangeAverages(
+    perDay: Array<{ meals: Meal[]; totals: DailyTotals }>,
+): {
+    averages: DailyTotals;
+    recordedDays: { fiber_g: number; sugar_g: number; alcohol_g: number };
+} {
+    const sum = emptyTotals();
+    for (const { totals } of perDay) {
+        sum.calories += totals.calories;
+        sum.protein_g += totals.protein_g;
+        sum.carbs_g += totals.carbs_g;
+        sum.fat_g += totals.fat_g;
+        sum.water_ml += totals.water_ml;
+    }
+    const mealsByDay = perDay.map((d) => d.meals);
+    const fiber = coveredDailyAverage(mealsByDay, "fiber_g");
+    const sugar = coveredDailyAverage(mealsByDay, "sugar_g");
+    const alcohol = coveredDailyAverage(mealsByDay, "alcohol_g");
+    const n = perDay.length || 1;
+    return {
+        averages: {
+            calories: sum.calories / n,
+            protein_g: sum.protein_g / n,
+            carbs_g: sum.carbs_g / n,
+            fat_g: sum.fat_g / n,
+            fiber_g: fiber.avg ?? 0,
+            sugar_g: sugar.avg ?? 0,
+            alcohol_g: alcohol.avg ?? 0,
+            water_ml: Math.round(sum.water_ml / n),
+        },
+        recordedDays: {
+            fiber_g: fiber.days,
+            sugar_g: sugar.days,
+            alcohol_g: alcohol.days,
+        },
+    };
+}
+
+// insights.ts is deliberately free of Supabase, so it cannot know about the
+// per-user opt-in: it renders an alcohol line whenever the data contains any
+// (see hasAlcohol there). Zeroing the series is how the flag reaches it — both
+// computeTrends and computeWeeklyDigest suppress alcohol on an all-zero series,
+// and neither derives anything else from it. Cheap: the buckets are per-request
+// and at most 365 shallow copies.
+export function gateAlcohol(
+    buckets: DailyBucket[],
+    alcohol: AlcoholDisplay,
+): DailyBucket[] {
+    if (alcohol) return buckets;
+    return buckets.map((b) => ({ ...b, alcohol_g: 0 }));
 }
 
 function sumWater(entries: WaterEntry[]): number {
@@ -159,7 +305,7 @@ function sumWater(entries: WaterEntry[]): number {
 // reveal which meals contributed to it. `date` is null for single-day views
 // (the widget labels each row by meal type instead) and set to YYYY-MM-DD for
 // multi-day ranges so the widget can tag each meal with its day.
-const MEAL_BREAKDOWN_ITEM = z.object({
+export const MEAL_BREAKDOWN_ITEM = z.object({
     description: z.string(),
     meal_type: z.string().nullable(),
     date: z.string().nullable(),
@@ -167,9 +313,19 @@ const MEAL_BREAKDOWN_ITEM = z.object({
     protein_g: z.number(),
     carbs_g: z.number(),
     fat_g: z.number(),
+    fiber_g: z.number(),
+    sugar_g: z.number(),
+    // Nullable where the other macros are not: null is how every structured
+    // payload says "this user does not track alcohol", which a 0 could not
+    // distinguish from a genuinely alcohol-free day.
+    alcohol_g: z.number().nullable(),
 });
 
-function mealBreakdown(meals: Meal[], dateTz: string | null) {
+export function mealBreakdown(
+    meals: Meal[],
+    dateTz: string | null,
+    alcohol: AlcoholDisplay,
+) {
     return meals.map((m) => ({
         description: m.description,
         meal_type: m.meal_type ?? null,
@@ -178,8 +334,44 @@ function mealBreakdown(meals: Meal[], dateTz: string | null) {
         protein_g: Math.round((m.protein_g ?? 0) * 10) / 10,
         carbs_g: Math.round((m.carbs_g ?? 0) * 10) / 10,
         fat_g: Math.round((m.fat_g ?? 0) * 10) / 10,
+        fiber_g: Math.round((m.fiber_g ?? 0) * 10) / 10,
+        sugar_g: Math.round((m.sugar_g ?? 0) * 10) / 10,
+        alcohol_g: alcohol ? Math.round((m.alcohol_g ?? 0) * 10) / 10 : null,
     }));
 }
+
+// Every goals / totals / averages payload in this file has the same shape, so
+// they share one schema each (and one builder each, below) instead of four
+// hand-maintained copies — which is what let three of them drift apart on the
+// last field addition.
+export const GOALS_ITEM = z.object({
+    calories: z.number().nullable(),
+    protein_g: z.number().nullable(),
+    carbs_g: z.number().nullable(),
+    fat_g: z.number().nullable(),
+    fiber_g: z.number().nullable(),
+    sugar_g: z.number().nullable(),
+    alcohol_g: z.number().nullable(),
+    water_ml: z.number().nullable(),
+});
+
+export const TOTALS_ITEM = z.object({
+    calories: z.number(),
+    protein_g: z.number(),
+    carbs_g: z.number(),
+    fat_g: z.number(),
+    fiber_g: z.number(),
+    sugar_g: z.number(),
+    alcohol_g: z.number().nullable(),
+    water_ml: z.number(),
+});
+
+// Which standard-drink convention the widget should render alcohol_g in. The
+// payloads carry canonical grams, so without this a UK user saw "US drinks" in
+// the widget while the text output beside it said "UK units". Null doubles as
+// the "user has alcohol tracking off" signal, matching AlcoholDisplay — the
+// widget hides the stat line entirely rather than picking a default.
+const DRINK_UNIT_FIELD = z.enum(["us", "uk"]).nullable();
 
 // log_meal and update_meal share the same MCP Apps widget
 // (public/widgets/meal-logged.html). Both declare this identical output shape
@@ -188,6 +380,7 @@ function mealBreakdown(meals: Meal[], dateTz: string | null) {
 const MEAL_PROGRESS_OUTPUT_SCHEMA = {
     action: z.enum(["logged", "updated"]),
     date: z.string(),
+    drink_unit: DRINK_UNIT_FIELD,
     logged_meal: z.object({
         description: z.string(),
         meal_type: z.string().nullable(),
@@ -195,26 +388,50 @@ const MEAL_PROGRESS_OUTPUT_SCHEMA = {
         protein_g: z.number().nullable(),
         carbs_g: z.number().nullable(),
         fat_g: z.number().nullable(),
+        fiber_g: z.number().nullable(),
+        sugar_g: z.number().nullable(),
+        alcohol_g: z.number().nullable(),
     }),
     has_goals: z.boolean(),
-    goals: z
-        .object({
-            calories: z.number().nullable(),
-            protein_g: z.number().nullable(),
-            carbs_g: z.number().nullable(),
-            fat_g: z.number().nullable(),
-            water_ml: z.number().nullable(),
-        })
-        .nullable(),
-    totals: z.object({
-        calories: z.number(),
-        protein_g: z.number(),
-        carbs_g: z.number(),
-        fat_g: z.number(),
-        water_ml: z.number(),
-    }),
+    goals: GOALS_ITEM.nullable(),
+    totals: TOTALS_ITEM,
     meals: z.array(MEAL_BREAKDOWN_ITEM),
 };
+
+// Both payloads carry alcohol as a nullable number for the same reason
+// MEAL_BREAKDOWN_ITEM does. These two builders are the only places a goals or
+// totals literal is written: a .nullable() field is REQUIRED in the emitted JSON
+// Schema, so an omitted key is a validation error rather than a null, and one
+// builder per shape is what keeps every literal complete.
+export function goalsPayloadOf(
+    goals: NutritionGoals | null,
+    alcohol: AlcoholDisplay,
+) {
+    if (!goals) return null;
+    return {
+        calories: goals.daily_calories ?? null,
+        protein_g: goals.daily_protein_g ?? null,
+        carbs_g: goals.daily_carbs_g ?? null,
+        fat_g: goals.daily_fat_g ?? null,
+        fiber_g: goals.daily_fiber_g ?? null,
+        sugar_g: goals.daily_sugar_g ?? null,
+        alcohol_g: alcohol ? (goals.daily_alcohol_g ?? null) : null,
+        water_ml: goals.daily_water_ml ?? null,
+    };
+}
+
+export function totalsPayloadOf(totals: DailyTotals, alcohol: AlcoholDisplay) {
+    return {
+        calories: Math.round(totals.calories),
+        protein_g: Math.round(totals.protein_g * 10) / 10,
+        carbs_g: Math.round(totals.carbs_g * 10) / 10,
+        fat_g: Math.round(totals.fat_g * 10) / 10,
+        fiber_g: Math.round(totals.fiber_g * 10) / 10,
+        sugar_g: Math.round(totals.sugar_g * 10) / 10,
+        alcohol_g: alcohol ? Math.round(totals.alcohol_g * 10) / 10 : null,
+        water_ml: totals.water_ml,
+    };
+}
 
 // ---------- bulk_import_meals ----------
 
@@ -256,6 +473,19 @@ const IMPORT_ROW_SCHEMA = z.object({
     protein_g: z.coerce.number().optional(),
     carbs_g: z.coerce.number().optional(),
     fat_g: z.coerce.number().optional(),
+    fiber_g: z.coerce.number().optional().describe("Dietary fiber in grams."),
+    sugar_g: z.coerce
+        .number()
+        .optional()
+        .describe(
+            "TOTAL sugars in grams, including sugar naturally present in fruit and milk — not added sugar. Map the export's 'Sugars' column straight across; do not try to subtract naturally occurring sugar.",
+        ),
+    alcohol_g: z.coerce
+        .number()
+        .optional()
+        .describe(
+            "Grams of pure ethanol (NOT the volume of the drink and NOT its ABV). If the export gives a drink volume and strength instead, compute it: grams = millilitres x (ABV% / 100) x 0.789. Omit when the source has no alcohol column.",
+        ),
     notes: z
         .string()
         .optional()
@@ -270,6 +500,77 @@ const IMPORT_ROW_SCHEMA = z.object({
         ),
 });
 
+// ---------- start_meal_import ----------
+
+// Real content: the import widget needs all of this. With no structuredContent
+// the bridge never paints and the iframe sits on its loading state forever.
+export const START_IMPORT_OUTPUT_SCHEMA = {
+    tz: z.string(),
+    tz_configured: z.boolean(),
+    today: z.string(),
+    max_rows_per_call: z.number(),
+    import_tool_name: z.string(),
+    known_source_apps: z.array(z.string()),
+    widgets_enabled: z.boolean(),
+    // The alcohol opt-in, reaching the importer the same way it reaches every
+    // other widget-backed tool. Without it the widget auto-mapped an
+    // `alcohol`/`ethanol` column and rendered a per-row ALC preview for a user
+    // who had asked never to see alcohol — the exact scenario the opt-in
+    // exists to prevent. What null makes the widget do: see startImportPayload.
+    drink_unit: DRINK_UNIT_FIELD,
+};
+
+export function startImportPayload(opts: {
+    tz: string;
+    tzConfigured: boolean;
+    widgetsEnabled: boolean;
+    alcohol: AlcoholDisplay;
+}) {
+    return {
+        // The widget must resolve dates the same way the server will, so it is
+        // told the timezone rather than guessing.
+        tz: opts.tz,
+        tz_configured: opts.tzConfigured,
+        today: todayInTz(opts.tz),
+        max_rows_per_call: MAX_ROWS_PER_CALL,
+        import_tool_name: "bulk_import_meals",
+        known_source_apps: [
+            "myfitnesspal",
+            "cronometer",
+            "loseit",
+            "macrofactor",
+        ],
+        widgets_enabled: opts.widgetsEnabled,
+        // Null = alcohol tracking is off. The importer then does not auto-map
+        // an alcohol column, does not render the ALC preview column, and does
+        // NOT send alcohol_g — the file's alcohol never reaches the screen and
+        // never reaches the database by this route.
+        //
+        // Why this route drops it, when CONTRACT §7 says alcohol is stored
+        // whenever it is explicitly passed: in this flow the preview IS the
+        // contract. The whole reason start_meal_import is preferred over
+        // bulk_import_meals is that the user reads and approves every row
+        // themselves instead of a model transcribing it. Writing a column that
+        // was deliberately never shown breaks that promise and leaves an
+        // unverifiable number in the log — one the user cannot audit, because
+        // the only surface that would display it is the one their opt-out
+        // turned off. Note the gate is the widget's, not the write layer's:
+        // bulk_import_meals stores alcohol_g for any caller that passes it,
+        // tracking on or off, and that is unchanged.
+        //
+        // The cost, which is real and is why the widget says so out loud: the
+        // loss is permanent, not merely deferred. alcohol_g is deliberately
+        // excluded from the import digest (CONTRACT §2), so re-importing the
+        // same file after turning tracking on dedupes to a clean no-op and
+        // back-fills nothing. There is no second chance. The widget therefore
+        // shows an explicit notice when the file HAS an alcohol column and
+        // tracking is off — that it will not be imported, and that enabling
+        // tracking before importing is how to keep it. Silent would be
+        // indefensible; announced, it is the user's call to make.
+        drink_unit: opts.alcohol,
+    };
+}
+
 // Compute the day's running totals vs goals for a meal that was just logged or
 // updated, packaging both the model-facing progress text and the meal-logged
 // widget's structuredContent. Shared by log_meal and update_meal so the two
@@ -278,6 +579,7 @@ async function buildMealProgress(
     userId: string,
     meal: Meal,
     action: "logged" | "updated",
+    alcohol: AlcoholDisplay,
 ) {
     const tz = await getUserTimezone(userId);
     const mealDate = dateInTz(meal.logged_at, tz);
@@ -290,12 +592,13 @@ async function buildMealProgress(
     totals.water_ml = sumWater(waterEntries);
 
     const progressSection = goals
-        ? `\n\nDaily progress (${mealDate}):\n${formatProgress(totals, goals)}`
+        ? `\n\nDaily progress (${mealDate}):\n${formatProgress(totals, goals, alcohol, nutrientPresence(meals))}`
         : "\n\nNo nutrition goals set — use the set_nutrition_goals tool to track progress against daily targets.";
 
     const structuredContent = {
         action,
         date: mealDate,
+        drink_unit: alcohol,
         logged_meal: {
             description: meal.description,
             meal_type: meal.meal_type ?? null,
@@ -303,52 +606,126 @@ async function buildMealProgress(
             protein_g: meal.protein_g ?? null,
             carbs_g: meal.carbs_g ?? null,
             fat_g: meal.fat_g ?? null,
+            fiber_g: meal.fiber_g ?? null,
+            sugar_g: meal.sugar_g ?? null,
+            alcohol_g: alcohol ? (meal.alcohol_g ?? null) : null,
         },
         has_goals: goals != null,
-        goals: goals
-            ? {
-                  calories: goals.daily_calories ?? null,
-                  protein_g: goals.daily_protein_g ?? null,
-                  carbs_g: goals.daily_carbs_g ?? null,
-                  fat_g: goals.daily_fat_g ?? null,
-                  water_ml: goals.daily_water_ml ?? null,
-              }
-            : null,
-        totals: {
-            calories: Math.round(totals.calories),
-            protein_g: Math.round(totals.protein_g * 10) / 10,
-            carbs_g: Math.round(totals.carbs_g * 10) / 10,
-            fat_g: Math.round(totals.fat_g * 10) / 10,
-            water_ml: totals.water_ml,
-        },
+        goals: goalsPayloadOf(goals, alcohol),
+        totals: totalsPayloadOf(totals, alcohol),
         // Single day → label rows by meal type in the widget, not by date.
-        meals: mealBreakdown(meals, null),
+        meals: mealBreakdown(meals, null, alcohol),
     };
 
     return { progressSection, structuredContent };
 }
 
-function formatGoalLine(
+// Which way a target points. A floor is something to reach (calories, protein,
+// carbs, fat, water, fiber); a ceiling is something to stay under (sugar,
+// alcohol). The distinction is not cosmetic: with the floor wording a 40 g sugar
+// target and 0 g eaten reads "40g to go", which congratulates the user for
+// having sugar left to consume.
+type GoalDirection = "floor" | "ceiling";
+
+// Whether a stored target is a target at all. Zero splits by direction: a
+// CEILING of 0 is a real limit — "none at all" is the single most likely
+// alcohol goal anyone sets, and the old `target <= 0` guard let such a goal be
+// stored, echoed back by get_nutrition_goals, and then silently ignored on
+// every progress line, which is worse than refusing it. A FLOOR of 0 stays
+// "unset": a 0 g protein target is meaningless. Negatives are rejected in both
+// directions, and so is NaN (z.coerce turns "" into NaN).
+export function hasActiveTarget(
+    target: number | null | undefined,
+    direction: GoalDirection = "floor",
+): target is number {
+    if (target == null || Number.isNaN(target)) return false;
+    return direction === "ceiling" ? target >= 0 : target > 0;
+}
+
+// `actualText` overrides how the consumed amount is printed, for values whose
+// natural rendering is not "<number><unit>" — alcohol, which always carries its
+// drinks gloss (see formatAlcohol). Everything else passes it as undefined.
+export function formatGoalLine(
     label: string,
     unit: string,
     actual: number,
     target: number | null,
+    direction: GoalDirection = "floor",
+    actualText?: string,
 ): string {
-    if (target == null || target <= 0) {
-        return `${label}: ${Math.round(actual * 10) / 10}${unit}`;
+    const rounded = Math.round(actual * 10) / 10;
+    if (!hasActiveTarget(target, direction)) {
+        // Standalone, so the amount carries the unit itself.
+        return `${label}: ${actualText ?? `${rounded}${unit}`}`;
+    }
+    const shown = actualText ?? String(rounded);
+    const delta = Math.round((target - actual) * 10) / 10;
+    if (direction === "ceiling") {
+        // A limit is not a budget. "40g left" handed someone trying to drink or
+        // sweeten less a daily permission slip, and on an averaged view
+        // ("7-day average, 12.1 g left") it means nothing at all. Report the
+        // position relative to the limit instead, matching the "Days over
+        // limit" phrasing computeTrends already uses.
+        //
+        // A limit of 0 gets no percentage: every ratio against it is Infinity
+        // or NaN. "clear" is the word computeWeeklyDigest uses for the same
+        // case, so the two narratives read alike.
+        const pct =
+            target > 0 ? `${Math.round((actual / target) * 100)}%, ` : "";
+        const state =
+            delta < 0
+                ? `${Math.abs(delta)}${unit} over`
+                : target === 0
+                  ? "clear"
+                  : "under";
+        return `${label}: ${shown} / ${target}${unit} limit (${pct}${state})`;
     }
     const pct = Math.round((actual / target) * 100);
-    const delta = Math.round((target - actual) * 10) / 10;
     const deltaStr =
         delta > 0 ? `${delta}${unit} to go` : `${Math.abs(delta)}${unit} over`;
-    return `${label}: ${Math.round(actual * 10) / 10} / ${target}${unit} (${pct}%, ${deltaStr})`;
+    // Against a target the unit sits on the target only ("1500 / 2000 kcal") —
+    // unchanged from before this gained a direction.
+    return `${label}: ${shown} / ${target}${unit} (${pct}%, ${deltaStr})`;
 }
 
-function formatProgress(
+// A nutrient nobody recorded is not a zero. Fiber and sugar arrived long after
+// most of the history in this database, so "0g" on a day whose meals predate
+// them is a fabricated figure — say nothing instead (the same instinct as
+// hasAlcohol() in insights.ts). The exception is a day with an active target,
+// where a vanished line would read as tracking having broken.
+function recordedGoalLine(
+    label: string,
+    unit: string,
+    actual: number,
+    target: number | null,
+    recorded: boolean,
+    direction: GoalDirection,
+): string | null {
+    if (recorded) return formatGoalLine(label, unit, actual, target, direction);
+    if (!hasActiveTarget(target, direction)) return null;
+    const noun = direction === "ceiling" ? "limit" : "target";
+    return `${label}: not recorded / ${target}${unit} ${noun}`;
+}
+
+// Everything recorded, for the callers that have no per-meal list to inspect.
+const ALL_RECORDED: NutrientPresence = {
+    fiber_g: true,
+    sugar_g: true,
+    alcohol_g: true,
+};
+
+// `present` says which of the three post-launch nutrients these meals actually
+// carry, so a pre-feature day prints nothing for fiber rather than a made-up
+// "0g". Only fiber and sugar consult it: alcohol has its own explicit opt-in,
+// and for a user who turned it ON a zero is the meaningful reading — that is
+// exactly the "0 g against a 0 g limit" a recovery user set the limit to see.
+export function formatProgress(
     totals: DailyTotals,
     goals: NutritionGoals | null,
+    alcohol: AlcoholDisplay,
+    present: NutrientPresence = ALL_RECORDED,
 ): string {
-    const lines = [
+    const lines: Array<string | null> = [
         formatGoalLine(
             "Calories",
             " kcal",
@@ -368,39 +745,82 @@ function formatProgress(
             goals?.daily_carbs_g ?? null,
         ),
         formatGoalLine("Fat", "g", totals.fat_g, goals?.daily_fat_g ?? null),
+        recordedGoalLine(
+            "Fiber",
+            "g",
+            totals.fiber_g,
+            goals?.daily_fiber_g ?? null,
+            present.fiber_g,
+            "floor",
+        ),
+        recordedGoalLine(
+            "Sugar",
+            "g",
+            totals.sugar_g,
+            goals?.daily_sugar_g ?? null,
+            present.sugar_g,
+            "ceiling",
+        ),
+    ];
+    // Alcohol is opt-in: stored either way, shown only when the user asked for
+    // it (imported exports carry trace alcohol from recipes, and surfacing that
+    // unbidden is actively harmful for someone in recovery).
+    if (alcohol) {
+        lines.push(
+            formatGoalLine(
+                "Alcohol",
+                "g",
+                totals.alcohol_g,
+                goals?.daily_alcohol_g ?? null,
+                "ceiling",
+                formatAlcohol(totals.alcohol_g, alcohol),
+            ),
+        );
+    }
+    lines.push(
         formatGoalLine(
             "Water",
             " ml",
             totals.water_ml,
             goals?.daily_water_ml ?? null,
         ),
-    ];
-    return lines.join("\n");
+    );
+    return lines.filter((l): l is string => l !== null).join("\n");
 }
 
-function formatGoals(
+export function formatGoals(
     goals: NutritionGoals | null,
     weightUnit: WeightUnit = "kg",
+    alcohol: AlcoholDisplay = null,
 ): string {
     if (!goals) {
         return "No nutrition goals set. Use set_nutrition_goals to define daily targets.";
     }
+    // "not set" must mean exactly what formatGoalLine ignores, or the echo
+    // promises a target that no progress line will ever honour — which is how a
+    // 0 g alcohol limit came to be stored, listed, and then quietly dropped.
+    // Floors: 0 is unset. Ceilings: 0 is a real limit and is listed as one.
+    const floor = (v: number | null, render: (n: number) => string) =>
+        hasActiveTarget(v, "floor") ? render(v) : "not set";
+    const ceiling = (v: number | null, render: (n: number) => string) =>
+        hasActiveTarget(v, "ceiling") ? render(v) : "not set";
     const parts: string[] = ["Current daily goals:"];
     parts.push(
-        `- Calories: ${goals.daily_calories != null ? `${goals.daily_calories} kcal` : "not set"}`,
+        `- Calories: ${floor(goals.daily_calories, (n) => `${n} kcal`)}`,
     );
+    parts.push(`- Protein: ${floor(goals.daily_protein_g, (n) => `${n}g`)}`);
+    parts.push(`- Carbs: ${floor(goals.daily_carbs_g, (n) => `${n}g`)}`);
+    parts.push(`- Fat: ${floor(goals.daily_fat_g, (n) => `${n}g`)}`);
+    parts.push(`- Fiber: ${floor(goals.daily_fiber_g, (n) => `${n}g`)}`);
     parts.push(
-        `- Protein: ${goals.daily_protein_g != null ? `${goals.daily_protein_g}g` : "not set"}`,
+        `- Sugar (total, max): ${ceiling(goals.daily_sugar_g, (n) => `${n}g`)}`,
     );
-    parts.push(
-        `- Carbs: ${goals.daily_carbs_g != null ? `${goals.daily_carbs_g}g` : "not set"}`,
-    );
-    parts.push(
-        `- Fat: ${goals.daily_fat_g != null ? `${goals.daily_fat_g}g` : "not set"}`,
-    );
-    parts.push(
-        `- Water: ${goals.daily_water_ml != null ? `${goals.daily_water_ml} ml` : "not set"}`,
-    );
+    if (alcohol) {
+        parts.push(
+            `- Alcohol (max): ${ceiling(goals.daily_alcohol_g, (n) => formatAlcohol(n, alcohol))}`,
+        );
+    }
+    parts.push(`- Water: ${floor(goals.daily_water_ml, (n) => `${n} ml`)}`);
     parts.push(
         `- Target weight: ${goals.target_weight_g != null ? formatWeight(goals.target_weight_g, weightUnit) : "not set"}`,
     );
@@ -436,7 +856,7 @@ function assertPlausibleWeight(grams: number, unit: WeightUnit): void {
     );
 }
 
-function formatMeal(meal: Meal): string {
+export function formatMeal(meal: Meal, alcohol: AlcoholDisplay = null): string {
     const parts = [
         `ID: ${meal.id}`,
         `Time: ${meal.logged_at}`,
@@ -446,15 +866,66 @@ function formatMeal(meal: Meal): string {
         meal.protein_g != null ? `Protein: ${meal.protein_g}g` : null,
         meal.carbs_g != null ? `Carbs: ${meal.carbs_g}g` : null,
         meal.fat_g != null ? `Fat: ${meal.fat_g}g` : null,
+        meal.fiber_g != null ? `Fiber: ${meal.fiber_g}g` : null,
+        meal.sugar_g != null ? `Sugar: ${meal.sugar_g}g` : null,
+        // Opt-in (see formatProgress): a stored value stays hidden until the
+        // user turns alcohol tracking on.
+        alcohol && meal.alcohol_g != null
+            ? `Alcohol: ${formatAlcohol(meal.alcohol_g, alcohol)}`
+            : null,
         meal.notes ? `Notes: ${meal.notes}` : null,
     ];
     return parts.filter(Boolean).join("\n");
 }
 
-function registerTools(
+// The one thing that keeps the alcohol opt-in from being a trapdoor. Alcohol
+// written while tracking is off is stored but invisible everywhere — no meal
+// line, no goal line, no widget stat — so a user who says "log 2 beers" gets a
+// silent no-op as far as they can tell, and nothing in any tool output or in
+// SERVER_INSTRUCTIONS would ever tell them the feature exists. This appends a
+// one-line note to the text output whenever a write actually carried alcohol
+// and this user has the gate off.
+//
+// It REPORTS ONLY. It must never flip alcohol_tracking_enabled: the flag exists
+// because surfacing alcohol unbidden is harmful to users in recovery, and
+// "they logged a beer" is not consent to start showing it.
+//
+// `subject` is the clause before the comma, so each call site can name what was
+// saved while the advice stays identical everywhere.
+export function alcoholHiddenNote(
+    carriedAlcohol: boolean,
+    alcohol: AlcoholDisplay,
+    subject: string,
+): string {
+    if (!carriedAlcohol || alcohol !== null) return "";
+    return `\n\n(${subject}, but alcohol tracking is off for this account so it is not shown. Turn it on with set_alcohol_tracking.)`;
+}
+
+// `alcohol` is the whole alcohol opt-in, threaded once: the drink unit to render
+// grams in, or null when this user has alcohol tracking off. It is resolved from
+// the profile in buildMcpServer (like widgetsEnabled) rather than re-read inside
+// every handler, because a per-request server means one read serves the whole
+// request and every formatter can take it as a plain argument.
+//
+// At the write layer it gates DISPLAY only. Alcohol passed to log_meal /
+// update_meal / bulk_import_meals is always stored — dropping a value the caller
+// explicitly sent would be silent data loss, and the flag exists to keep trace
+// alcohol from imported recipes out of sight, not out of the database.
+//
+// The one place a null `alcohol` changes what gets WRITTEN is the import widget,
+// which then declines to map the file's alcohol column at all rather than write
+// a number it was forbidden to show the user for review. That is the widget's
+// choice, announced to the user on screen, not a rule this server enforces — see
+// startImportPayload for the full trade-off.
+// Exported for tests: the only way to exercise a tool handler end-to-end
+// (schema coercion, handler, response text) is to register the tools on a real
+// McpServer and call them through a client. Production still reaches this only
+// via buildMcpServer.
+export function registerTools(
     server: McpServer,
     userId: string,
     widgetsEnabled: boolean,
+    alcohol: AlcoholDisplay,
 ) {
     // Link a tool to its widget only when this user has widgets enabled. Because
     // buildMcpServer registers tools per request, this makes widget display a
@@ -482,19 +953,54 @@ function registerTools(
                     .describe(
                         "Type of meal (breakfast, lunch, dinner, or snack). Always ask the user if not provided.",
                     ),
+                // Bounded in the schema, not the handler — see the MAX_*
+                // constants for why this tool differs from bulk_import_meals.
                 calories: z.coerce
                     .number()
+                    .min(0)
+                    .max(MAX_CALORIES)
                     .optional()
                     .describe("Total calories"),
                 protein_g: z.coerce
                     .number()
+                    .min(0)
+                    .max(MAX_MACRO_G)
                     .optional()
                     .describe("Protein in grams"),
                 carbs_g: z.coerce
                     .number()
+                    .min(0)
+                    .max(MAX_MACRO_G)
                     .optional()
                     .describe("Carbohydrates in grams"),
-                fat_g: z.coerce.number().optional().describe("Fat in grams"),
+                fat_g: z.coerce
+                    .number()
+                    .min(0)
+                    .max(MAX_MACRO_G)
+                    .optional()
+                    .describe("Fat in grams"),
+                fiber_g: z.coerce
+                    .number()
+                    .min(0)
+                    .max(MAX_MACRO_G)
+                    .optional()
+                    .describe("Dietary fiber in grams"),
+                sugar_g: z.coerce
+                    .number()
+                    .min(0)
+                    .max(MAX_MACRO_G)
+                    .optional()
+                    .describe(
+                        "TOTAL sugars in grams — including sugar naturally present in fruit, milk and juice, not just added sugar. Report the whole figure a nutrition label or database gives for 'Sugars'; do not try to separate out added sugar.",
+                    ),
+                alcohol_g: z.coerce
+                    .number()
+                    .min(0)
+                    .max(MAX_ALCOHOL_G)
+                    .optional()
+                    .describe(
+                        "Grams of pure ethanol — NOT the volume of the drink and NOT its ABV. Do not estimate this: compute it from the volume and strength, which the user can read off the bottle or the menu. grams = millilitres x (ABV% / 100) x 0.789. Worked examples: a 330 ml 5% beer = 330 x 0.05 x 0.789 = 13 g; a 150 ml glass of 13% wine = 15.4 g; a 44 ml (1.5 oz) shot of 40% spirit = 13.9 g. For US measures, 1 fl oz = 29.6 ml. Ask for the pour size and the ABV rather than guessing, and omit the field entirely for a non-alcoholic meal.",
+                    ),
                 logged_at: z
                     .string()
                     .optional()
@@ -530,13 +1036,22 @@ function registerTools(
                         : "Meal logged:";
 
                     const { progressSection, structuredContent } =
-                        await buildMealProgress(userId, meal, "logged");
+                        await buildMealProgress(
+                            userId,
+                            meal,
+                            "logged",
+                            alcohol,
+                        );
 
                     return {
                         content: [
                             {
                                 type: "text",
-                                text: `${header}\n${formatMeal(meal)}${progressSection}`,
+                                text: `${header}\n${formatMeal(meal, alcohol)}${progressSection}${alcoholHiddenNote(
+                                    (meal.alcohol_g ?? 0) > 0,
+                                    alcohol,
+                                    "Alcohol saved with this meal",
+                                )}`,
                             },
                         ],
                         structuredContent,
@@ -577,20 +1092,9 @@ function registerTools(
         {
             title: "Import Meals from a File",
             description:
-                "Open an importer the user can drive themselves to load a meal-history export (MyFitnessPal, Cronometer, Lose It!, MacroFactor). Prefer this over bulk_import_meals whenever the user has an actual file: the importer reads and maps it in the browser, so the rows never pass through you and cannot be mistranscribed, and it handles column mapping, batching and retries. Call it when the user says they want to import, upload, or bring in their history from another app. Fall back to bulk_import_meals if the user cannot use the importer, if they have already pasted the data into the conversation, or if the importer reports that this client will not let it save.",
+                "Open an importer the user can drive themselves to load a meal-history export (MyFitnessPal, Cronometer, Lose It!, MacroFactor). Prefer this over bulk_import_meals whenever the user has an actual file: the importer reads and maps it in the browser, so the rows never pass through you and cannot be mistranscribed, and it handles column mapping, batching and retries. Call it when the user says they want to import, upload, or bring in their history from another app. Fall back to bulk_import_meals if the user cannot use the importer, if they have already pasted the data into the conversation, or if the importer reports that this client will not let it save. If the user has alcohol tracking off but wants alcohol from the file, turn it on with set_alcohol_tracking BEFORE importing: the importer skips the alcohol column while tracking is off, and re-importing afterwards will not backfill it.",
             inputSchema: {},
-            outputSchema: {
-                // Real content: the widget needs all of this. With no
-                // structuredContent the bridge never paints and the iframe sits
-                // on its loading state forever.
-                tz: z.string(),
-                tz_configured: z.boolean(),
-                today: z.string(),
-                max_rows_per_call: z.number(),
-                import_tool_name: z.string(),
-                known_source_apps: z.array(z.string()),
-                widgets_enabled: z.boolean(),
-            },
+            outputSchema: START_IMPORT_OUTPUT_SCHEMA,
             annotations: {
                 title: "Import Meals from a File",
                 readOnlyHint: true,
@@ -605,22 +1109,12 @@ function registerTools(
                 async () => {
                     const profile = await getProfile(userId);
                     const tz = profile?.timezone ?? "UTC";
-                    const structuredContent = {
-                        // The widget must resolve dates the same way the server
-                        // will, so it is told the timezone rather than guessing.
+                    const structuredContent = startImportPayload({
                         tz,
-                        tz_configured: profile !== null,
-                        today: todayInTz(tz),
-                        max_rows_per_call: MAX_ROWS_PER_CALL,
-                        import_tool_name: "bulk_import_meals",
-                        known_source_apps: [
-                            "myfitnesspal",
-                            "cronometer",
-                            "loseit",
-                            "macrofactor",
-                        ],
-                        widgets_enabled: widgetsEnabled,
-                    };
+                        tzConfigured: profile !== null,
+                        widgetsEnabled,
+                        alcohol,
+                    });
                     const text = widgetsEnabled
                         ? "Importer ready — pick your export file in the panel above. Nothing is saved until you confirm the preview." +
                           (profile === null
@@ -761,11 +1255,37 @@ function registerTools(
                             existingIdempotencyKeys(userId, keys),
                     });
 
+                    // Same discovery problem as log_meal, one rung louder: a
+                    // backfill can carry alcohol on dozens of rows and, with
+                    // the gate off, none of it shows up anywhere afterwards.
+                    // Only rows that landed (or, on a dry run, would) count —
+                    // a rejected row saved nothing to be told about. `index`
+                    // is the 0-based position in args.meals.
+                    const wrote = new Set([
+                        "created",
+                        "deduplicated",
+                        "would_create",
+                        "would_deduplicate",
+                    ]);
+                    const carriedAlcohol = result.results.some(
+                        (r) =>
+                            wrote.has(r.status) &&
+                            (args.meals[r.index]?.alcohol_g ?? 0) > 0,
+                    );
+
                     return {
                         content: [
                             {
                                 type: "text" as const,
-                                text: buildSummaryText(result),
+                                text:
+                                    buildSummaryText(result) +
+                                    alcoholHiddenNote(
+                                        carriedAlcohol,
+                                        alcohol,
+                                        result.dry_run
+                                            ? "These rows carry alcohol and it would be saved"
+                                            : "Alcohol saved with these meals",
+                                    ),
                             },
                         ],
                         structuredContent: serializeImportResult(result),
@@ -854,7 +1374,10 @@ function registerTools(
 
                     return {
                         content: [
-                            { type: "text", text: formatFoodResult(food) },
+                            {
+                                type: "text",
+                                text: formatFoodResult(food, alcohol),
+                            },
                         ],
                     };
                 },
@@ -896,7 +1419,9 @@ function registerTools(
                             ],
                         };
                     }
-                    const text = meals.map(formatMeal).join("\n\n---\n\n");
+                    const text = meals
+                        .map((m) => formatMeal(m, alcohol))
+                        .join("\n\n---\n\n");
                     return { content: [{ type: "text", text }] };
                 },
                 { userId },
@@ -935,7 +1460,9 @@ function registerTools(
                             ],
                         };
                     }
-                    const text = meals.map(formatMeal).join("\n\n---\n\n");
+                    const text = meals
+                        .map((m) => formatMeal(m, alcohol))
+                        .join("\n\n---\n\n");
                     return { content: [{ type: "text", text }] };
                 },
                 { userId },
@@ -998,7 +1525,7 @@ function registerTools(
                     ].sort()) {
                         const header = `## ${date} (${dateMeals.length} meal${dateMeals.length === 1 ? "" : "s"})`;
                         const formatted = dateMeals
-                            .map(formatMeal)
+                            .map((m) => formatMeal(m, alcohol))
                             .join("\n\n---\n\n");
                         sections.push(`${header}\n\n${formatted}`);
                     }
@@ -1248,31 +1775,24 @@ function registerTools(
                 start_date: z.string(),
                 end_date: z.string(),
                 logged_days: z.number(),
-                goals: z
-                    .object({
-                        calories: z.number().nullable(),
-                        protein_g: z.number().nullable(),
-                        carbs_g: z.number().nullable(),
-                        fat_g: z.number().nullable(),
-                        water_ml: z.number().nullable(),
-                    })
-                    .nullable(),
-                averages: z.object({
-                    calories: z.number(),
-                    protein_g: z.number(),
-                    carbs_g: z.number(),
-                    fat_g: z.number(),
-                    water_ml: z.number(),
+                drink_unit: DRINK_UNIT_FIELD,
+                goals: GOALS_ITEM.nullable(),
+                averages: TOTALS_ITEM,
+                // How many of `logged_days` actually record each of the three
+                // post-launch nutrients — the denominator behind `averages` for
+                // them, so a consumer can say "5 of 30 days" instead of passing
+                // a partial average off as a full one. 0 means the window has no
+                // data for it at all and its average is not a figure. Alcohol is
+                // null when tracking is off, like every other alcohol field.
+                recorded_days: z.object({
+                    fiber_g: z.number(),
+                    sugar_g: z.number(),
+                    alcohol_g: z.number().nullable(),
                 }),
                 days: z.array(
-                    z.object({
+                    TOTALS_ITEM.extend({
                         date: z.string(),
                         meal_count: z.number(),
-                        calories: z.number(),
-                        protein_g: z.number(),
-                        carbs_g: z.number(),
-                        fat_g: z.number(),
-                        water_ml: z.number(),
                     }),
                 ),
                 meals: z.array(MEAL_BREAKDOWN_ITEM),
@@ -1291,15 +1811,7 @@ function registerTools(
                         getNutritionGoals(userId),
                     ]);
 
-                    const goalsPayload = goals
-                        ? {
-                              calories: goals.daily_calories ?? null,
-                              protein_g: goals.daily_protein_g ?? null,
-                              carbs_g: goals.daily_carbs_g ?? null,
-                              fat_g: goals.daily_fat_g ?? null,
-                              water_ml: goals.daily_water_ml ?? null,
-                          }
-                        : null;
+                    const goalsPayload = goalsPayloadOf(goals, alcohol);
 
                     if (meals.length === 0 && water.length === 0) {
                         return {
@@ -1313,13 +1825,16 @@ function registerTools(
                                 start_date,
                                 end_date,
                                 logged_days: 0,
+                                drink_unit: alcohol,
                                 goals: goalsPayload,
-                                averages: {
-                                    calories: 0,
-                                    protein_g: 0,
-                                    carbs_g: 0,
-                                    fat_g: 0,
-                                    water_ml: 0,
+                                averages: totalsPayloadOf(
+                                    emptyTotals(),
+                                    alcohol,
+                                ),
+                                recorded_days: {
+                                    fiber_g: 0,
+                                    sugar_g: 0,
+                                    alcohol_g: alcohol ? 0 : null,
                                 },
                                 days: [],
                                 meals: [],
@@ -1346,59 +1861,72 @@ function registerTools(
                     }
 
                     const sections: string[] = [];
-                    const days: Array<{
-                        date: string;
-                        meal_count: number;
-                        calories: number;
-                        protein_g: number;
-                        carbs_g: number;
-                        fat_g: number;
-                        water_ml: number;
+                    const days: Array<
+                        ReturnType<typeof totalsPayloadOf> & {
+                            date: string;
+                            meal_count: number;
+                        }
+                    > = [];
+                    const perDay: Array<{
+                        meals: Meal[];
+                        totals: DailyTotals;
                     }> = [];
-                    const sum: DailyTotals = {
-                        calories: 0,
-                        protein_g: 0,
-                        carbs_g: 0,
-                        fat_g: 0,
-                        water_ml: 0,
-                    };
                     for (const [date, dateMeals] of [
                         ...byDate.entries(),
                     ].sort()) {
                         const totals = sumMeals(dateMeals);
                         totals.water_ml = waterByDate.get(date) ?? 0;
+                        // Which nutrients this day actually recorded, so a
+                        // pre-feature day neither prints "Fiber: 0g" nor drags
+                        // the range average down towards zero.
+                        const present = nutrientPresence(dateMeals);
                         const header = `## ${date} (${dateMeals.length} meal${dateMeals.length === 1 ? "" : "s"})`;
                         sections.push(
-                            `${header}\n${formatProgress(totals, goals)}`,
+                            `${header}\n${formatProgress(totals, goals, alcohol, present)}`,
                         );
                         days.push({
                             date,
                             meal_count: dateMeals.length,
-                            calories: Math.round(totals.calories),
-                            protein_g: Math.round(totals.protein_g * 10) / 10,
-                            carbs_g: Math.round(totals.carbs_g * 10) / 10,
-                            fat_g: Math.round(totals.fat_g * 10) / 10,
-                            water_ml: totals.water_ml,
+                            ...totalsPayloadOf(totals, alcohol),
                         });
-                        sum.calories += totals.calories;
-                        sum.protein_g += totals.protein_g;
-                        sum.carbs_g += totals.carbs_g;
-                        sum.fat_g += totals.fat_g;
-                        sum.water_ml += totals.water_ml;
+                        perDay.push({ meals: dateMeals, totals });
                     }
 
-                    const n = days.length || 1;
-                    const averages = {
-                        calories: Math.round(sum.calories / n),
-                        protein_g: Math.round((sum.protein_g / n) * 10) / 10,
-                        carbs_g: Math.round((sum.carbs_g / n) * 10) / 10,
-                        fat_g: Math.round((sum.fat_g / n) * 10) / 10,
-                        water_ml: Math.round(sum.water_ml / n),
-                    };
+                    // Per-day means, rounded by totalsPayloadOf like every other
+                    // payload (water stays whole millilitres there). See
+                    // rangeAverages for which denominator each nutrient uses.
+                    const { averages: rawAverages, recordedDays } =
+                        rangeAverages(perDay);
+                    const averages = totalsPayloadOf(rawAverages, alcohol);
 
-                    const footer = goals
-                        ? ""
-                        : "\n\n(Tip: set daily targets with set_nutrition_goals to see progress percentages.)";
+                    // Don't pass a partial average off as a full one. Terse:
+                    // only nutrients that were recorded on SOME but not all of
+                    // the logged days get a mention (none at all is already
+                    // silent, since those lines are suppressed per day).
+                    const partial = [
+                        recordedDays.fiber_g > 0 &&
+                        recordedDays.fiber_g < days.length
+                            ? `fiber ${recordedDays.fiber_g}`
+                            : null,
+                        recordedDays.sugar_g > 0 &&
+                        recordedDays.sugar_g < days.length
+                            ? `sugar ${recordedDays.sugar_g}`
+                            : null,
+                        alcohol &&
+                        recordedDays.alcohol_g > 0 &&
+                        recordedDays.alcohol_g < days.length
+                            ? `alcohol ${recordedDays.alcohol_g}`
+                            : null,
+                    ].filter((s): s is string => s !== null);
+                    const coverageNote = partial.length
+                        ? `\n\n(Averaged over the days that record each figure, not all ${days.length}: ${partial.join(", ")}.)`
+                        : "";
+
+                    const footer =
+                        coverageNote +
+                        (goals
+                            ? ""
+                            : "\n\n(Tip: set daily targets with set_nutrition_goals to see progress percentages.)");
 
                     return {
                         content: [
@@ -1411,11 +1939,19 @@ function registerTools(
                             start_date,
                             end_date,
                             logged_days: days.length,
+                            drink_unit: alcohol,
                             goals: goalsPayload,
                             averages,
+                            recorded_days: {
+                                fiber_g: recordedDays.fiber_g,
+                                sugar_g: recordedDays.sugar_g,
+                                alcohol_g: alcohol
+                                    ? recordedDays.alcohol_g
+                                    : null,
+                            },
                             days,
                             // Multi-day range → tag each meal with its date.
-                            meals: mealBreakdown(meals, tz),
+                            meals: mealBreakdown(meals, tz, alcohol),
                         },
                     };
                 },
@@ -1430,7 +1966,7 @@ function registerTools(
         {
             title: "Set Nutrition Goals",
             description:
-                "Set the user's daily calorie and macro targets, and optionally a target body weight. Pass only the fields you want to update — omitted fields keep their previous value. Pass null explicitly to clear a target. Targets are the user's own choice; this server does not provide medical or dietary advice.",
+                "Set the user's daily calorie and macro targets, and optionally a target body weight. Pass only the fields you want to update — omitted fields keep their previous value. Pass null explicitly to clear a target. Calories, protein, carbs, fat, fiber and water are targets to REACH; sugar and alcohol are limits to STAY UNDER, and progress against them is worded accordingly. Targets are the user's own choice; this server does not provide medical or dietary advice.",
             annotations: {
                 readOnlyHint: false,
                 destructiveHint: false,
@@ -1438,26 +1974,64 @@ function registerTools(
                 openWorldHint: false,
             },
             inputSchema: {
+                // Bounded in the schema for the same reason as log_meal, with
+                // the gram ceiling set by the numeric(6,2) goal columns rather
+                // than by what a plausible meal carries.
                 daily_calories: z.coerce
                     .number()
+                    .min(0)
+                    .max(MAX_CALORIES)
                     .nullable()
                     .optional()
                     .describe("Daily calorie target (kcal). Null to clear."),
                 daily_protein_g: z.coerce
                     .number()
+                    .min(0)
+                    .max(MAX_GOAL_G)
                     .nullable()
                     .optional()
                     .describe("Daily protein target (grams). Null to clear."),
                 daily_carbs_g: z.coerce
                     .number()
+                    .min(0)
+                    .max(MAX_GOAL_G)
                     .nullable()
                     .optional()
                     .describe("Daily carbs target (grams). Null to clear."),
                 daily_fat_g: z.coerce
                     .number()
+                    .min(0)
+                    .max(MAX_GOAL_G)
                     .nullable()
                     .optional()
                     .describe("Daily fat target (grams). Null to clear."),
+                daily_fiber_g: z.coerce
+                    .number()
+                    .min(0)
+                    .max(MAX_GOAL_G)
+                    .nullable()
+                    .optional()
+                    .describe(
+                        "Daily fiber target (grams), treated as a minimum to reach. Null to clear.",
+                    ),
+                daily_sugar_g: z.coerce
+                    .number()
+                    .min(0)
+                    .max(MAX_GOAL_G)
+                    .nullable()
+                    .optional()
+                    .describe(
+                        "Daily TOTAL sugar limit (grams), treated as a maximum to stay under. Total sugars include sugar naturally present in fruit and milk, not only added sugar — say so when the user sets one, since public guidance figures usually refer to ADDED sugar and are therefore a much lower number. Null to clear.",
+                    ),
+                daily_alcohol_g: z.coerce
+                    .number()
+                    .min(0)
+                    .max(MAX_GOAL_G)
+                    .nullable()
+                    .optional()
+                    .describe(
+                        "Daily alcohol limit in grams of pure ethanol, treated as a maximum to stay under. One US standard drink is 14 g, one UK unit is 7.9 g. Null to clear.",
+                    ),
                 daily_water_ml: z.coerce
                     .number()
                     .nullable()
@@ -1524,6 +2098,18 @@ function registerTools(
                             args.daily_fat_g === undefined
                                 ? (existing?.daily_fat_g ?? null)
                                 : args.daily_fat_g,
+                        daily_fiber_g:
+                            args.daily_fiber_g === undefined
+                                ? (existing?.daily_fiber_g ?? null)
+                                : args.daily_fiber_g,
+                        daily_sugar_g:
+                            args.daily_sugar_g === undefined
+                                ? (existing?.daily_sugar_g ?? null)
+                                : args.daily_sugar_g,
+                        daily_alcohol_g:
+                            args.daily_alcohol_g === undefined
+                                ? (existing?.daily_alcohol_g ?? null)
+                                : args.daily_alcohol_g,
                         daily_water_ml:
                             args.daily_water_ml === undefined
                                 ? (existing?.daily_water_ml ?? null)
@@ -1531,11 +2117,19 @@ function registerTools(
                         target_weight_g,
                     };
                     const goals = await upsertNutritionGoals(userId, merged);
+                    // An alcohol target set by someone who has alcohol tracking
+                    // off is saved but invisible everywhere else, so say so here
+                    // rather than let the goal silently vanish from the list.
+                    const alcoholNote = alcoholHiddenNote(
+                        args.daily_alcohol_g != null,
+                        alcohol,
+                        "Alcohol target saved",
+                    );
                     return {
                         content: [
                             {
                                 type: "text",
-                                text: `Goals updated.\n\n${formatGoals(goals, displayUnit)}`,
+                                text: `Goals updated.\n\n${formatGoals(goals, displayUnit, alcohol)}${alcoholNote}`,
                             },
                         ],
                     };
@@ -1570,7 +2164,7 @@ function registerTools(
                         content: [
                             {
                                 type: "text",
-                                text: formatGoals(goals, unit ?? "kg"),
+                                text: formatGoals(goals, unit ?? "kg", alcohol),
                             },
                         ],
                     };
@@ -1602,22 +2196,9 @@ function registerTools(
                 date: z.string(),
                 meal_count: z.number(),
                 water_entries: z.number(),
-                goals: z
-                    .object({
-                        calories: z.number().nullable(),
-                        protein_g: z.number().nullable(),
-                        carbs_g: z.number().nullable(),
-                        fat_g: z.number().nullable(),
-                        water_ml: z.number().nullable(),
-                    })
-                    .nullable(),
-                totals: z.object({
-                    calories: z.number(),
-                    protein_g: z.number(),
-                    carbs_g: z.number(),
-                    fat_g: z.number(),
-                    water_ml: z.number(),
-                }),
+                drink_unit: DRINK_UNIT_FIELD,
+                goals: GOALS_ITEM.nullable(),
+                totals: TOTALS_ITEM,
                 weight: z
                     .object({
                         current: z.number().nullable(),
@@ -1649,7 +2230,12 @@ function registerTools(
                     const totals = sumMeals(meals);
                     totals.water_ml = sumWater(water);
                     const header = `Progress for ${targetDate} (${meals.length} meal${meals.length === 1 ? "" : "s"}, ${water.length} water entr${water.length === 1 ? "y" : "ies"})`;
-                    const body = formatProgress(totals, goals);
+                    const body = formatProgress(
+                        totals,
+                        goals,
+                        alcohol,
+                        nutrientPresence(meals),
+                    );
 
                     // Weight is a standing metric (latest overall), not per-date.
                     let weightLine = "";
@@ -1678,22 +2264,8 @@ function registerTools(
                     // Payload for the goal-progress widget (MCP Apps). Mirrors
                     // the text above: per-macro intake vs goal for the day, plus
                     // the standing weight metric converted to display units.
-                    const goalsPayload = goals
-                        ? {
-                              calories: goals.daily_calories ?? null,
-                              protein_g: goals.daily_protein_g ?? null,
-                              carbs_g: goals.daily_carbs_g ?? null,
-                              fat_g: goals.daily_fat_g ?? null,
-                              water_ml: goals.daily_water_ml ?? null,
-                          }
-                        : null;
-                    const totalsPayload = {
-                        calories: Math.round(totals.calories),
-                        protein_g: Math.round(totals.protein_g * 10) / 10,
-                        carbs_g: Math.round(totals.carbs_g * 10) / 10,
-                        fat_g: Math.round(totals.fat_g * 10) / 10,
-                        water_ml: totals.water_ml,
-                    };
+                    const goalsPayload = goalsPayloadOf(goals, alcohol);
+                    const totalsPayload = totalsPayloadOf(totals, alcohol);
                     const weightPayload =
                         latestWeight || goals?.target_weight_g != null
                             ? {
@@ -1723,13 +2295,14 @@ function registerTools(
                         ],
                         structuredContent: {
                             date: targetDate,
+                            drink_unit: alcohol,
                             meal_count: meals.length,
                             water_entries: water.length,
                             goals: goalsPayload,
                             totals: totalsPayload,
                             weight: weightPayload,
                             // Single day → label rows by meal type in the widget.
-                            meals: mealBreakdown(meals, null),
+                            meals: mealBreakdown(meals, null, alcohol),
                         },
                     };
                 },
@@ -1787,10 +2360,33 @@ function registerTools(
                 meal_type: z
                     .enum(["breakfast", "lunch", "dinner", "snack"])
                     .optional(),
-                calories: z.coerce.number().optional(),
-                protein_g: z.coerce.number().optional(),
-                carbs_g: z.coerce.number().optional(),
-                fat_g: z.coerce.number().optional(),
+                // Same bounds, and the same reasoning, as log_meal.
+                calories: z.coerce.number().min(0).max(MAX_CALORIES).optional(),
+                protein_g: z.coerce.number().min(0).max(MAX_MACRO_G).optional(),
+                carbs_g: z.coerce.number().min(0).max(MAX_MACRO_G).optional(),
+                fat_g: z.coerce.number().min(0).max(MAX_MACRO_G).optional(),
+                fiber_g: z.coerce
+                    .number()
+                    .min(0)
+                    .max(MAX_MACRO_G)
+                    .optional()
+                    .describe("Dietary fiber in grams"),
+                sugar_g: z.coerce
+                    .number()
+                    .min(0)
+                    .max(MAX_MACRO_G)
+                    .optional()
+                    .describe(
+                        "TOTAL sugars in grams, including sugar naturally present in fruit and milk — not only added sugar.",
+                    ),
+                alcohol_g: z.coerce
+                    .number()
+                    .min(0)
+                    .max(MAX_ALCOHOL_G)
+                    .optional()
+                    .describe(
+                        "Grams of pure ethanol — NOT the drink's volume and NOT its ABV. Compute it rather than estimating: grams = millilitres x (ABV% / 100) x 0.789 (a 330 ml 5% beer = 13 g).",
+                    ),
                 logged_at: z.string().optional(),
                 notes: z.string().optional(),
             },
@@ -1806,12 +2402,21 @@ function registerTools(
                 async () => {
                     const meal = await updateMeal(userId, id, fields);
                     const { progressSection, structuredContent } =
-                        await buildMealProgress(userId, meal, "updated");
+                        await buildMealProgress(
+                            userId,
+                            meal,
+                            "updated",
+                            alcohol,
+                        );
                     return {
                         content: [
                             {
                                 type: "text",
-                                text: `Meal updated:\n${formatMeal(meal)}${progressSection}`,
+                                text: `Meal updated:\n${formatMeal(meal, alcohol)}${progressSection}${alcoholHiddenNote(
+                                    (meal.alcohol_g ?? 0) > 0,
+                                    alcohol,
+                                    "Alcohol saved with this meal",
+                                )}`,
                             },
                         ],
                         structuredContent,
@@ -2699,6 +3304,119 @@ function registerTools(
     );
 
     server.registerTool(
+        "set_alcohol_tracking",
+        {
+            title: "Set Alcohol Tracking",
+            description:
+                "Turn alcohol tracking on or off for the user, and optionally choose whether drinks are counted in US standard drinks (14 g of ethanol) or UK units (7.9 g). Off by default. Alcohol grams passed to log_meal, update_meal or bulk_import_meals are stored either way — this setting controls whether alcohol is shown in meals, goals and progress. One exception, which matters BEFORE a backfill: the file importer (start_meal_import) skips the file's alcohol column entirely while tracking is off, because it will not write a figure the user was never shown for review — and re-importing the same file later does not backfill it. So if the user wants alcohol from an export, turn this on first. Offer it when the user asks to track drinking; do not enable it on your own initiative, and if they ask to stop seeing alcohol, disable it here rather than deleting their meals. The change is live immediately — the next tool call in this same conversation already honours it, with nothing to reconnect or restart.",
+            annotations: {
+                readOnlyHint: false,
+                destructiveHint: false,
+                idempotentHint: true,
+                openWorldHint: false,
+            },
+            inputSchema: {
+                enabled: z
+                    .boolean()
+                    .describe(
+                        "true to show alcohol in meals, goals and progress; false to hide it (stored values are kept either way).",
+                    ),
+                drink_unit: z
+                    // `satisfies` keeps this in step with DrinkUnit at compile
+                    // time; z.enum needs the literal tuple, not the exported
+                    // readonly array.
+                    .enum(["us", "uk"] as const satisfies readonly DrinkUnit[])
+                    .optional()
+                    .describe(
+                        "Which standard drink to show alongside grams: 'us' (14 g per drink) or 'uk' (7.9 g per unit). Defaults to 'us' when never set. Ask the user rather than inferring it from their language.",
+                    ),
+            },
+        },
+        // No "takes effect next conversation" caveat here, unlike
+        // set_widget_display. That caveat is true for widgets because
+        // widgets_enabled decides each tool's _meta.ui link, which a host only
+        // re-reads on tools/list. Alcohol touches no registration metadata: it
+        // is threaded into handlers as `alcohol`, and handleMcp builds a fresh
+        // McpServer per POST (sessionIdGenerator: undefined) with buildMcpServer
+        // re-reading the profile every time — so the very next tool call, in the
+        // same open chat, already sees the new setting.
+        async ({ enabled, drink_unit }) => {
+            return withAnalytics(
+                "set_alcohol_tracking",
+                async () => {
+                    const profile = await upsertProfile(userId, {
+                        alcohol_tracking_enabled: enabled,
+                        // Left untouched when omitted, so toggling tracking off
+                        // and on again does not reset the unit.
+                        ...(drink_unit !== undefined
+                            ? { preferred_drink_unit: drink_unit }
+                            : {}),
+                    });
+                    const unit = isDrinkUnit(profile.preferred_drink_unit)
+                        ? profile.preferred_drink_unit
+                        : "us";
+                    const unitLabel =
+                        unit === "us"
+                            ? "US standard drinks (14 g each)"
+                            : "UK units (7.9 g each)";
+                    return {
+                        content: [
+                            {
+                                type: "text",
+                                text: profile.alcohol_tracking_enabled
+                                    ? `Alcohol tracking enabled, shown in grams alongside ${unitLabel}. It appears in meals, goals and daily progress from your next tool call — no need to start a new chat.`
+                                    : "Alcohol tracking disabled, effective immediately. Alcohol is no longer shown in meals, goals or progress; anything already logged is kept and reappears if you turn it back on.",
+                            },
+                        ],
+                    };
+                },
+                { userId },
+            );
+        },
+    );
+
+    server.registerTool(
+        "get_alcohol_tracking",
+        {
+            title: "Get Alcohol Tracking",
+            description:
+                "Get whether alcohol tracking is enabled for the user and which standard drink it is displayed in. Disabled by default.",
+            annotations: {
+                readOnlyHint: true,
+                destructiveHint: false,
+                idempotentHint: true,
+                openWorldHint: false,
+            },
+        },
+        async () => {
+            return withAnalytics(
+                "get_alcohol_tracking",
+                async () => {
+                    const [enabled, unit] = await Promise.all([
+                        getAlcoholTrackingEnabled(userId),
+                        getPreferredDrinkUnit(userId),
+                    ]);
+                    const unitLabel =
+                        (unit ?? "us") === "us"
+                            ? "US standard drinks (14 g each)"
+                            : "UK units (7.9 g each)";
+                    return {
+                        content: [
+                            {
+                                type: "text",
+                                text: enabled
+                                    ? `Alcohol tracking is enabled, displayed in grams alongside ${unitLabel}${unit ? "" : " (the default — no preference saved)"}.`
+                                    : "Alcohol tracking is disabled, so alcohol is hidden from meals, goals and progress. Alcohol already stored is kept, and anything logged with alcohol_g while it is off is still stored. The exception is the file importer, which skips a file's alcohol column while tracking is off and will not backfill it on a later re-import — so enable tracking before importing an export whose alcohol the user wants to keep. Enable it with set_alcohol_tracking.",
+                            },
+                        ],
+                    };
+                },
+                { userId },
+            );
+        },
+    );
+
+    server.registerTool(
         "get_trends",
         {
             title: "Get Trends",
@@ -2727,26 +3445,10 @@ function registerTools(
                 end_date: z.string(),
                 // Which toggle the widget opens on (nearest of 7/14/30).
                 default_range: z.number(),
-                goals: z
-                    .object({
-                        calories: z.number().nullable(),
-                        protein_g: z.number().nullable(),
-                        carbs_g: z.number().nullable(),
-                        fat_g: z.number().nullable(),
-                        water_ml: z.number().nullable(),
-                    })
-                    .nullable(),
+                drink_unit: DRINK_UNIT_FIELD,
+                goals: GOALS_ITEM.nullable(),
                 // Up to 30 days of daily series; the widget slices to 7/14/30.
-                days: z.array(
-                    z.object({
-                        date: z.string(),
-                        calories: z.number(),
-                        protein_g: z.number(),
-                        carbs_g: z.number(),
-                        fat_g: z.number(),
-                        water_ml: z.number(),
-                    }),
-                ),
+                days: z.array(TOTALS_ITEM.extend({ date: z.string() })),
             },
             // Link the tool to its interactive trends UI (MCP Apps).
             ...uiMeta(TRENDS_WIDGET_URI),
@@ -2782,21 +3484,16 @@ function registerTools(
                     const textBuckets = allBuckets.slice(-windowDays);
                     const seriesBuckets = allBuckets.slice(-30);
 
-                    const goalsPayload = goals
-                        ? {
-                              calories: goals.daily_calories ?? null,
-                              protein_g: goals.daily_protein_g ?? null,
-                              carbs_g: goals.daily_carbs_g ?? null,
-                              fat_g: goals.daily_fat_g ?? null,
-                              water_ml: goals.daily_water_ml ?? null,
-                          }
-                        : null;
+                    const goalsPayload = goalsPayloadOf(goals, alcohol);
 
                     return {
                         content: [
                             {
                                 type: "text",
-                                text: computeTrends(textBuckets, goals),
+                                text: computeTrends(
+                                    gateAlcohol(textBuckets, alcohol),
+                                    goals,
+                                ),
                             },
                         ],
                         structuredContent: {
@@ -2804,14 +3501,25 @@ function registerTools(
                             default_range: [7, 14, 30].includes(windowDays)
                                 ? windowDays
                                 : 30,
+                            drink_unit: alcohol,
                             goals: goalsPayload,
+                            // Rounded through totalsPayloadOf so the series is
+                            // shaped exactly like every other totals payload.
                             days: seriesBuckets.map((b) => ({
                                 date: b.date,
-                                calories: Math.round(b.calories),
-                                protein_g: Math.round(b.protein_g * 10) / 10,
-                                carbs_g: Math.round(b.carbs_g * 10) / 10,
-                                fat_g: Math.round(b.fat_g * 10) / 10,
-                                water_ml: b.waterMl,
+                                ...totalsPayloadOf(
+                                    {
+                                        calories: b.calories,
+                                        protein_g: b.protein_g,
+                                        carbs_g: b.carbs_g,
+                                        fat_g: b.fat_g,
+                                        fiber_g: b.fiber_g,
+                                        sugar_g: b.sugar_g,
+                                        alcohol_g: b.alcohol_g,
+                                        water_ml: b.waterMl,
+                                    },
+                                    alcohol,
+                                ),
                             })),
                         },
                     };
@@ -2959,7 +3667,10 @@ function registerTools(
                     {
                         uri: uri.href,
                         mimeType: "text/plain",
-                        text: computeWeeklyDigest(buckets, goals),
+                        text: computeWeeklyDigest(
+                            gateAlcohol(buckets, alcohol),
+                            goals,
+                        ),
                     },
                 ],
             };
@@ -3126,7 +3837,23 @@ async function buildMcpServer(c: Context, userId: string): Promise<McpServer> {
         },
     );
 
-    registerTools(server, userId, await getWidgetsEnabled(userId));
+    // ONE `select * from profiles` for all three display preferences. The
+    // getWidgetsEnabled / getAlcoholTrackingEnabled / getPreferredDrinkUnit
+    // wrappers each run that identical query themselves, so calling all three
+    // tripled it on the hot path of every single tool call; the *FromProfile
+    // derivations are the pure halves, exported for exactly this. Alcohol
+    // resolves to a drink unit only when tracking is on — null is what every
+    // display path treats as "this user does not track alcohol" (storage is
+    // never affected).
+    const profile = await getProfile(userId);
+    const drinkUnit = preferredDrinkUnitFromProfile(profile);
+
+    registerTools(
+        server,
+        userId,
+        widgetsEnabledFromProfile(profile),
+        alcoholTrackingEnabledFromProfile(profile) ? (drinkUnit ?? "us") : null,
+    );
     return server;
 }
 
