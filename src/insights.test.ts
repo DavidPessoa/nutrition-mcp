@@ -1,6 +1,12 @@
 import { test, expect } from "bun:test";
-import { computeWeightTrend } from "./insights.js";
-import type { WeightEntry } from "./supabase.js";
+import {
+    buildDailyBuckets,
+    computeTrends,
+    computeWeeklyDigest,
+    computeWeightTrend,
+    type DailyBucket,
+} from "./insights.js";
+import type { Meal, NutritionGoals, WeightEntry } from "./supabase.js";
 
 function entry(logged_at: string, weight_g: number): WeightEntry {
     return {
@@ -81,4 +87,305 @@ test("computeWeightTrend handles an empty range", () => {
     expect(
         computeWeightTrend([], "2026-06-01", "2026-06-30", "UTC", null, "kg"),
     ).toBe("No weight logged between 2026-06-01 and 2026-06-30.");
+});
+
+// ---------- fiber / sugar / alcohol ----------
+
+function meal(logged_at: string, fields: Partial<Meal> = {}): Meal {
+    return {
+        id: `m-${logged_at}-${Math.random()}`,
+        user_id: "u1",
+        logged_at,
+        meal_type: "lunch",
+        description: "test meal",
+        calories: 500,
+        protein_g: 30,
+        carbs_g: 50,
+        fat_g: 20,
+        fiber_g: null,
+        sugar_g: null,
+        alcohol_g: null,
+        notes: null,
+        idempotency_key: null,
+        ...fields,
+    };
+}
+
+function goals(fields: Partial<NutritionGoals> = {}): NutritionGoals {
+    return {
+        user_id: "u1",
+        daily_calories: null,
+        daily_protein_g: null,
+        daily_carbs_g: null,
+        daily_fat_g: null,
+        daily_fiber_g: null,
+        daily_sugar_g: null,
+        daily_alcohol_g: null,
+        daily_water_ml: null,
+        target_weight_g: null,
+        updated_at: "2026-06-02T00:00:00Z",
+        ...fields,
+    };
+}
+
+/** Two consecutive days, one meal each, with the new nutrients set. */
+function twoDayBuckets(
+    day1: Partial<Meal>,
+    day2: Partial<Meal>,
+): DailyBucket[] {
+    return buildDailyBuckets(
+        [
+            meal("2026-06-01T12:00:00Z", day1),
+            meal("2026-06-02T12:00:00Z", day2),
+        ],
+        [],
+        "2026-06-01",
+        "2026-06-02",
+        "UTC",
+    );
+}
+
+test("buildDailyBuckets sums fiber, sugar and alcohol per day", () => {
+    const buckets = buildDailyBuckets(
+        [
+            meal("2026-06-01T08:00:00Z", {
+                fiber_g: 5,
+                sugar_g: 10,
+                alcohol_g: 0,
+            }),
+            meal("2026-06-01T19:00:00Z", {
+                fiber_g: 3,
+                sugar_g: 12,
+                alcohol_g: 14,
+            }),
+            meal("2026-06-02T12:00:00Z", { fiber_g: 7 }), // sugar/alcohol null
+        ],
+        [],
+        "2026-06-01",
+        "2026-06-02",
+        "UTC",
+    );
+    expect(buckets[0]!.fiber_g).toBe(8);
+    expect(buckets[0]!.sugar_g).toBe(22);
+    expect(buckets[0]!.alcohol_g).toBe(14);
+    // Nulls contribute 0 rather than NaN.
+    expect(buckets[1]!.fiber_g).toBe(7);
+    expect(buckets[1]!.sugar_g).toBe(0);
+    expect(buckets[1]!.alcohol_g).toBe(0);
+});
+
+test("computeTrends treats fiber as a floor and sugar as a ceiling", () => {
+    const buckets = twoDayBuckets(
+        { fiber_g: 25, sugar_g: 50 },
+        { fiber_g: 26, sugar_g: 30 },
+    );
+    const out = computeTrends(
+        buckets,
+        goals({ daily_fiber_g: 25, daily_sugar_g: 40 }),
+    );
+
+    expect(out).toContain("Fiber:");
+    expect(out).toContain("  7d avg: 25.5g");
+    expect(out).toContain("  Target: 25g");
+    expect(out).toContain("  Days within ±10% of target: 2/2");
+
+    expect(out).toContain("Sugar:");
+    expect(out).toContain("  7d avg: 40g");
+    // A limit is never described as a "target" to land on, and the count is of
+    // misses, so it can never read as praise for consuming sugar.
+    expect(out).toContain("  Limit: 40g");
+    expect(out).toContain("  Days over limit: 1/2");
+    expect(out).not.toContain("Days within ±10% of target: 1/2");
+});
+
+test("computeTrends suppresses the alcohol line when the window is all zero", () => {
+    const buckets = twoDayBuckets(
+        { alcohol_g: 0, sugar_g: 10, fiber_g: 8 },
+        { alcohol_g: null, sugar_g: 10, fiber_g: 8 },
+    );
+    // Even with a limit configured, an all-zero series has nothing to trend.
+    const out = computeTrends(buckets, goals({ daily_alcohol_g: 20 }));
+    expect(out).not.toContain("Alcohol");
+    // Fiber and sugar are always on, no toggle.
+    expect(out).toContain("Fiber:");
+    expect(out).toContain("Sugar:");
+});
+
+test("computeTrends shows alcohol once any day is non-zero", () => {
+    const buckets = twoDayBuckets({ alcohol_g: 0 }, { alcohol_g: 14 });
+    const out = computeTrends(buckets, goals({ daily_alcohol_g: 20 }));
+    expect(out).toContain("Alcohol:");
+    expect(out).toContain("  7d avg: 7g");
+    expect(out).toContain("  Limit: 20g");
+    expect(out).toContain("  Days over limit: 0/2");
+});
+
+test("computeWeeklyDigest reports fiber and sugar, calling a sugar goal a limit", () => {
+    const buckets = twoDayBuckets(
+        { fiber_g: 30, sugar_g: 50 },
+        { fiber_g: 20, sugar_g: 70 },
+    );
+    const out = computeWeeklyDigest(
+        buckets,
+        goals({ daily_fiber_g: 30, daily_sugar_g: 40 }),
+    );
+    expect(out).toContain("  Fiber: 25g / 30g target (83%)");
+    expect(out).toContain("  Sugar: 60g / 40g limit (150%)");
+    // No alcohol logged -> no row at all.
+    expect(out).not.toContain("Alcohol");
+});
+
+test("computeWeeklyDigest shows an alcohol row only when a drink was logged", () => {
+    const buckets = twoDayBuckets({ alcohol_g: 0 }, { alcohol_g: 28 });
+    const out = computeWeeklyDigest(buckets, goals({ daily_alcohol_g: 10 }));
+    expect(out).toContain("  Alcohol: 14g / 10g limit (140%)");
+});
+
+// ---------- historical NULLs are not zeros ----------
+//
+// Every meal logged before fiber/sugar/alcohol shipped carries NULL for all
+// three. Averaging those days as 0 reported a third of the truth against a
+// target, and scored data-less days as days under a limit.
+
+/** `days` consecutive days, one meal each, with `withData` days of nutrient
+ * data at the END of the window (the shape of a mid-window deploy). */
+function windowBuckets(
+    days: number,
+    withData: number,
+    fields: Partial<Meal>,
+): DailyBucket[] {
+    const start = new Date("2026-06-01T00:00:00Z");
+    const meals: Meal[] = [];
+    for (let i = 0; i < days; i++) {
+        const d = new Date(start);
+        d.setUTCDate(d.getUTCDate() + i);
+        const date = d.toISOString().slice(0, 10);
+        meals.push(
+            meal(`${date}T12:00:00Z`, i >= days - withData ? fields : {}),
+        );
+    }
+    const end = new Date(start);
+    end.setUTCDate(end.getUTCDate() + days - 1);
+    return buildDailyBuckets(
+        meals,
+        [],
+        "2026-06-01",
+        end.toISOString().slice(0, 10),
+        "UTC",
+    );
+}
+
+test("computeTrends averages a partial nutrient over its covered days only", () => {
+    // 30 logged days, fiber recorded on the last 5 — exactly 30 g each.
+    const buckets = windowBuckets(30, 5, { fiber_g: 30 });
+    const out = computeTrends(buckets, goals({ daily_fiber_g: 30 }));
+
+    // The reported bug: 150 g / 30 days = 5 g/day against a 30 g target.
+    expect(out).not.toContain("30d avg: 5g");
+    expect(out).toContain("  30d avg: 30g (5 of 30 days with data)");
+    expect(out).toContain("  7d avg: 30g (5 of 7 days with data)");
+    // Day counts and the spread use the same denominator.
+    expect(out).toContain("  Days within ±10% of target: 5/5 days with data");
+    expect(out).toContain("  Std dev: 0g (CV 0%)");
+    // Calories keep counting every day, as they always have.
+    expect(out).toContain("  30d avg: 500 kcal");
+});
+
+test("computeTrends counts limit misses over covered days, not the window", () => {
+    // Sugar recorded on the last 4 days only, every one of them over the limit.
+    const buckets = windowBuckets(30, 4, { sugar_g: 90 });
+    const out = computeTrends(buckets, goals({ daily_sugar_g: 40 }));
+    expect(out).toContain("  Days over limit: 4/4 days with data");
+    // The old reading — a clean month — came from counting the silent days.
+    expect(out).not.toContain("Days over limit: 4/30");
+    expect(out).not.toContain("Days over limit: 0/30");
+});
+
+test("computeTrends drops a nutrient with no data anywhere in the window", () => {
+    // A pre-feature history: meals every day, no fiber/sugar/alcohol on any.
+    const buckets = windowBuckets(30, 0, {});
+    const out = computeTrends(
+        buckets,
+        goals({ daily_fiber_g: 30, daily_sugar_g: 40, daily_alcohol_g: 0 }),
+    );
+    expect(out).not.toContain("Fiber");
+    expect(out).not.toContain("Sugar");
+    expect(out).not.toContain("Alcohol");
+    // Nothing is invented for them, in particular not a zero.
+    expect(out).not.toContain("0g (0 of 30");
+    expect(out).toContain("Calories:");
+    expect(out).toContain("Water:");
+});
+
+test("computeTrends says so when a trailing window has no data at all", () => {
+    // Fiber only in the first days of the month: nothing in the last 7 or 14.
+    const buckets = buildDailyBuckets(
+        [
+            meal("2026-06-01T12:00:00Z", { fiber_g: 20 }),
+            meal("2026-06-02T12:00:00Z", { fiber_g: 20 }),
+            ...Array.from({ length: 10 }, (_, i) =>
+                meal(`2026-06-${String(i + 3).padStart(2, "0")}T12:00:00Z`),
+            ),
+        ],
+        [],
+        "2026-06-01",
+        "2026-06-12",
+        "UTC",
+    );
+    const out = computeTrends(buckets, goals());
+    expect(out).toContain("  7d avg: no data");
+    expect(out).toContain("  14d avg: 20g (2 of 12 days with data)");
+});
+
+test("computeTrends honours a limit of zero on a ceiling", () => {
+    const buckets = twoDayBuckets({ alcohol_g: 14 }, { alcohol_g: 0 });
+    const out = computeTrends(buckets, goals({ daily_alcohol_g: 0 }));
+    // Zero is the most likely alcohol limit there is; it must not read as unset.
+    expect(out).toContain("  Limit: 0g");
+    expect(out).toContain("  Days over limit: 1/2 days with data");
+});
+
+test("computeTrends still treats a floor target of zero as unset", () => {
+    const buckets = twoDayBuckets({ fiber_g: 20 }, { fiber_g: 30 });
+    const out = computeTrends(buckets, goals({ daily_fiber_g: 0 }));
+    expect(out).toContain("Fiber:");
+    expect(out).not.toContain("Target: 0g");
+    expect(out).not.toContain("Days within ±10%");
+});
+
+test("computeWeeklyDigest averages a partial nutrient over its covered days", () => {
+    // A week logged, fiber on the last 2 days at 30 g.
+    const buckets = windowBuckets(7, 2, { fiber_g: 30 });
+    const out = computeWeeklyDigest(buckets, goals({ daily_fiber_g: 30 }));
+    expect(out).toContain(
+        "  Fiber: 30g / 30g target (100%) — over 2 of 7 days with data",
+    );
+    expect(out).not.toContain("Fiber: 8.6g");
+});
+
+test("computeWeeklyDigest drops rows for nutrients with no data at all", () => {
+    const buckets = windowBuckets(7, 0, {});
+    const out = computeWeeklyDigest(
+        buckets,
+        goals({ daily_fiber_g: 30, daily_sugar_g: 40 }),
+    );
+    expect(out).not.toContain("Fiber");
+    expect(out).not.toContain("Sugar");
+    expect(out).toContain("  Calories:");
+});
+
+test("computeWeeklyDigest honours a limit of zero without a percentage", () => {
+    const buckets = twoDayBuckets({ alcohol_g: 14 }, { alcohol_g: 14 });
+    const out = computeWeeklyDigest(buckets, goals({ daily_alcohol_g: 0 }));
+    expect(out).toContain("  Alcohol: 14g / 0g limit (14g over)");
+    // No Infinity/NaN percentage, and nothing that reads as budget left.
+    expect(out).not.toContain("Infinity");
+    expect(out).not.toContain("NaN");
+    expect(out).not.toContain("left");
+});
+
+test("computeWeeklyDigest reports a zero-limit nutrient held at zero as clear", () => {
+    const buckets = twoDayBuckets({ sugar_g: 0 }, { sugar_g: 0 });
+    const out = computeWeeklyDigest(buckets, goals({ daily_sugar_g: 0 }));
+    expect(out).toContain("  Sugar: 0g / 0g limit (clear)");
 });

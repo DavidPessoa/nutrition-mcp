@@ -15,6 +15,9 @@ export interface DailyBucket {
     protein_g: number;
     carbs_g: number;
     fat_g: number;
+    fiber_g: number;
+    sugar_g: number;
+    alcohol_g: number;
     mealTypes: Set<string>;
 }
 
@@ -73,6 +76,9 @@ export function buildDailyBuckets(
             protein_g: 0,
             carbs_g: 0,
             fat_g: 0,
+            fiber_g: 0,
+            sugar_g: 0,
+            alcohol_g: 0,
             mealTypes: new Set(),
         });
     }
@@ -86,6 +92,9 @@ export function buildDailyBuckets(
         b.protein_g += m.protein_g ?? 0;
         b.carbs_g += m.carbs_g ?? 0;
         b.fat_g += m.fat_g ?? 0;
+        b.fiber_g += m.fiber_g ?? 0;
+        b.sugar_g += m.sugar_g ?? 0;
+        b.alcohol_g += m.alcohol_g ?? 0;
         if (m.meal_type) b.mealTypes.add(m.meal_type);
     }
 
@@ -99,14 +108,103 @@ export function buildDailyBuckets(
     return [...buckets.values()].sort((a, b) => a.date.localeCompare(b.date));
 }
 
-function trailingAverage(
+/** The three nutrients added by the fiber/sugar/alcohol pass. Every meal written
+ * before it shipped carries NULL for all three, so — unlike calories or protein,
+ * where a missing value has always meant zero and users have history built on
+ * that — a null here means "not recorded", not "ate none". Summing them as zero
+ * over every logged day reported 5 g/day for a user eating 30 g, and scored 25
+ * data-less days as days under a sugar limit. */
+export type PartialNutrient = "fiber_g" | "sugar_g" | "alcohol_g";
+
+/** THE RULE, shared with mcp.ts: a day carries a nutrient when at least one of
+ * that day's meals has a non-null value for it. Only carrying days count toward
+ * an average, a day-count or a std dev — days with no data are excluded from
+ * both numerator and denominator, so trends and the summary must agree. */
+export function dayCarries(meals: Meal[], nutrient: PartialNutrient): boolean {
+    return meals.some((m) => m[nutrient] != null);
+}
+
+/** Mean of a nutrient over only the days that carry it, given one Meal[] per
+ * day. `avg` is null when no day in the range carries the nutrient — that is
+ * the signal to suppress the figure entirely rather than print 0. Exported for
+ * mcp.ts, which groups by date itself instead of building DailyBuckets. */
+export function coveredDailyAverage(
+    mealsByDay: Meal[][],
+    nutrient: PartialNutrient,
+): { avg: number | null; days: number } {
+    const totals = mealsByDay
+        .filter((meals) => dayCarries(meals, nutrient))
+        .map((meals) => meals.reduce((s, m) => s + (m[nutrient] ?? 0), 0));
+    return {
+        avg: totals.length > 0 ? mean(totals) : null,
+        days: totals.length,
+    };
+}
+
+const WINDOWS = [7, 14, 30] as const;
+
+interface Trailing {
+    /** Window size asked for (7/14/30), before clamping to the data. */
+    n: number;
+    /** Mean over the counting days in the window; null when there are none. */
+    avg: number | null;
+    /** Days that counted, and calendar days the window actually spans. */
+    days: number;
+    window: number;
+}
+
+interface StatSeries {
+    /** Daily values behind every figure on the line. */
+    values: number[];
+    trailing: Trailing[];
+    /** True when a day can be absent from `values`, which changes the wording
+     * from a bare "3/7" to "3/7 days with data". */
+    partial: boolean;
+}
+
+/** A nutrient that has always been summed with `?? 0`: every day in the window
+ * counts, exactly as before. */
+function fullSeries(
     buckets: DailyBucket[],
     field: keyof DailyBucket,
-    n: number,
-): number {
-    const slice = buckets.slice(-n);
-    const values = slice.map((b) => b[field] as number);
-    return mean(values);
+): StatSeries {
+    const daily = buckets.map((b) => b[field] as number);
+    return {
+        values: daily,
+        trailing: WINDOWS.map((n) => {
+            const slice = daily.slice(-n);
+            return {
+                n,
+                avg: slice.length > 0 ? mean(slice) : null,
+                days: slice.length,
+                window: slice.length,
+            };
+        }),
+        partial: false,
+    };
+}
+
+/** A nutrient that may be missing: only carrying days count (see dayCarries). */
+function coveredSeries(
+    buckets: DailyBucket[],
+    nutrient: PartialNutrient,
+): StatSeries {
+    const valuesOf = (bs: DailyBucket[]) =>
+        bs.filter((b) => dayCarries(b.meals, nutrient)).map((b) => b[nutrient]);
+    return {
+        values: valuesOf(buckets),
+        trailing: WINDOWS.map((n) => {
+            const slice = buckets.slice(-n);
+            const values = valuesOf(slice);
+            return {
+                n,
+                avg: values.length > 0 ? mean(values) : null,
+                days: values.length,
+                window: slice.length,
+            };
+        }),
+        partial: true,
+    };
 }
 
 function longestStreak(
@@ -142,29 +240,75 @@ function nonEmpty(b: DailyBucket): boolean {
     return b.meals.length > 0 || b.waterMl > 0;
 }
 
+/** Whether an alcohol series is worth rendering at all. For most users it is
+ * flat zero, and averages / a std dev / a CV over all-zero data are noise —
+ * the same instinct as the widget hiding the water bar until water is tracked.
+ * (Note this is data-driven only; the per-user alcohol_tracking_enabled flag
+ * lives in mcp.ts, since this module stays free of Supabase.) */
+function hasAlcohol(values: number[]): boolean {
+    return values.some((v) => v > 0);
+}
+
+/** Whether a target is a real one. Zero is a genuine LIMIT — "no alcohol at
+ * all" is the most likely limit anyone sets, and any consumption is over it —
+ * but a zero FLOOR ("reach 0 g of protein") is meaningless, so there it still
+ * reads as unset. Negatives are rejected either way. */
+function targetApplies(target: number | null, direction: StatDirection) {
+    if (target == null) return false;
+    return direction === "ceiling" ? target >= 0 : target > 0;
+}
+
+/** Whether the goal is something to reach ("floor": calories, protein, fiber…)
+ * or something to stay under ("ceiling": sugar, alcohol). Mirrors the
+ * GoalDirection used by formatGoalLine in mcp.ts. */
+type StatDirection = "floor" | "ceiling";
+
+/** Renders one nutrient's block. Returns null when a partial nutrient has no
+ * data anywhere in the window — the caller drops the section rather than
+ * printing an average of nothing as "0g" next to a target. */
 function formatStatLine(
     label: string,
     unit: string,
-    avg7: number,
-    avg14: number,
-    avg30: number,
+    series: StatSeries,
     target: number | null,
-    values: number[],
-): string {
-    const parts = [
-        `${label}:`,
-        `  7d avg: ${round(avg7)}${unit}`,
-        `  14d avg: ${round(avg14)}${unit}`,
-        `  30d avg: ${round(avg30)}${unit}`,
-    ];
-    if (target != null && target > 0) {
-        const daysOnTarget = values.filter(
-            (v) => v >= target * 0.9 && v <= target * 1.1,
-        ).length;
-        parts.push(`  Target: ${target}${unit}`);
-        parts.push(
-            `  Days within ±10% of target: ${daysOnTarget}/${values.length}`,
-        );
+    direction: StatDirection = "floor",
+): string | null {
+    const { values, trailing, partial } = series;
+    if (partial && values.length === 0) return null;
+    // A figure drawn from fewer days than the window is said to be, rather than
+    // passed off as a full-window average.
+    const of = partial
+        ? `/${values.length} days with data`
+        : `/${values.length}`;
+    const parts = [`${label}:`];
+    for (const t of trailing) {
+        if (t.avg == null) {
+            parts.push(`  ${t.n}d avg: no data`);
+            continue;
+        }
+        const note =
+            t.days < t.window
+                ? ` (${t.days} of ${t.window} days with data)`
+                : "";
+        parts.push(`  ${t.n}d avg: ${round(t.avg)}${unit}${note}`);
+    }
+    if (targetApplies(target, direction)) {
+        const limit = target!;
+        if (direction === "ceiling") {
+            // A limit is not something to land within ±10% of — hitting a sugar
+            // cap dead-on is not the goal. Count the misses rather than the
+            // wins: "Days under limit" would score every never-logged day as a
+            // success, and a high hit-rate on a cap reads as praise for it.
+            const daysOver = values.filter((v) => v > limit).length;
+            parts.push(`  Limit: ${limit}${unit}`);
+            parts.push(`  Days over limit: ${daysOver}${of}`);
+        } else {
+            const daysOnTarget = values.filter(
+                (v) => v >= limit * 0.9 && v <= limit * 1.1,
+            ).length;
+            parts.push(`  Target: ${limit}${unit}`);
+            parts.push(`  Days within ±10% of target: ${daysOnTarget}${of}`);
+        }
     }
     const sd = stdDev(values);
     const m = mean(values);
@@ -180,13 +324,14 @@ export function computeTrends(
     if (buckets.length === 0) return "No data in range.";
 
     const logged = buckets.filter(nonEmpty);
-    const caloriesDaily = buckets.map((b) => b.calories);
-    const proteinDaily = buckets.map((b) => b.protein_g);
-    const carbsDaily = buckets.map((b) => b.carbs_g);
-    const fatDaily = buckets.map((b) => b.fat_g);
-    const waterDaily = buckets.map((b) => b.waterMl);
+    // Calories/protein/carbs/fat/water: every day counts, as they always have.
+    // Fiber/sugar/alcohol: only the days that carry them (see coveredSeries).
+    const alcoholSeries = coveredSeries(buckets, "alcohol_g");
 
     const sections: string[] = [];
+    const push = (line: string | null) => {
+        if (line != null) sections.push(line);
+    };
 
     sections.push(
         `Trends — ${buckets[0]!.date} to ${buckets[buckets.length - 1]!.date} (${buckets.length} days)`,
@@ -203,59 +348,78 @@ export function computeTrends(
     );
 
     // Macro/calorie stats
-    sections.push(
+    push(
         formatStatLine(
             "Calories",
             " kcal",
-            trailingAverage(buckets, "calories", 7),
-            trailingAverage(buckets, "calories", 14),
-            trailingAverage(buckets, "calories", 30),
+            fullSeries(buckets, "calories"),
             goals?.daily_calories ?? null,
-            caloriesDaily,
         ),
     );
-    sections.push(
+    push(
         formatStatLine(
             "Protein",
             "g",
-            trailingAverage(buckets, "protein_g", 7),
-            trailingAverage(buckets, "protein_g", 14),
-            trailingAverage(buckets, "protein_g", 30),
+            fullSeries(buckets, "protein_g"),
             goals?.daily_protein_g ?? null,
-            proteinDaily,
         ),
     );
-    sections.push(
+    push(
         formatStatLine(
             "Carbs",
             "g",
-            trailingAverage(buckets, "carbs_g", 7),
-            trailingAverage(buckets, "carbs_g", 14),
-            trailingAverage(buckets, "carbs_g", 30),
+            fullSeries(buckets, "carbs_g"),
             goals?.daily_carbs_g ?? null,
-            carbsDaily,
         ),
     );
-    sections.push(
+    push(
         formatStatLine(
             "Fat",
             "g",
-            trailingAverage(buckets, "fat_g", 7),
-            trailingAverage(buckets, "fat_g", 14),
-            trailingAverage(buckets, "fat_g", 30),
+            fullSeries(buckets, "fat_g"),
             goals?.daily_fat_g ?? null,
-            fatDaily,
         ),
     );
-    sections.push(
+    // Fiber and sugar are never gated by a preference, but a window with no
+    // fiber data at all has nothing to say — formatStatLine returns null and
+    // the section disappears rather than reading "0g" against a 30g target.
+    push(
+        formatStatLine(
+            "Fiber",
+            "g",
+            coveredSeries(buckets, "fiber_g"),
+            goals?.daily_fiber_g ?? null,
+        ),
+    );
+    push(
+        formatStatLine(
+            "Sugar",
+            "g",
+            coveredSeries(buckets, "sugar_g"),
+            goals?.daily_sugar_g ?? null,
+            "ceiling",
+        ),
+    );
+    // Alcohol only appears once there is alcohol to talk about — a recorded but
+    // flat-zero series is suppressed too (that is also how mcp.ts's opt-in
+    // reaches this module: it zeroes the series).
+    if (hasAlcohol(alcoholSeries.values)) {
+        push(
+            formatStatLine(
+                "Alcohol",
+                "g",
+                alcoholSeries,
+                goals?.daily_alcohol_g ?? null,
+                "ceiling",
+            ),
+        );
+    }
+    push(
         formatStatLine(
             "Water",
             " ml",
-            trailingAverage(buckets, "waterMl", 7),
-            trailingAverage(buckets, "waterMl", 14),
-            trailingAverage(buckets, "waterMl", 30),
+            fullSeries(buckets, "waterMl"),
             goals?.daily_water_ml ?? null,
-            waterDaily,
         ),
     );
 
@@ -542,6 +706,21 @@ export function computeWeeklyDigest(
     const avgProtein = round(mean(buckets.map((b) => b.protein_g)));
     const avgCarbs = round(mean(buckets.map((b) => b.carbs_g)));
     const avgFat = round(mean(buckets.map((b) => b.fat_g)));
+    // Same rule as computeTrends, so the two narratives cannot disagree: these
+    // three average over the days that carry them, not over the whole week.
+    const covered = (nutrient: PartialNutrient) => {
+        const days = buckets.filter((b) => dayCarries(b.meals, nutrient));
+        return {
+            avg:
+                days.length > 0
+                    ? round(mean(days.map((b) => b[nutrient])))
+                    : null,
+            days: days.length,
+        };
+    };
+    const fiber = covered("fiber_g");
+    const sugar = covered("sugar_g");
+    const alcohol = covered("alcohol_g");
     const avgWater = round(mean(buckets.map((b) => b.waterMl)));
     const totalMeals = buckets.reduce((s, b) => s + b.meals.length, 0);
 
@@ -555,15 +734,32 @@ export function computeWeeklyDigest(
     );
     lines.push("");
     lines.push("Daily averages:");
+    // `noun` is "target" for a floor and "limit" for a ceiling (sugar, alcohol);
+    // calling a sugar cap a "target" invites reading the shortfall as a shortfall.
     const line = (
         label: string,
         val: number,
         unit: string,
         target: number | null,
+        noun: "target" | "limit" = "target",
+        // Days the figure was drawn from, when that can be fewer than the week.
+        days?: number,
     ) => {
-        if (target == null || target <= 0) return `  ${label}: ${val}${unit}`;
-        const pct = round((val / target) * 100, 0);
-        return `  ${label}: ${val}${unit} / ${target}${unit} target (${pct}%)`;
+        const note =
+            days != null && days < buckets.length
+                ? ` — over ${days} of ${buckets.length} days with data`
+                : "";
+        const direction = noun === "limit" ? "ceiling" : "floor";
+        if (!targetApplies(target, direction))
+            return `  ${label}: ${val}${unit}${note}`;
+        // A limit of zero is real (see targetApplies) but has no percentage to
+        // take — and "left" wording would be a permission slip either way.
+        if (target === 0) {
+            const verdict = val > 0 ? `${val}${unit} over` : "clear";
+            return `  ${label}: ${val}${unit} / 0${unit} limit (${verdict})${note}`;
+        }
+        const pct = round((val / target!) * 100, 0);
+        return `  ${label}: ${val}${unit} / ${target}${unit} ${noun} (${pct}%)${note}`;
     };
     lines.push(
         line("Calories", avgCals, " kcal", goals?.daily_calories ?? null),
@@ -573,6 +769,47 @@ export function computeWeeklyDigest(
     );
     lines.push(line("Carbs", avgCarbs, "g", goals?.daily_carbs_g ?? null));
     lines.push(line("Fat", avgFat, "g", goals?.daily_fat_g ?? null));
+    // No fiber/sugar data anywhere in the week -> no row, rather than a "0g"
+    // that a pre-feature history would make up out of nothing.
+    if (fiber.avg != null) {
+        lines.push(
+            line(
+                "Fiber",
+                fiber.avg,
+                "g",
+                goals?.daily_fiber_g ?? null,
+                "target",
+                fiber.days,
+            ),
+        );
+    }
+    if (sugar.avg != null) {
+        lines.push(
+            line(
+                "Sugar",
+                sugar.avg,
+                "g",
+                goals?.daily_sugar_g ?? null,
+                "limit",
+                sugar.days,
+            ),
+        );
+    }
+    // Suppressed for the same reason as the trends line (see hasAlcohol), but
+    // keyed on the rendered average rather than the raw series: a row reading
+    // "Alcohol: 0g" is exactly the noise the suppression exists to avoid.
+    if (alcohol.avg != null && alcohol.avg > 0) {
+        lines.push(
+            line(
+                "Alcohol",
+                alcohol.avg,
+                "g",
+                goals?.daily_alcohol_g ?? null,
+                "limit",
+                alcohol.days,
+            ),
+        );
+    }
     lines.push(line("Water", avgWater, " ml", goals?.daily_water_ml ?? null));
 
     // Best and worst day this week (by calorie target if set)
