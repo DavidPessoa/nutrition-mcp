@@ -31,8 +31,16 @@ export type MealType = MealInput["meal_type"];
  *  rejected before the handler runs, which loses the whole structured report. */
 export const MAX_ROWS_PER_CALL = 50;
 
-const MAX_CALORIES = 20_000;
-const MAX_MACRO_G = 5_000;
+export const MAX_CALORIES = 20_000;
+export const MAX_MACRO_G = 5_000;
+/** Alcohol gets a far tighter ceiling than the other macros. 5,000 g would be
+ *  ~357 US standard drinks (14 g each, NIAAA), which passes any mis-mapped
+ *  column without complaint; 500 g is ~36 drinks, still comfortably above the
+ *  largest real single row we can construct — a full 700 mL bottle of 40% ABV
+ *  spirits is 221 g, and a whole aggregated heavy-drinking day is under 350 g —
+ *  while rejecting the likely mistake of pointing the column at millilitres of
+ *  drink (a 750 mL bottle of wine) or at a stray extra digit. */
+export const MAX_ALCOHOL_G = 500;
 const MAX_DESCRIPTION_CHARS = 2_000;
 const MAX_NOTES_CHARS = 4_000;
 const MAX_PAST_MS = 20 * 365.25 * 24 * 3600 * 1000;
@@ -73,6 +81,14 @@ export interface ImportRow {
     protein_g?: number;
     carbs_g?: number;
     fat_g?: number;
+    fiber_g?: number;
+    /** TOTAL sugars, including sugar naturally present in fruit and milk —
+     *  never "added sugar", which no export reliably carries. */
+    sugar_g?: number;
+    /** Grams of pure ethanol. Stored whatever the caller sends, even when the
+     *  profile has alcohol tracking off: that flag gates DISPLAY only, and
+     *  dropping a value at the write layer would lose data silently. */
+    alcohol_g?: number;
     notes?: string;
     /** Caller-chosen correlation label. Echoed back; never used as a key. */
     client_row_id?: string;
@@ -703,6 +719,9 @@ export function validateRow(
         ["protein_g", row.protein_g, MAX_MACRO_G, "g"],
         ["carbs_g", row.carbs_g, MAX_MACRO_G, "g"],
         ["fat_g", row.fat_g, MAX_MACRO_G, "g"],
+        ["fiber_g", row.fiber_g, MAX_MACRO_G, "g"],
+        ["sugar_g", row.sugar_g, MAX_MACRO_G, "g"],
+        ["alcohol_g", row.alcohol_g, MAX_ALCOHOL_G, "g"],
     ] as const) {
         const err = checkMacro(field, value, max, unit);
         if (err) return fail(err);
@@ -717,6 +736,11 @@ export function validateRow(
     if (row.protein_g !== undefined) input.protein_g = row.protein_g;
     if (row.carbs_g !== undefined) input.carbs_g = row.carbs_g;
     if (row.fat_g !== undefined) input.fat_g = row.fat_g;
+    if (row.fiber_g !== undefined) input.fiber_g = row.fiber_g;
+    if (row.sugar_g !== undefined) input.sugar_g = row.sugar_g;
+    // Stored unconditionally. alcohol_tracking_enabled hides alcohol from the
+    // rendered output; it must never suppress the write.
+    if (row.alcohol_g !== undefined) input.alcohol_g = row.alcohol_g;
     if (row.notes !== undefined) input.notes = row.notes;
 
     return {
@@ -745,6 +769,19 @@ function sha256Hex(parts: (string | number | null | undefined)[]): string {
 /** Content digest of a resolved row. Excludes source_line so that re-exporting
  *  a file with lines added or removed still dedupes against a prior import. */
 export function rowContentDigest(userId: string, input: MealInput): string {
+    // DO NOT ADD fiber_g, sugar_g OR alcohol_g TO THIS ARRAY.
+    //
+    // The list below is not "the fields of a meal" — it is a frozen positional
+    // hash input. Appending to it changes the digest of every row hashed from
+    // now on, so the keys a user's next import produces would no longer match
+    // the keys their previous import wrote, and re-importing an already-imported
+    // file would create a full set of duplicates instead of a clean no-op.
+    // deriveIdempotencyKey in src/supabase.ts is frozen for the same reason and
+    // must stay in step with this one.
+    //
+    // The accepted cost: two meals differing ONLY in fiber/sugar/alcohol collapse
+    // to one. Dedup stability is worth more than that precision here, and a
+    // caller that needs the rows kept apart can pass an explicit idempotency_key.
     return sha256Hex([
         userId,
         input.description,

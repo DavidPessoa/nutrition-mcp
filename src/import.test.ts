@@ -258,6 +258,81 @@ test("validateRow produces a MealInput ready for insertMeal", () => {
     expect("carbs_g" in v.resolved.input).toBe(false);
 });
 
+test("validateRow carries fiber, sugar and alcohol through to the MealInput", () => {
+    const v = validateRow(
+        row({ source_line: 4, fiber_g: 4.5, sugar_g: 12, alcohol_g: 14 }),
+        0,
+        { tz: TZ, nowMs: NOW },
+        undefined,
+    );
+    expect(v.ok).toBe(true);
+    if (!v.ok) return;
+    expect(v.resolved.input.fiber_g).toBe(4.5);
+    expect(v.resolved.input.sugar_g).toBe(12);
+    expect(v.resolved.input.alcohol_g).toBe(14);
+
+    // Absent ones stay omitted rather than becoming 0 — a missing column must
+    // not read back as "this meal definitely had no fiber".
+    const bare = validateRow(
+        row({ source_line: 5 }),
+        0,
+        { tz: TZ, nowMs: NOW },
+        undefined,
+    );
+    expect(bare.ok).toBe(true);
+    if (!bare.ok) return;
+    expect("fiber_g" in bare.resolved.input).toBe(false);
+    expect("sugar_g" in bare.resolved.input).toBe(false);
+    expect("alcohol_g" in bare.resolved.input).toBe(false);
+});
+
+test("alcohol is stored even though display of it is opt-in", async () => {
+    // alcohol_tracking_enabled gates rendering (src/mcp.ts), never the write.
+    // Dropping a value here would lose user data with no way to recover it.
+    const { deps, inserted } = makeStore();
+    const result = await runImport(
+        args([row({ source_line: 2, alcohol_g: 14, sugar_g: 3 })]),
+        deps,
+    );
+    expect(result.summary.created).toBe(1);
+    expect(inserted[0]!.alcohol_g).toBe(14);
+    expect(inserted[0]!.sugar_g).toBe(3);
+});
+
+test("validateRow bounds alcohol far tighter than the other macros", () => {
+    const check = (over: Partial<ImportRow>) =>
+        validateRow(
+            row({ source_line: 2, ...over }),
+            0,
+            { tz: TZ, nowMs: NOW },
+            undefined,
+        );
+
+    // Fiber and sugar share the 5,000 g macro ceiling.
+    expect(check({ fiber_g: 4_999 }).ok).toBe(true);
+    expect(check({ fiber_g: 5_001 }).ok).toBe(false);
+    expect(check({ sugar_g: 5_001 }).ok).toBe(false);
+
+    // A whole 700 mL bottle of 40% ABV spirits is 221 g and must pass; a
+    // mis-mapped millilitre column (750 mL of wine) must not.
+    expect(check({ alcohol_g: 221 }).ok).toBe(true);
+    expect(check({ alcohol_g: 500 }).ok).toBe(true);
+    const volume = check({ alcohol_g: 750 });
+    expect(volume.ok).toBe(false);
+    if (!volume.ok) {
+        expect(volume.error.field).toBe("alcohol_g");
+        expect(volume.error.code).toBe("value_out_of_range");
+        expect(volume.error.message).toContain("500");
+    }
+
+    for (const field of ["fiber_g", "sugar_g", "alcohol_g"] as const) {
+        const neg = check({ [field]: -1 });
+        expect(neg.ok).toBe(false);
+        if (!neg.ok) expect(neg.error.field).toBe(field);
+        expect(check({ [field]: Number.NaN }).ok).toBe(false);
+    }
+});
+
 test("validateRow rejects implausible and malformed numbers with the observed value", () => {
     const bad = (over: Partial<ImportRow>) =>
         validateRow(
@@ -283,8 +358,12 @@ test("validateRow rejects implausible and malformed numbers with the observed va
 });
 
 test("validateRow rejects text that Postgres could not store", () => {
-    // insertMeal decodes escape sequences on write, so a literal   in the
+    // insertMeal decodes escape sequences on write, so a literal \u0000 in the
     // payload becomes a real NUL there and would throw mid-batch.
+    //
+    // Never paste a raw NUL into this file. A single one makes file(1) and
+    // grep treat the whole file as binary, so greps over it silently report
+    // no matches -- that already cost a review cycle a false "test is missing".
     const v = validateRow(
         row({ source_line: 2, description: "Tea \\u0000 break" }),
         0,
@@ -367,6 +446,48 @@ test("keys exclude source_line so a re-exported file still dedupes", () => {
     };
     // The same meal at a different line number keeps the same key.
     expect(build(5)).toBe(build(37));
+});
+
+test("fiber, sugar and alcohol are EXCLUDED from the content digest", async () => {
+    // The regression guard for the whole feature. rowContentDigest is a frozen
+    // positional hash: adding the new fields would change the key of every row
+    // hashed from then on, so a user re-importing a file they already imported
+    // would get a full set of duplicates instead of a clean no-op. Accepted
+    // cost: two rows differing only in these fields collapse to one.
+    const keyFor = (over: Partial<ImportRow>) => {
+        const v = validateRow(
+            row({ source_line: 2, description: "Stout", ...over }),
+            0,
+            { tz: TZ, nowMs: NOW },
+            undefined,
+        );
+        if (!v.ok) throw new Error("fixture should validate");
+        const resolved = [v.resolved];
+        assignIdempotencyKeys("user-1", resolved);
+        return resolved[0]!.input.idempotency_key!;
+    };
+
+    const plain = keyFor({});
+    expect(keyFor({ fiber_g: 3 })).toBe(plain);
+    expect(keyFor({ sugar_g: 11 })).toBe(plain);
+    expect(keyFor({ alcohol_g: 14 })).toBe(plain);
+    expect(keyFor({ fiber_g: 3, sugar_g: 11, alcohol_g: 14 })).toBe(plain);
+    // A field that IS in the digest still moves it, so the test above is not
+    // just asserting that every key is identical.
+    expect(keyFor({ calories: 301 })).not.toBe(plain);
+
+    // End to end: an import already written with no fiber column dedupes
+    // against a re-export of the same file that now carries one.
+    const { deps, inserted } = makeStore();
+    const first = await runImport(args([row({ source_line: 2 })]), deps);
+    expect(first.summary.created).toBe(1);
+    const second = await runImport(
+        args([row({ source_line: 2, fiber_g: 3, sugar_g: 11, alcohol_g: 14 })]),
+        deps,
+    );
+    expect(second.summary.created).toBe(0);
+    expect(second.summary.deduplicated).toBe(1);
+    expect(inserted).toHaveLength(1);
 });
 
 // ---------- checkBatch ----------
