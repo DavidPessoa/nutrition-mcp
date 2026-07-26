@@ -1,12 +1,12 @@
 <!doctype html>
 <html lang="en">
     <head>
-        <title>Tools Reference: All 35 Tools — Nutrition MCP</title>
+        <title>Tools Reference: All 37 Tools — Nutrition MCP</title>
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <meta charset="utf-8" />
         <meta
             name="description"
-            content="All 35 tools the Nutrition MCP server gives your AI — log meals, scan barcodes, import your history from another app, track water and weight, set goals, and review trends. Full reference with descriptions and example prompts."
+            content="All 37 tools the Nutrition MCP server gives your AI — log meals, scan barcodes, import your history from another app, track water and weight, set goals, and review trends. Full reference with descriptions and example prompts."
         />
         <link rel="canonical" href="https://nutrition-mcp.com/tools" />
         <link rel="icon" href="/favicon.ico" />
@@ -14,11 +14,11 @@
         <meta name="theme-color" content="#4a7c59" />
         <meta
             property="og:title"
-            content="Tools Reference: All 35 Tools — Nutrition MCP"
+            content="Tools Reference: All 37 Tools — Nutrition MCP"
         />
         <meta
             property="og:description"
-            content="All 35 tools the Nutrition MCP server gives your AI, including a CSV importer for your history from another app — with descriptions and example prompts."
+            content="All 37 tools the Nutrition MCP server gives your AI, including a CSV importer for your history from another app — with descriptions and example prompts."
         />
         <meta property="og:type" content="website" />
         <meta property="og:url" content="https://nutrition-mcp.com/tools" />
@@ -461,7 +461,7 @@
                     </p>
                     <span class="count-pill"
                         ><i class="fa-solid fa-wrench" aria-hidden="true"></i
-                        ><b>35 tools</b> across 7 areas</span
+                        ><b>37 tools</b> across 7 areas</span
                     >
                 </div>
             </section>
@@ -551,12 +551,13 @@
                                     >
                                 </div>
                                 <p class="tool-desc">
-                                    Log what you ate with calories and macros.
-                                    Describe it in plain language — the AI
-                                    estimates the numbers, asks about portion
-                                    size when it's unclear, and can pull
-                                    verified data from a barcode or the web
-                                    first.
+                                    Log what you ate with calories and macros —
+                                    plus fiber, total sugar and alcohol when the
+                                    numbers are there. Describe it in plain
+                                    language — the AI estimates the numbers,
+                                    asks about portion size when it's unclear,
+                                    and can pull label data from a barcode or
+                                    the web first.
                                 </p>
                                 <div class="tool-params">
                                     <span class="tool-params-label"
@@ -604,6 +605,35 @@
                                                 >optional</span
                                             >
                                             — Fat in grams
+                                        </li>
+                                        <li>
+                                            <code>fiber_g</code>
+                                            <span class="param-opt"
+                                                >optional</span
+                                            >
+                                            — Dietary fiber in grams
+                                        </li>
+                                        <li>
+                                            <code>sugar_g</code>
+                                            <span class="param-opt"
+                                                >optional</span
+                                            >
+                                            — <b>Total</b> sugars in grams — the
+                                            figure a label prints under
+                                            "Sugars", including the sugar
+                                            naturally in fruit and milk, not
+                                            just added sugar
+                                        </li>
+                                        <li>
+                                            <code>alcohol_g</code>
+                                            <span class="param-opt"
+                                                >optional</span
+                                            >
+                                            — Grams of <b>pure ethanol</b>, not
+                                            the volume of the drink and not its
+                                            ABV — the AI works it out from the
+                                            pour size and strength (a 330 ml 5%
+                                            beer is 13 g)
                                         </li>
                                         <li>
                                             <code>logged_at</code>
@@ -655,12 +685,12 @@
                                     >
                                 </div>
                                 <p class="tool-desc">
-                                    Fetch a packaged product's verified
-                                    nutrition from Open Food Facts by its
-                                    barcode (8–14 digit EAN/UPC). You can type
-                                    the digits or read them off a photo of the
-                                    package; the result can then be logged,
-                                    scaled to how much you ate.
+                                    Fetch a packaged product's label nutrition
+                                    from Open Food Facts by its barcode (8–14
+                                    digit EAN/UPC). You can type the digits or
+                                    read them off a photo of the package; the
+                                    result can then be logged, scaled to how
+                                    much you ate.
                                 </p>
                                 <div class="tool-ex">
                                     <span class="tool-ex-label"
@@ -697,12 +727,13 @@
                                     history over from another app — pick the
                                     file you exported from MyFitnessPal,
                                     Cronometer, Lose It! or MacroFactor, match
-                                    its columns to calories and macros, and
-                                    review what will be added before you
-                                    confirm. The file is read in your browser,
-                                    nothing is saved until you approve the
-                                    preview, and importing the same file again
-                                    won't create duplicates.
+                                    its columns to calories, macros, fiber and
+                                    sugar — plus alcohol if you've turned
+                                    alcohol tracking on — and review what will
+                                    be added before you confirm. The file is
+                                    read in your browser, nothing is saved until
+                                    you approve the preview, and importing the
+                                    same file again won't create duplicates.
                                 </p>
                                 <div class="tool-ex">
                                     <span class="tool-ex-label"
@@ -743,7 +774,18 @@
                                                 >required</span
                                             >
                                             — The rows to import, in source-file
-                                            order (1–50 per call)
+                                            order (1–50 per call). Each row can
+                                            carry a time, meal type,
+                                            description, notes and the same
+                                            numbers as a logged meal:
+                                            <code>calories</code>,
+                                            <code>protein_g</code>,
+                                            <code>carbs_g</code>,
+                                            <code>fat_g</code>,
+                                            <code>fiber_g</code>,
+                                            <code>sugar_g</code> (total sugars)
+                                            and <code>alcohol_g</code> (grams of
+                                            pure ethanol)
                                         </li>
                                         <li>
                                             <code>expected_row_count</code>
@@ -814,8 +856,8 @@
                                 </div>
                                 <p class="tool-desc">
                                     Change the details of a meal you already
-                                    logged — its description, any macro, the
-                                    time, or notes.
+                                    logged — its description, any macro, fiber,
+                                    sugar or alcohol, the time, or notes.
                                 </p>
                                 <div class="tool-params">
                                     <span class="tool-params-label"
@@ -858,6 +900,27 @@
                                             <span class="param-opt"
                                                 >optional</span
                                             >
+                                        </li>
+                                        <li>
+                                            <code>fiber_g</code>
+                                            <span class="param-opt"
+                                                >optional</span
+                                            >
+                                        </li>
+                                        <li>
+                                            <code>sugar_g</code>
+                                            <span class="param-opt"
+                                                >optional</span
+                                            >
+                                            — Total sugars, not added sugar
+                                        </li>
+                                        <li>
+                                            <code>alcohol_g</code>
+                                            <span class="param-opt"
+                                                >optional</span
+                                            >
+                                            — Grams of pure ethanol, not the
+                                            volume of the drink
                                         </li>
                                         <li>
                                             <code>logged_at</code>
@@ -1135,8 +1198,8 @@
                                     <ul>
                                         <li>
                                             <code>amount_ml</code>
-                                            <span class="param-opt"
-                                                >optional</span
+                                            <span class="param-req"
+                                                >required</span
                                             >
                                             — Amount in milliliters (integer,
                                             &gt; 0).
@@ -1270,8 +1333,8 @@
                                     <ul>
                                         <li>
                                             <code>weight</code>
-                                            <span class="param-opt"
-                                                >optional</span
+                                            <span class="param-req"
+                                                >required</span
                                             >
                                             — Body weight value, in `unit` (&gt;
                                             0).
@@ -1576,10 +1639,14 @@
                                     >
                                 </div>
                                 <p class="tool-desc">
-                                    Set your daily calorie, protein, carb, water
-                                    and macro targets, plus an optional target
-                                    body weight. Update only the fields you
-                                    name; the rest stay put.
+                                    Set your daily calorie, macro, fiber, sugar,
+                                    alcohol and water goals, plus an optional
+                                    target body weight. Calories, protein,
+                                    carbs, fat, fiber and water are targets to
+                                    reach; sugar and alcohol are limits to stay
+                                    under, and progress is worded accordingly.
+                                    Update only the fields you name; the rest
+                                    stay put.
                                 </p>
                                 <div class="tool-params">
                                     <span class="tool-params-label"
@@ -1619,6 +1686,37 @@
                                             clear.
                                         </li>
                                         <li>
+                                            <code>daily_fiber_g</code>
+                                            <span class="param-opt"
+                                                >optional</span
+                                            >
+                                            — Daily fiber target (grams), a
+                                            minimum to reach. Null to clear.
+                                        </li>
+                                        <li>
+                                            <code>daily_sugar_g</code>
+                                            <span class="param-opt"
+                                                >optional</span
+                                            >
+                                            — Daily limit for <b>total</b>
+                                            sugars (grams), a maximum to stay
+                                            under. Total sugars include the
+                                            sugar naturally in fruit and milk,
+                                            so public added-sugar guidance is a
+                                            much lower number. Null to clear.
+                                        </li>
+                                        <li>
+                                            <code>daily_alcohol_g</code>
+                                            <span class="param-opt"
+                                                >optional</span
+                                            >
+                                            — Daily alcohol limit in grams of
+                                            <b>pure ethanol</b>, a maximum to
+                                            stay under. One US standard drink is
+                                            14 g, one UK unit 7.9 g. Null to
+                                            clear.
+                                        </li>
+                                        <li>
                                             <code>daily_water_ml</code>
                                             <span class="param-opt"
                                                 >optional</span
@@ -1652,7 +1750,9 @@
                                 </div>
                                 <p class="tool-desc">
                                     See your current daily calorie and macro
-                                    targets.
+                                    targets, any fiber target and sugar limit,
+                                    and — if you track alcohol — your alcohol
+                                    limit.
                                 </p>
                                 <div class="tool-ex">
                                     <span class="tool-ex-label"
@@ -1830,8 +1930,8 @@
                                             <span class="param-opt"
                                                 >optional</span
                                             >
-                                            — Window end date YYYY-MM-DD
-                                            (default today).
+                                            — Window size in days (default 30,
+                                            min 7, max 365).
                                         </li>
                                     </ul>
                                 </div>
@@ -1957,6 +2057,92 @@
                                         >Try saying</span
                                     >
                                     <p>Are the widgets turned on?</p>
+                                </div>
+                            </article>
+
+                            <article
+                                class="tool-card"
+                                id="set_alcohol_tracking"
+                            >
+                                <div class="tool-head">
+                                    <code class="tool-name"
+                                        >set_alcohol_tracking</code
+                                    >
+                                    <span class="chip chip-setting"
+                                        >Setting</span
+                                    >
+                                </div>
+                                <p class="tool-desc">
+                                    Turn alcohol tracking on or off, and choose
+                                    whether drinks are counted in US standard
+                                    drinks or UK units. It's off by default, so
+                                    you have to ask for it. Turning it off again
+                                    hides alcohol from meals, goals and progress
+                                    and stops the file importer reading a file's
+                                    alcohol column — nothing already logged is
+                                    deleted, your CSV export still includes it,
+                                    and it reappears if you switch it back on.
+                                    The change applies from your next message,
+                                    with nothing to restart.
+                                </p>
+                                <div class="tool-params">
+                                    <span class="tool-params-label"
+                                        >Parameters</span
+                                    >
+                                    <ul>
+                                        <li>
+                                            <code>enabled</code>
+                                            <span class="param-req"
+                                                >required</span
+                                            >
+                                            — true to show alcohol in meals,
+                                            goals and progress, false to hide it
+                                        </li>
+                                        <li>
+                                            <code>drink_unit</code>
+                                            <span class="param-opt"
+                                                >optional</span
+                                            >
+                                            — Which standard drink to show
+                                            alongside the grams:
+                                            <code>us</code> (14 g per drink) or
+                                            <code>uk</code> (7.9 g per unit).
+                                            Defaults to <code>us</code>; grams
+                                            of pure ethanol are what's actually
+                                            stored.
+                                        </li>
+                                    </ul>
+                                </div>
+                                <div class="tool-ex">
+                                    <span class="tool-ex-label"
+                                        >Try saying</span
+                                    >
+                                    <p>
+                                        Start tracking my drinking, in UK units
+                                    </p>
+                                </div>
+                            </article>
+
+                            <article
+                                class="tool-card"
+                                id="get_alcohol_tracking"
+                            >
+                                <div class="tool-head">
+                                    <code class="tool-name"
+                                        >get_alcohol_tracking</code
+                                    >
+                                    <span class="chip chip-view">View</span>
+                                </div>
+                                <p class="tool-desc">
+                                    Check whether alcohol tracking is on, and
+                                    which standard drink your grams are shown
+                                    alongside.
+                                </p>
+                                <div class="tool-ex">
+                                    <span class="tool-ex-label"
+                                        >Try saying</span
+                                    >
+                                    <p>Am I tracking alcohol?</p>
                                 </div>
                             </article>
 

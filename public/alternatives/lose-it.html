@@ -108,7 +108,7 @@
                         "name": "Is Nutrition MCP a good Lose It! alternative?",
                         "acceptedAnswer": {
                             "@type": "Answer",
-                            "text": "If you want to track calories, macros, water, and weight without opening a separate app or searching a food database, yes. Instead of tapping through a database, you describe what you ate in plain language, send a photo, or scan a barcode, and your AI logs it — completely free and open source."
+                            "text": "If you want to track calories, macros — fiber and total sugar included — water, and weight without opening a separate app or searching a food database, yes. Instead of tapping through a database, you describe what you ate in plain language, send a photo, or scan a barcode, and your AI logs it — completely free and open source."
                         }
                     },
                     {
@@ -116,7 +116,7 @@
                         "name": "Can I import my Lose It! data?",
                         "acceptedAnswer": {
                             "@type": "Answer",
-                            "text": "Yes. Ask to import and an importer opens in the chat: you pick the CSV Lose It! exports, it's parsed in your browser rather than read by the AI, and you confirm a preview before anything is written. Lose It!'s export is recognised by name — rows flagged as deleted are skipped instead of resurrected, and its “n/a” cells are read as empty rather than as zeros. Re-importing the same file never creates duplicates. In clients without in-chat panels you can paste your export instead."
+                            "text": "Yes. Ask to import and an importer opens in the chat: you pick the CSV Lose It! exports, it's parsed in your browser rather than read by the AI, and you confirm a preview before anything is written. The date, food, meal, calories, protein, carbs, and fat map themselves, and fiber and total sugar do too when your export carries them. Lose It!'s export is recognised by name — rows flagged as deleted are skipped instead of resurrected, and its “n/a” cells are read as empty rather than as zeros. Re-importing the same file never creates duplicates. In clients without in-chat panels you can paste your export instead."
                         }
                     },
                     {
@@ -290,7 +290,8 @@
                             <p>
                                 Say &ldquo;oatmeal with banana and peanut
                                 butter&rdquo; — your AI estimates calories and
-                                macros and logs it. No database search.
+                                macros, fiber and total sugar included, and logs
+                                it. No database search.
                             </p>
                         </article>
                         <article class="card feature">
@@ -299,9 +300,10 @@
                             ></span>
                             <h3>Barcode scanning — free</h3>
                             <p>
-                                Send a product barcode and pull verified macros
-                                from Open Food Facts. No Premium subscription to
-                                unlock it.
+                                Send a product barcode and pull the label macros
+                                from Open Food Facts — fiber and sugar too,
+                                where the label lists them. No Premium
+                                subscription to unlock it.
                             </p>
                         </article>
                         <article class="card feature">
@@ -311,8 +313,11 @@
                             <h3>Weight &amp; goals</h3>
                             <p>
                                 Log body weight in kg or lb, set calorie, macro,
-                                and water targets, and track trends toward a
-                                goal weight.
+                                fiber, sugar, and water goals — fiber a target
+                                to reach, sugar a limit to stay under — and
+                                track trends toward a goal weight. Alcohol
+                                tracking is there too, opt-in and off unless you
+                                turn it on.
                             </p>
                         </article>
                         <article class="card feature">
@@ -394,8 +399,8 @@
                                 </li>
                                 <li>
                                     <i class="fa-solid fa-circle-check"></i>
-                                    Describe meals in plain language; macros
-                                    estimated for you
+                                    Describe meals in plain language; calories,
+                                    macros, fiber &amp; sugar estimated for you
                                 </li>
                                 <li>
                                     <i class="fa-solid fa-circle-check"></i>
@@ -475,11 +480,13 @@
                             Switching doesn't mean starting from zero. Ask to
                             import and an importer opens in the chat: you pick
                             the CSV Lose It! exports, it's parsed in your
-                            browser, the columns it recognises map themselves,
-                            and you confirm a preview of what will be added.
-                            It's a file picker and a preview, not a dictation
-                            exercise — on that path the AI never reads or
-                            retypes your rows.
+                            browser, the columns it recognises map themselves —
+                            the date, food, meal, calories, protein, carbs, and
+                            fat, plus fiber and total sugar where your export
+                            carries them — and you confirm a preview of what
+                            will be added. It's a file picker and a preview, not
+                            a dictation exercise — on that path the AI never
+                            reads or retypes your rows.
                         </p>
                         <p>
                             Two Lose It! specifics are handled deliberately. Its
@@ -628,13 +635,14 @@
                                 Is Nutrition MCP a good Lose It! alternative?
                             </summary>
                             <p>
-                                If you want to track calories, macros, water,
-                                and weight without opening a separate app or
-                                searching a food database, yes. Instead of
-                                tapping through a database, you describe what
-                                you ate in plain language, send a photo, or scan
-                                a barcode, and your AI logs it — completely free
-                                and open source.
+                                If you want to track calories, macros — fiber
+                                and total sugar included — water, and weight
+                                without opening a separate app or searching a
+                                food database, yes. Instead of tapping through a
+                                database, you describe what you ate in plain
+                                language, send a photo, or scan a barcode, and
+                                your AI logs it — completely free and open
+                                source.
                             </p>
                         </details>
                         <details>
@@ -644,13 +652,16 @@
                                 chat: you pick the CSV Lose It! exports, it's
                                 parsed in your browser rather than read by the
                                 AI, and you confirm a preview before anything is
-                                written. Lose It!'s export is recognised by name
-                                — rows flagged as deleted are skipped instead of
-                                resurrected, and its “n/a” cells are read as
-                                empty rather than as zeros. Re-importing the
-                                same file never creates duplicates. In clients
-                                without in-chat panels you can paste your export
-                                instead.
+                                written. The date, food, meal, calories,
+                                protein, carbs, and fat map themselves, and
+                                fiber and total sugar do too when your export
+                                carries them. Lose It!'s export is recognised by
+                                name — rows flagged as deleted are skipped
+                                instead of resurrected, and its “n/a” cells are
+                                read as empty rather than as zeros. Re-importing
+                                the same file never creates duplicates. In
+                                clients without in-chat panels you can paste
+                                your export instead.
                             </p>
                         </details>
                         <details>
