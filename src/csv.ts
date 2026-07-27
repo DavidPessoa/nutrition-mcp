@@ -807,15 +807,15 @@ export function sniffEnergyUnit(header: string, values: number[]): EnergyUnit {
 }
 
 /**
- * Convert an energy value to kcal.
+ * Convert an energy value to kcal, rounded to a whole number.
  *
- * kJ values are rounded to a whole number: the calories column is an integer in
- * the DB, so a fractional kcal is dropped downstream anyway, and rounding here
- * keeps the widget's preview and control totals identical to what the server
- * will store. kcal passes through untouched — including its decimals, which the
- * server is free to round itself.
+ * Both branches round, because the calories column is an integer in the DB:
+ * rounding here keeps the widget's preview and control totals identical to what
+ * the server stores. A kcal column is NOT exempt — Cronometer exports "Energy
+ * (kcal)" with two decimals, and passing those through used to make Postgres
+ * reject the row outright (22P02) rather than truncate it.
  */
 export function toKcal(value: number, unit: EnergyUnit): number {
-    if (unit === "kcal") return value;
+    if (unit === "kcal") return Math.round(value);
     return Math.round(value / KJ_PER_KCAL);
 }

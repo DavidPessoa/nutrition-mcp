@@ -6,6 +6,7 @@ import {
     isWeightUnit,
     pickWriteUnit,
     isPlausibleWeightGrams,
+    toStoredInteger,
     WEIGHT_UNITS,
 } from "./units.js";
 
@@ -95,4 +96,19 @@ test("isWeightUnit guards kg/lb only", () => {
     expect(isWeightUnit("")).toBe(false);
     expect(isWeightUnit(undefined)).toBe(false);
     for (const u of WEIGHT_UNITS) expect(isWeightUnit(u)).toBe(true);
+});
+
+test("toStoredInteger rounds fractional values for the integer columns", () => {
+    // The shipped bug this guards: a Cronometer "Energy (kcal)" cell like
+    // 388.54 reached an `integer` column and Postgres rejected the whole row
+    // with 22P02, so most of a backfill failed. Rounding, not rejecting.
+    expect(toStoredInteger(388.54)).toBe(389);
+    expect(toStoredInteger(2363.25)).toBe(2363);
+    expect(toStoredInteger(78.08)).toBe(78);
+    expect(toStoredInteger(0.5)).toBe(1);
+    // Whole numbers must pass through byte-identical: they are what every
+    // already-stored row was hashed from, so a shifted value here would break
+    // idempotency-key dedup for every past meal.
+    expect(toStoredInteger(300)).toBe(300);
+    expect(toStoredInteger(0)).toBe(0);
 });

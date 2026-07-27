@@ -24,6 +24,7 @@ import { z } from "zod";
 import type { MealInput, MealInsertResult } from "./supabase.js";
 import { dateInTz, zonedHourUtc, zonedWallClockToUtc } from "./tz.js";
 import { decodeEscapeSequences } from "./normalize.js";
+import { toStoredInteger } from "./units.js";
 
 export type MealType = MealInput["meal_type"];
 
@@ -732,7 +733,11 @@ export function validateRow(
         meal_type: mealType,
         logged_at: ts.value.iso,
     };
-    if (row.calories !== undefined) input.calories = row.calories;
+    // Rounded here rather than left to insertMeal so the dry-run echo and the
+    // per-row report show the number that will actually be stored — a fitness
+    // export's kcal column is routinely fractional (Cronometer's always is).
+    if (row.calories !== undefined)
+        input.calories = toStoredInteger(row.calories);
     if (row.protein_g !== undefined) input.protein_g = row.protein_g;
     if (row.carbs_g !== undefined) input.carbs_g = row.carbs_g;
     if (row.fat_g !== undefined) input.fat_g = row.fat_g;

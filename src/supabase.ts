@@ -1,7 +1,7 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { zonedDayStartUtc, zonedNextDayStartUtc } from "./tz.js";
 import { decodeEscapeSequences } from "./normalize.js";
-import { isWeightUnit, type WeightUnit } from "./units.js";
+import { isWeightUnit, toStoredInteger, type WeightUnit } from "./units.js";
 import { isDrinkUnit, type DrinkUnit } from "./alcohol.js";
 import { escapeLikePattern, tokenizeQuery } from "./search.js";
 
@@ -182,12 +182,21 @@ export async function insertMeal(
 ): Promise<MealInsertResult> {
     const sb = getSupabase();
 
+    // calories is an integer column and Postgres rejects a fractional value
+    // outright (22P02), so round before anything else reads the input — the
+    // digest below included, or re-logging the same meal would derive a key
+    // from 388.54 while the stored row said 389 and the dedup would miss.
+    const meal: MealInput =
+        input.calories == null
+            ? input
+            : { ...input, calories: toStoredInteger(input.calories) };
+
     // Resolve logged_at once so the digest and the persisted row agree.
-    const loggedAt = input.logged_at ?? new Date().toISOString();
+    const loggedAt = meal.logged_at ?? new Date().toISOString();
     // Always populate the key: use the client's if given, otherwise derive a
     // stable one from the request content (see mealIdempotencyKey).
     const idempotencyKey =
-        input.idempotency_key ?? mealIdempotencyKey(userId, input, loggedAt);
+        meal.idempotency_key ?? mealIdempotencyKey(userId, meal, loggedAt);
 
     const { data: existing, error: selErr } = await sb
         .from("meals")
@@ -202,18 +211,18 @@ export async function insertMeal(
         .from("meals")
         .insert({
             user_id: userId,
-            description: decodeEscapeSequences(input.description),
-            meal_type: input.meal_type,
-            calories: input.calories ?? null,
-            protein_g: input.protein_g ?? null,
-            carbs_g: input.carbs_g ?? null,
-            fat_g: input.fat_g ?? null,
-            fiber_g: input.fiber_g ?? null,
-            sugar_g: input.sugar_g ?? null,
-            alcohol_g: input.alcohol_g ?? null,
+            description: decodeEscapeSequences(meal.description),
+            meal_type: meal.meal_type,
+            calories: meal.calories ?? null,
+            protein_g: meal.protein_g ?? null,
+            carbs_g: meal.carbs_g ?? null,
+            fat_g: meal.fat_g ?? null,
+            fiber_g: meal.fiber_g ?? null,
+            sugar_g: meal.sugar_g ?? null,
+            alcohol_g: meal.alcohol_g ?? null,
             logged_at: loggedAt,
             notes:
-                input.notes != null ? decodeEscapeSequences(input.notes) : null,
+                meal.notes != null ? decodeEscapeSequences(meal.notes) : null,
             idempotency_key: idempotencyKey,
         })
         .select()
@@ -402,7 +411,9 @@ export async function updateMeal(
     if (fields.description !== undefined)
         update.description = decodeEscapeSequences(fields.description);
     if (fields.meal_type !== undefined) update.meal_type = fields.meal_type;
-    if (fields.calories !== undefined) update.calories = fields.calories;
+    // Integer column — see toStoredInteger.
+    if (fields.calories !== undefined)
+        update.calories = toStoredInteger(fields.calories);
     if (fields.protein_g !== undefined) update.protein_g = fields.protein_g;
     if (fields.carbs_g !== undefined) update.carbs_g = fields.carbs_g;
     if (fields.fat_g !== undefined) update.fat_g = fields.fat_g;
@@ -605,14 +616,23 @@ export async function upsertNutritionGoals(
         .upsert(
             {
                 user_id: userId,
-                daily_calories: input.daily_calories ?? null,
+                // daily_calories and daily_water_ml are integer columns; the
+                // gram targets are numeric(6,2). See toStoredInteger — a water
+                // goal converted from "half a gallon" arrives fractional.
+                daily_calories:
+                    input.daily_calories == null
+                        ? null
+                        : toStoredInteger(input.daily_calories),
                 daily_protein_g: input.daily_protein_g ?? null,
                 daily_carbs_g: input.daily_carbs_g ?? null,
                 daily_fat_g: input.daily_fat_g ?? null,
                 daily_fiber_g: input.daily_fiber_g ?? null,
                 daily_sugar_g: input.daily_sugar_g ?? null,
                 daily_alcohol_g: input.daily_alcohol_g ?? null,
-                daily_water_ml: input.daily_water_ml ?? null,
+                daily_water_ml:
+                    input.daily_water_ml == null
+                        ? null
+                        : toStoredInteger(input.daily_water_ml),
                 target_weight_g: input.target_weight_g ?? null,
                 updated_at: new Date().toISOString(),
             },

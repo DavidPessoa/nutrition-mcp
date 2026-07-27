@@ -726,7 +726,14 @@ test("toKcal divides kJ by 4.184 and rounds to a whole kcal", () => {
     expect(toKcal(920, "kj")).toBe(220); // 219.88 -> a Cronometer-sized meal
     expect(toKcal(8368, "kj")).toBe(2000); // exactly 2000 kcal
     expect(toKcal(0, "kj")).toBe(0);
-    // kcal passes through untouched, decimals included.
+});
+
+test("toKcal rounds a kcal column too", () => {
+    // Not a formality: Cronometer's "Energy (kcal)" carries two decimals, and
+    // an integer column rejects those outright (22P02) instead of truncating,
+    // so a passed-through 388.54 failed the whole row.
     expect(toKcal(220, "kcal")).toBe(220);
-    expect(toKcal(219.88, "kcal")).toBe(219.88);
+    expect(toKcal(388.54, "kcal")).toBe(389);
+    expect(toKcal(219.88, "kcal")).toBe(220);
+    expect(toKcal(0.4, "kcal")).toBe(0);
 });
