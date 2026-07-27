@@ -258,6 +258,43 @@ test("validateRow produces a MealInput ready for insertMeal", () => {
     expect("carbs_g" in v.resolved.input).toBe(false);
 });
 
+test("validateRow rounds fractional calories to the integer column", () => {
+    // Every Cronometer export writes "Energy (kcal)" with two decimals, and
+    // meals.calories is `integer` — Postgres rejects 388.54 outright (22P02)
+    // rather than truncating it, which failed most rows of a real backfill.
+    // Rounded here rather than at insert time so the dry-run echo the user
+    // approves shows the number that will actually be stored.
+    const v = validateRow(
+        row({ source_line: 2, calories: 388.54, protein_g: 12.35 }),
+        0,
+        { tz: TZ, nowMs: NOW },
+        undefined,
+    );
+    expect(v.ok).toBe(true);
+    if (!v.ok) return;
+    expect(v.resolved.input.calories).toBe(389);
+    // Macro columns are `numeric`, so their decimals must survive untouched.
+    expect(v.resolved.input.protein_g).toBe(12.35);
+});
+
+test("rows differing only below the kcal rounding boundary both import", async () => {
+    // 388.11 and 388.42 both store as 388, so rounding makes their content
+    // digests collide where the raw values would not have. The per-call
+    // occurrence ordinal is what keeps them two rows rather than one silently
+    // deduplicated row.
+    const { deps, inserted } = makeStore();
+    const result = await runImport(
+        args([
+            row({ source_line: 2, calories: 388.11 }),
+            row({ source_line: 3, calories: 388.42 }),
+        ]),
+        deps,
+    );
+    expect(result.summary.created).toBe(2);
+    expect(result.summary.deduplicated).toBe(0);
+    expect(inserted.map((m) => m.calories)).toEqual([388, 388]);
+});
+
 test("validateRow carries fiber, sugar and alcohol through to the MealInput", () => {
     const v = validateRow(
         row({ source_line: 4, fiber_g: 4.5, sugar_g: 12, alcohol_g: 14 }),

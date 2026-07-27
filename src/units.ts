@@ -1,6 +1,8 @@
-// Weight unit handling. Weight is stored canonically as integer grams; these
-// pure helpers convert between grams and the user-facing units (kg / lb) so all
-// conversion happens server-side rather than being delegated to the model.
+// Unit handling for the columns that are stored as whole numbers. Weight is
+// stored canonically as integer grams; these pure helpers convert between grams
+// and the user-facing units (kg / lb) so all conversion happens server-side
+// rather than being delegated to the model. Energy is stored as whole kcal —
+// see toStoredCalories at the bottom.
 
 export type WeightUnit = "kg" | "lb";
 
@@ -67,4 +69,27 @@ export function pickWriteUnit(
         );
     }
     return unit;
+}
+
+/**
+ * Round an energy or volume value to what its column can actually hold.
+ *
+ * `meals.calories`, `nutrition_goals.daily_calories` and
+ * `nutrition_goals.daily_water_ml` are `integer` columns, so Postgres rejects a
+ * fractional value outright — `22P02 invalid input syntax for type integer:
+ * "388.54"` — and the whole write fails. Fractional values are not exotic: Open
+ * Food Facts returns decimal kcal from lookup_barcode, and Cronometer's
+ * "Energy (kcal)" column is decimal in every export, so a Cronometer backfill
+ * used to fail on most of its rows.
+ *
+ * Every write path rounds rather than rejecting. A tenth of a kcal is noise
+ * against numbers that are estimates to begin with, so losing it is strictly
+ * better than losing the row — and a schema-level `.int()` would reject the
+ * caller's most common input for no benefit.
+ *
+ * Callers must round BEFORE deriving an idempotency key, so that the key and
+ * the stored row describe the same meal.
+ */
+export function toStoredInteger(value: number): number {
+    return Math.round(value);
 }
