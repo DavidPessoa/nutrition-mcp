@@ -366,6 +366,18 @@ export const TOTALS_ITEM = z.object({
     water_ml: z.number(),
 });
 
+// get_trends' per-day series shape: like TOTALS_ITEM, but fiber_g/sugar_g are
+// nullable too. Everywhere else a day's totals are a real sum for that one
+// day, so 0 is unambiguous — but the trends widget re-averages this series
+// CLIENT-SIDE across a slice of days (see trends.html's avgOf), and there a
+// summed 0 on a day that never recorded fiber/sugar is indistinguishable from
+// a real zero. Null is the "not recorded" signal, built by trendsDayPayloadOf.
+export const TRENDS_DAY_ITEM = TOTALS_ITEM.extend({
+    date: z.string(),
+    fiber_g: z.number().nullable(),
+    sugar_g: z.number().nullable(),
+});
+
 // Which standard-drink convention the widget should render alcohol_g in. The
 // payloads carry canonical grams, so without this a UK user saw "US drinks" in
 // the widget while the text output beside it said "UK units". Null doubles as
@@ -430,6 +442,46 @@ export function totalsPayloadOf(totals: DailyTotals, alcohol: AlcoholDisplay) {
         sugar_g: Math.round(totals.sugar_g * 10) / 10,
         alcohol_g: alcohol ? Math.round(totals.alcohol_g * 10) / 10 : null,
         water_ml: totals.water_ml,
+    };
+}
+
+// get_trends ships this per day in its `days` series, which the widget slices
+// to 7/14/30 and re-averages CLIENT-SIDE (see trends.html's avgOf) instead of
+// round-tripping to the server. totalsPayloadOf sums fiber/sugar/alcohol with
+// `?? 0`, so a day that never recorded them is indistinguishable from a real
+// zero — the widget's average then divides by every day in the slice instead
+// of the covered ones, drifting from the text output's `coveredSeries` rule
+// (src/insights.ts). Null here is that missing-vs-zero signal, mirroring
+// dayCarries/coveredDailyAverage; alcohol_g can already be null for tracking
+// being off, which takes precedence over the per-day coverage null.
+export function trendsDayPayloadOf(
+    bucket: DailyBucket,
+    alcohol: AlcoholDisplay,
+) {
+    const totals = totalsPayloadOf(
+        {
+            calories: bucket.calories,
+            protein_g: bucket.protein_g,
+            carbs_g: bucket.carbs_g,
+            fat_g: bucket.fat_g,
+            fiber_g: bucket.fiber_g,
+            sugar_g: bucket.sugar_g,
+            alcohol_g: bucket.alcohol_g,
+            water_ml: bucket.waterMl,
+        },
+        alcohol,
+    );
+    return {
+        date: bucket.date,
+        ...totals,
+        fiber_g: dayCarries(bucket.meals, "fiber_g") ? totals.fiber_g : null,
+        sugar_g: dayCarries(bucket.meals, "sugar_g") ? totals.sugar_g : null,
+        alcohol_g:
+            totals.alcohol_g == null
+                ? null
+                : dayCarries(bucket.meals, "alcohol_g")
+                  ? totals.alcohol_g
+                  : null,
     };
 }
 
@@ -3448,7 +3500,7 @@ export function registerTools(
                 drink_unit: DRINK_UNIT_FIELD,
                 goals: GOALS_ITEM.nullable(),
                 // Up to 30 days of daily series; the widget slices to 7/14/30.
-                days: z.array(TOTALS_ITEM.extend({ date: z.string() })),
+                days: z.array(TRENDS_DAY_ITEM),
             },
             // Link the tool to its interactive trends UI (MCP Apps).
             ...uiMeta(TRENDS_WIDGET_URI),
@@ -3503,24 +3555,14 @@ export function registerTools(
                                 : 30,
                             drink_unit: alcohol,
                             goals: goalsPayload,
-                            // Rounded through totalsPayloadOf so the series is
-                            // shaped exactly like every other totals payload.
-                            days: seriesBuckets.map((b) => ({
-                                date: b.date,
-                                ...totalsPayloadOf(
-                                    {
-                                        calories: b.calories,
-                                        protein_g: b.protein_g,
-                                        carbs_g: b.carbs_g,
-                                        fat_g: b.fat_g,
-                                        fiber_g: b.fiber_g,
-                                        sugar_g: b.sugar_g,
-                                        alcohol_g: b.alcohol_g,
-                                        water_ml: b.waterMl,
-                                    },
-                                    alcohol,
-                                ),
-                            })),
+                            // Rounded through trendsDayPayloadOf, which nulls
+                            // out fiber/sugar/alcohol on days that didn't
+                            // record them so the widget's client-side average
+                            // (avgOf in trends.html) can skip them instead of
+                            // counting a no-data day as a real zero.
+                            days: seriesBuckets.map((b) =>
+                                trendsDayPayloadOf(b, alcohol),
+                            ),
                         },
                     };
                 },

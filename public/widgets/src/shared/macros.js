@@ -204,11 +204,18 @@ function macroLabelGoal(m, b) {
 // The sub-components of one macro that are worth showing: fiber and sugar under
 // carbs. Same rule the water bar uses — an untracked metric is noise rather
 // than a zero, so a sub only appears once it has data or a goal of its own.
+//
+// `null` is not "no data yet, treat as zero" — it is the covered-days signal
+// (see trendsDayPayloadOf / avgOf): a range with zero covered days for this
+// nutrient has nothing to average, so the sub is dropped entirely even when a
+// goal is set, matching computeTrends/formatStatLine suppressing the whole
+// section rather than printing "0g of 30g target".
 function subMacrosOf(m, ctx) {
     return MACROS.filter(
         (s) =>
             s.role === "sub" &&
             s.parent === m.key &&
+            ctx.vals[s.key] != null &&
             ((ctx.vals[s.key] ?? 0) > 0 ||
                 (ctx.goal ? (ctx.goal[s.key] ?? null) != null : false)),
     );
@@ -310,11 +317,14 @@ function macroBar(m, ctx) {
 // Alcohol — a plain stat line, never a ring: grams with the drink count as the
 // intuitive gloss ("2.1 US drinks · 28 g"), plus the limit when one is set.
 //
-// null vs 0 is load-bearing. `alcohol_g: null` is how every payload in
-// src/mcp.ts says "this user does not track alcohol" (see AlcoholDisplay), so
-// the line is dropped entirely. A 0 from a user who DOES track it is a real
-// alcohol-free day and stays on screen — unlike the water bar, whose 0 means
-// "never logged any" because water has no such opt-in to distinguish the two.
+// null vs 0 is load-bearing. `alcohol_g: null` is how a payload in src/mcp.ts
+// says "nothing to show here" — either the user does not track alcohol at all
+// (see AlcoholDisplay), or (trends' per-day/averaged series only) this day or
+// window has zero covered days for it (see trendsDayPayloadOf) — so the line
+// is dropped entirely either way. A 0 from a user who DOES track it, on a day
+// or window that DOES cover it, is a real alcohol-free reading and stays on
+// screen — unlike the water bar, whose 0 means "never logged any" because
+// water has no such opt-in to distinguish the two.
 function macroStat(m, ctx) {
     const grams = ctx.vals?.[m.key];
     if (grams == null) return "";

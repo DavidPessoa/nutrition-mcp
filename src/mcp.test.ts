@@ -9,6 +9,7 @@ import {
     mealBreakdown,
     goalsPayloadOf,
     totalsPayloadOf,
+    trendsDayPayloadOf,
     hasActiveTarget,
     nutrientPresence,
     rangeAverages,
@@ -18,6 +19,7 @@ import {
     START_IMPORT_OUTPUT_SCHEMA,
     GOALS_ITEM,
     TOTALS_ITEM,
+    TRENDS_DAY_ITEM,
     MEAL_BREAKDOWN_ITEM,
     MAX_CALORIES,
     MAX_MACRO_G,
@@ -732,6 +734,84 @@ describe("structuredContent literals satisfy their schemas", () => {
 
     test("no goals at all is null, not a half-filled object", () => {
         expect(goalsPayloadOf(null, "us")).toBeNull();
+    });
+});
+
+// Regression coverage for https://github.com/akutishevsky/nutrition-mcp/issues/67:
+// the trends widget re-averaged fiber/sugar/alcohol over every day in a slice
+// instead of only the days that recorded them, because a day's per-day payload
+// summed those nutrients with `?? 0` just like every other totals payload — so
+// the widget's client-side average (trends.html's avgOf) could never tell "not
+// recorded" from "recorded zero". trendsDayPayloadOf is the fix: it nulls out
+// fiber_g/sugar_g/alcohol_g on a day that dayCarries says didn't record them.
+describe("trendsDayPayloadOf", () => {
+    const bucketWith = (mealsForDay: Meal[]): DailyBucket => ({
+        date: "2026-07-20",
+        meals: mealsForDay,
+        waterMl: 1000,
+        calories: mealsForDay.reduce((s, m) => s + (m.calories ?? 0), 0),
+        protein_g: 25,
+        carbs_g: 90,
+        fat_g: 20,
+        fiber_g: mealsForDay.reduce((s, m) => s + (m.fiber_g ?? 0), 0),
+        sugar_g: mealsForDay.reduce((s, m) => s + (m.sugar_g ?? 0), 0),
+        alcohol_g: mealsForDay.reduce((s, m) => s + (m.alcohol_g ?? 0), 0),
+        mealTypes: new Set(["dinner"]),
+    });
+
+    test("nulls fiber/sugar/alcohol on a day that never recorded them", () => {
+        const bucket = bucketWith([
+            meal({ fiber_g: null, sugar_g: null, alcohol_g: null }),
+        ]);
+        const payload = trendsDayPayloadOf(bucket, "us");
+        expect(payload.fiber_g).toBeNull();
+        expect(payload.sugar_g).toBeNull();
+        expect(payload.alcohol_g).toBeNull();
+        // Everything else sums normally — only the three partial nutrients
+        // get the covered-days treatment.
+        expect(payload.calories).toBe(bucket.calories);
+        expect(() => TRENDS_DAY_ITEM.parse(payload)).not.toThrow();
+    });
+
+    test("keeps a real recorded zero as 0, not null", () => {
+        const bucket = bucketWith([
+            meal({ fiber_g: 0, sugar_g: 0, alcohol_g: 0 }),
+        ]);
+        const payload = trendsDayPayloadOf(bucket, "us");
+        expect(payload.fiber_g).toBe(0);
+        expect(payload.sugar_g).toBe(0);
+        expect(payload.alcohol_g).toBe(0);
+    });
+
+    test("alcohol tracking off nulls alcohol_g regardless of coverage", () => {
+        const bucket = bucketWith([meal({ alcohol_g: 14 })]);
+        expect(trendsDayPayloadOf(bucket, null).alcohol_g).toBeNull();
+    });
+
+    test("a day with no meals at all is null across all three partial nutrients", () => {
+        const payload = trendsDayPayloadOf(bucketWith([]), "us");
+        expect(payload.fiber_g).toBeNull();
+        expect(payload.sugar_g).toBeNull();
+        expect(payload.alcohol_g).toBeNull();
+        expect(() => TRENDS_DAY_ITEM.parse(payload)).not.toThrow();
+    });
+
+    // The exact drift the issue reported: fiber recorded on 5 of 30 days at
+    // 30 g averaged out to 5 g/day in the widget (150 / 30) instead of 30
+    // (150 / 5). Once uncovered days are null, filtering them out before
+    // averaging — what the fixed client-side avgOf now does — recovers 30.
+    test("covered-days average recovers the true figure once uncovered days are null", () => {
+        const covered = Array.from({ length: 5 }, () =>
+            trendsDayPayloadOf(bucketWith([meal({ fiber_g: 30 })]), "us"),
+        );
+        const uncovered = Array.from({ length: 25 }, () =>
+            trendsDayPayloadOf(bucketWith([meal({ fiber_g: null })]), "us"),
+        );
+        const days = [...uncovered, ...covered];
+        const seen = days.filter((d) => d.fiber_g != null);
+        expect(seen).toHaveLength(5);
+        const avg = seen.reduce((s, d) => s + d.fiber_g!, 0) / seen.length;
+        expect(avg).toBe(30);
     });
 });
 
