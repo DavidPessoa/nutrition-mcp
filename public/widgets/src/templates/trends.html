@@ -10,8 +10,10 @@
   Shown after get_trends. The tool sends up to 30 days of daily series, and the
   7 / 14 / 30-day toggle slices it CLIENT-SIDE and re-renders — no host round-trip,
   so switching ranges is instant. Each range shows a calories/day line chart and
-  the trailing average vs goal as rings (average over the window, empty days
-  counted as 0, matching the tool's text output).
+  the trailing average vs goal as rings (average over the window; calories,
+  protein, carbs, fat and water count empty days as 0, while fiber, sugar and
+  alcohol average only over the days that recorded them — see avgOf below —
+  matching the tool's text output).
 
   Data arrives as the `structuredContent` of the get_trends tool result; the
   shared bridge (shared/bridge.js) reads it across host conventions and calls
@@ -64,6 +66,12 @@
                     date = d.toISOString().slice(0, 10);
                     const w = Math.sin(i / 3);
                     const skip = i === 4 || i === 11; // a couple of unlogged days
+                    // A few extra days with meals logged but no fiber/sugar on
+                    // them — pre-feature-style rows — so the sample exercises
+                    // the "recorded on some but not all days" case that this
+                    // widget must average correctly (null, not 0).
+                    const noFiberSugar =
+                        !skip && (i === 2 || i === 18 || i === 25);
                     const r = (n) => Math.round(n * 10) / 10;
                     days.push({
                         date,
@@ -71,12 +79,13 @@
                         protein_g: skip ? 0 : Math.round(150 + w * 18),
                         carbs_g: skip ? 0 : Math.round(212 + w * 28),
                         fat_g: skip ? 0 : Math.round(68 + w * 9),
-                        fiber_g: skip ? 0 : r(26 + w * 6),
-                        sugar_g: skip ? 0 : r(58 + w * 14),
-                        // Alcohol tracking ON in this sample, and 0 on most
-                        // days — a real alcohol-free day, which still shows.
-                        // null on every day (tracking off) hides the stat line.
-                        alcohol_g: skip || i % 7 ? 0 : r(13.9 + w * 4),
+                        fiber_g: skip || noFiberSugar ? null : r(26 + w * 6),
+                        sugar_g: skip || noFiberSugar ? null : r(58 + w * 14),
+                        // Alcohol tracking ON in this sample: null on an
+                        // unlogged day (no data), 0 on a real alcohol-free
+                        // day (still shows), a value on the rest. null on
+                        // every day (tracking off) hides the stat line.
+                        alcohol_g: skip ? null : i % 7 ? 0 : r(13.9 + w * 4),
                         water_ml: skip ? 0 : Math.round(2200 + w * 320),
                     });
                 }
@@ -115,8 +124,14 @@
                         })[c],
                 );
             }
-            // Trailing average over exactly the days shown: sum / count, empty
-            // days included as 0 — matches the tool's text trailingAverage.
+            // Trailing average over the days that actually carry this key:
+            // sum / count of non-null days — matches computeTrends'
+            // coveredSeries (src/insights.ts), which is where the tool's text
+            // trailingAverage comes from. Calories/protein/carbs/fat/water are
+            // never null (every day counts, as always), but fiber_g, sugar_g
+            // and alcohol_g arrive null on a day that never recorded them —
+            // dividing by days.length there would count a no-data day as a
+            // real zero, exactly the drift this fixes.
             //
             // A key that is null on EVERY day averages to null, not 0. That is
             // the alcohol opt-in: alcohol_g arrives null when the user has
@@ -132,7 +147,7 @@
                     sum += d[key] || 0;
                 }
                 if (!seen) return null;
-                return sum / days.length;
+                return sum / seen;
             }
 
             // MACROS + the macro panel builder (calories hero, protein/carbs/fat
