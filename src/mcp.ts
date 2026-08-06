@@ -983,8 +983,20 @@ export function registerTools(
     // buildMcpServer registers tools per request, this makes widget display a
     // per-user setting: with widgets off, tools/list advertises no UI link, so
     // hosts render no widget. Spreads to nothing when disabled.
+    // "openai/outputTemplate" mirrors ui.resourceUri for ChatGPT: it has honored
+    // the MCP Apps standard since 2026-02-22, but still reads the pre-standard
+    // Apps SDK alias on some surfaces, and hosts that know neither key ignore
+    // both. The two values must stay identical — ChatGPT drops the widget
+    // silently if the alias points at an unregistered URI.
     const uiMeta = (resourceUri: string) =>
-        widgetsEnabled ? { _meta: { ui: { resourceUri } } } : {};
+        widgetsEnabled
+            ? {
+                  _meta: {
+                      ui: { resourceUri },
+                      "openai/outputTemplate": resourceUri,
+                  },
+              }
+            : {};
 
     server.registerTool(
         "log_meal",
@@ -1248,6 +1260,10 @@ export function registerTools(
                 destructiveHint: false,
                 idempotentHint: true,
             },
+            // ChatGPT's legacy Apps SDK path only lets a widget call tools
+            // flagged widgetAccessible; without it the import-meals panel there
+            // cannot reach its write path. Other hosts ignore the key.
+            _meta: { "openai/widgetAccessible": true },
         },
         async (args) => {
             return withAnalytics(
