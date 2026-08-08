@@ -2372,36 +2372,29 @@
                     </div>
 
                     <div class="stat-row" id="stat-row">
-                        <div class="stat">
-                            <span class="stat-num" data-stat="food_logs"
+                        <div class="odo-hero">
+                            <span
+                                class="odo"
+                                data-odo="total_calories"
+                                role="img"
+                                aria-label="Calories tracked"
                                 >—</span
                             >
-                            <span class="stat-cap">Food logs</span>
+                            <span class="odo-cap">Calories tracked</span>
                         </div>
-                        <div class="stat">
-                            <span class="stat-num" data-stat="total_calories"
-                                >—</span
+                        <p class="odo-rest">
+                            <span
+                                ><b data-stat="food_logs">—</b> food logs</span
                             >
-                            <span class="stat-cap">Calories tracked</span>
-                        </div>
-                        <div class="stat">
-                            <span class="stat-num" data-stat="total_protein_g"
-                                >—</span
+                            <span
+                                ><b data-stat="total_protein_g">—</b>
+                                protein</span
                             >
-                            <span class="stat-cap">Protein</span>
-                        </div>
-                        <div class="stat">
-                            <span class="stat-num" data-stat="total_carbs_g"
-                                >—</span
+                            <span
+                                ><b data-stat="total_carbs_g">—</b> carbs</span
                             >
-                            <span class="stat-cap">Carbs</span>
-                        </div>
-                        <div class="stat">
-                            <span class="stat-num" data-stat="total_fat_g"
-                                >—</span
-                            >
-                            <span class="stat-cap">Fat</span>
-                        </div>
+                            <span><b data-stat="total_fat_g">—</b> fat</span>
+                        </p>
                     </div>
 
                     <div class="map-block" id="map-block">
@@ -3009,12 +3002,6 @@
                 function fmtInt(n) {
                     return Math.round(n).toLocaleString("en-US");
                 }
-                function fmtCompact(n) {
-                    return new Intl.NumberFormat("en-US", {
-                        notation: "compact",
-                        maximumFractionDigits: 1,
-                    }).format(Math.round(n));
-                }
                 function fmtKg(n) {
                     return fmtInt(n) + " kg";
                 }
@@ -3024,12 +3011,6 @@
                             return v;
                         },
                         fmt: fmtInt,
-                    },
-                    total_calories: {
-                        to: function (v) {
-                            return v;
-                        },
-                        fmt: fmtCompact,
                     },
                     timezones: {
                         to: function (v) {
@@ -3071,6 +3052,68 @@
                     }
                     requestAnimationFrame(step);
                 }
+                // ---------- odometer ----------
+                // Builds one reel per digit of the real total, so the digits
+                // that roll are the digits that are true — nothing is invented
+                // to make the motion look better. Reels further right spin
+                // through more cycles and take longer, so the leading digits
+                // settle first and the tail is still turning, the way a
+                // mechanical counter reads.
+                var ODO_MAX_CYCLES = 6;
+                function setOdometer(el, value) {
+                    var text = fmtInt(value);
+                    el.setAttribute("aria-label", text + " calories tracked");
+                    el.textContent = "";
+                    if (reduceMotion) {
+                        el.textContent = text;
+                        return;
+                    }
+                    var strips = [],
+                        i = 0;
+                    text.split("").forEach(function (ch) {
+                        if (ch < "0" || ch > "9") {
+                            var sep = document.createElement("span");
+                            sep.className = "odo-sep";
+                            sep.textContent = ch;
+                            el.appendChild(sep);
+                            return;
+                        }
+                        var cycles = Math.min(ODO_MAX_CYCLES, 2 + i);
+                        var reel = document.createElement("span");
+                        reel.className = "odo-reel";
+                        var strip = document.createElement("span");
+                        strip.className = "odo-strip";
+                        for (var c = 0; c <= cycles; c++) {
+                            for (var d = 0; d < 10; d++) {
+                                var cell = document.createElement("span");
+                                cell.textContent = d;
+                                strip.appendChild(cell);
+                            }
+                        }
+                        strip.style.transitionDuration = 1.1 + i * 0.12 + "s";
+                        // Land on a cell whose face is ch, `cycles` turns down.
+                        // Expressed as a share of the strip's own height so the
+                        // reel stays in register at any font size.
+                        var cells = (cycles + 1) * 10;
+                        var stop = cycles * 10 + Number(ch);
+                        strips.push([strip, (stop / cells) * 100]);
+                        reel.appendChild(strip);
+                        el.appendChild(reel);
+                        i++;
+                    });
+                    // Paint at rest first. Moving in the same frame as the
+                    // insert gives the strip no start value to animate from, so
+                    // the transition is skipped and the number just appears.
+                    requestAnimationFrame(function () {
+                        requestAnimationFrame(function () {
+                            strips.forEach(function (s) {
+                                s[0].style.transform =
+                                    "translateY(-" + s[1] + "%)";
+                            });
+                        });
+                    });
+                }
+
                 function setStats(stats) {
                     Object.keys(FORMATS).forEach(function (key) {
                         if (typeof stats[key] !== "number") return;
@@ -3081,6 +3124,12 @@
                                 animate(el, c.to(stats[key]), c.fmt);
                             });
                     });
+                    document
+                        .querySelectorAll("[data-odo]")
+                        .forEach(function (el) {
+                            var v = stats[el.dataset.odo];
+                            if (typeof v === "number") setOdometer(el, v);
+                        });
                 }
 
                 // ---------- world map ----------
@@ -3088,8 +3137,30 @@
                 // UTC-equivalent zones all resolve to the map center [500,250]
                 // (lon 0, lat 0 — open ocean), so plotting them drops a bogus
                 // dot in the middle of the map. Skip them.
-                var UTC_TZS = { UTC: 1, "Etc/UTC": 1, "Etc/GMT": 1 };
-                function buildMap(mapData, activeTzs) {
+                // gen-map-data.ts parks all of these on null island, so every
+                // one of them has to be skipped — GMT and Etc/Greenwich were
+                // missing here, and a profile on either would have drawn a dot
+                // in the middle of the Atlantic.
+                var UTC_TZS = {
+                    UTC: 1,
+                    "Etc/UTC": 1,
+                    "Etc/GMT": 1,
+                    GMT: 1,
+                    "Etc/Greenwich": 1,
+                };
+                // [halo, core] radius per level. Radii step by roughly √2 in
+                // area terms rather than linearly, because a circle is read by
+                // its area: doubling the radius would look like four times the
+                // share. Level 3 is the old fixed size, so a typical dot is
+                // unchanged and only the extremes move.
+                var TZ_RADII = [
+                    [5.5, 2.0],
+                    [7.0, 2.5],
+                    [9.0, 3.2],
+                    [11.5, 3.9],
+                    [14.5, 4.7],
+                ];
+                function buildMap(mapData, tzLevels) {
                     var svg = document.getElementById("world-svg");
                     if (!svg || !mapData) return;
                     var landFrag = document.createDocumentFragment();
@@ -3102,28 +3173,49 @@
                         landFrag.appendChild(c);
                     });
                     svg.appendChild(landFrag);
+                    function sizeDot(dot, level) {
+                        var r = TZ_RADII[level - 1];
+                        dot.halo.setAttribute("r", r[0]);
+                        dot.core.setAttribute("r", r[1]);
+                        dot.level = level;
+                    }
                     var seen = {};
-                    (activeTzs || []).forEach(function (tz, i) {
+                    var plotted = 0;
+                    Object.keys(tzLevels || {}).forEach(function (tz) {
                         if (UTC_TZS[tz]) return;
                         var pt = mapData.tz[tz];
                         if (!pt) return;
+                        var level = Math.min(
+                            TZ_RADII.length,
+                            Math.max(1, Math.round(tzLevels[tz]) || 1),
+                        );
+                        // Alias spellings (Europe/Kiev vs Europe/Kyiv) project
+                        // to the same coordinates and so share one dot. Keep
+                        // the larger level rather than whichever name came
+                        // first, so the dot is never smaller than the busiest
+                        // zone standing on it.
                         var k = pt[0] + "," + pt[1];
-                        if (seen[k]) return;
-                        seen[k] = true;
+                        if (seen[k]) {
+                            if (level > seen[k].level) sizeDot(seen[k], level);
+                            return;
+                        }
                         var halo = document.createElementNS(SVGNS, "circle");
                         halo.setAttribute("cx", pt[0]);
                         halo.setAttribute("cy", pt[1]);
-                        halo.setAttribute("r", "9");
                         halo.setAttribute("class", "tz-halo");
                         if (!reduceMotion)
-                            halo.style.animationDelay = (i % 6) * 0.45 + "s";
+                            halo.style.animationDelay =
+                                (plotted % 6) * 0.45 + "s";
                         var core = document.createElementNS(SVGNS, "circle");
                         core.setAttribute("cx", pt[0]);
                         core.setAttribute("cy", pt[1]);
-                        core.setAttribute("r", "3.2");
                         core.setAttribute("class", "tz-core");
+                        var dot = { halo: halo, core: core, level: 0 };
+                        sizeDot(dot, level);
+                        seen[k] = dot;
                         svg.appendChild(halo);
                         svg.appendChild(core);
+                        plotted++;
                     });
                 }
 
@@ -3140,7 +3232,7 @@
                     .then(function (res) {
                         var stats = res[0];
                         setStats(stats);
-                        buildMap(res[1], stats.timezone_list);
+                        buildMap(res[1], stats.timezone_levels);
                     })
                     .catch(function () {
                         var row = document.getElementById("stat-row");
