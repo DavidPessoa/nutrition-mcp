@@ -100,6 +100,10 @@ function hostPage(widget: string, params: URLSearchParams): string {
         // Alcohol tracking ON in these fixtures except where noted; 0 is a
         // tracked alcohol-free day, null (see "meal-logged") is tracking off.
         alcohol_g: kcal > 2100 ? 13.9 : 0,
+        // Caffeine on most days but not all. null is "nothing recorded that
+        // day" — the trends widget must average over the days that carry it,
+        // and a 0 here would be a claim the user never made.
+        caffeine_mg: kcal > 1900 ? 165 : null,
         water_ml: 1800,
     });
     const days = [
@@ -119,6 +123,7 @@ function hostPage(widget: string, params: URLSearchParams): string {
         fiber_g: 30,
         sugar_g: 45,
         alcohol_g: 20,
+        caffeine_mg: 400,
         water_ml: 2500,
     };
     const totals = {
@@ -130,6 +135,8 @@ function hostPage(widget: string, params: URLSearchParams): string {
         // Over its ceiling, so the sub-row inside the carbs disclosure flags it.
         sugar_g: 61.3,
         alcohol_g: 27.7,
+        // Over its ceiling too, so the stat line flags it.
+        caffeine_mg: 470,
         water_ml: 1500,
     };
     // Per-meal breakdown rows: what makes the panel's tiles tappable.
@@ -145,6 +152,7 @@ function hostPage(widget: string, params: URLSearchParams): string {
             fiber_g: 9.4,
             sugar_g: 24.6,
             alcohol_g: 0,
+            caffeine_mg: null,
         },
         {
             description: "Grilled chicken & rice bowl",
@@ -157,6 +165,7 @@ function hostPage(widget: string, params: URLSearchParams): string {
             fiber_g: 6.2,
             sugar_g: 9.4,
             alcohol_g: 0,
+            caffeine_mg: null,
         },
         {
             description: "Salmon with quinoa & veg",
@@ -169,6 +178,20 @@ function hostPage(widget: string, params: URLSearchParams): string {
             fiber_g: 7.9,
             sugar_g: 14.7,
             alcohol_g: 27.7,
+            caffeine_mg: null,
+        },
+        {
+            description: "Double espresso",
+            meal_type: "snack",
+            date: null,
+            calories: 10,
+            protein_g: 0,
+            carbs_g: 1,
+            fat_g: 0,
+            fiber_g: 0,
+            sugar_g: 0,
+            alcohol_g: 0,
+            caffeine_mg: 470,
         },
     ];
     // Same rows with alcohol tracking OFF: null, not 0, everywhere.
@@ -194,6 +217,7 @@ function hostPage(widget: string, params: URLSearchParams): string {
                 fiber_g: 27.4,
                 sugar_g: 58.1,
                 alcohol_g: 7.9,
+                caffeine_mg: 165,
                 water_ml: 1800,
             },
             days,
@@ -223,10 +247,13 @@ function hostPage(widget: string, params: URLSearchParams): string {
                 fiber_g: 7.4,
                 sugar_g: 6.1,
                 alcohol_g: null,
+                caffeine_mg: null,
             },
             has_goals: true,
             // Alcohol tracking OFF for this one, so the panel must show no
-            // alcohol stat line at all (null, not 0).
+            // alcohol stat line at all (null, not 0) — while the caffeine line
+            // stays, which is the point: caffeine has no opt-in flag, only the
+            // data-driven null.
             goals: { ...goals, alcohol_g: null },
             totals: { ...totals, alcohol_g: null },
             meals: mealsNoAlcohol,

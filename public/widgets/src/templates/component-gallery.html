@@ -86,6 +86,7 @@
                 fiber_g: 30,
                 sugar_g: 45,
                 alcohol_g: 20,
+                caffeine_mg: 400,
                 water_ml: 2500,
             };
             const TOTALS = {
@@ -96,6 +97,7 @@
                 fiber_g: 24.6,
                 sugar_g: 61.3,
                 alcohol_g: 27.7,
+                caffeine_mg: 470,
                 water_ml: 2100,
             };
             const MEALS = [
@@ -110,6 +112,7 @@
                     fiber_g: 9.4,
                     sugar_g: 24.6,
                     alcohol_g: 0,
+                    caffeine_mg: null,
                 },
                 {
                     description: "Grilled chicken & rice bowl",
@@ -122,6 +125,7 @@
                     fiber_g: 6.2,
                     sugar_g: 9.4,
                     alcohol_g: 0,
+                    caffeine_mg: null,
                 },
                 {
                     description: "Salmon with quinoa & veg",
@@ -134,10 +138,25 @@
                     fiber_g: 7.9,
                     sugar_g: 14.7,
                     alcohol_g: 27.7,
+                    caffeine_mg: null,
+                },
+                {
+                    description: "Double espresso",
+                    meal_type: "snack",
+                    date: null,
+                    calories: 10,
+                    protein_g: 0,
+                    carbs_g: 1,
+                    fat_g: 0,
+                    fiber_g: 0,
+                    sugar_g: 0,
+                    alcohol_g: 0,
+                    caffeine_mg: 470,
                 },
             ];
             const CARBS = MACROS.find((m) => m.key === "carbs_g");
             const ALCOHOL = MACROS.find((m) => m.key === "alcohol_g");
+            const CAFFEINE = MACROS.find((m) => m.key === "caffeine_mg");
             // The alcohol line in each of its states, including the two that
             // are easy to conflate: null (tracking off → nothing renders) and
             // 0 (a tracked, alcohol-free day → the line stays).
@@ -149,6 +168,26 @@
                 [
                     "tracking off (null → renders nothing)",
                     { alcohol_g: null },
+                    GOALS,
+                ],
+            ];
+            // The same line without the drink gloss, in milligrams. Caffeine
+            // has no opt-in flag, so the null row is the ONLY thing standing
+            // between a user who has never logged caffeine and a fabricated
+            // "0 mg of 400 mg" — worth being able to look at.
+            const caffeineStates = [
+                ["over the limit", { caffeine_mg: 470 }, GOALS],
+                ["under the limit", { caffeine_mg: 185 }, GOALS],
+                ["no limit set", { caffeine_mg: 95 }, null],
+                ["recorded, zero", { caffeine_mg: 0 }, GOALS],
+                [
+                    "a limit of 0 mg — a real limit, and any dose is over it",
+                    { caffeine_mg: 95 },
+                    { ...GOALS, caffeine_mg: 0 },
+                ],
+                [
+                    "never recorded (null → renders nothing)",
+                    { caffeine_mg: null },
                     GOALS,
                 ],
             ];
@@ -228,7 +267,7 @@
             </section>
 
             <section class="card">
-              <h3>Macro panel — hero ring, ring row, water bar, alcohol stat line</h3>
+              <h3>Macro panel — hero ring, ring row, water bar, alcohol + caffeine stat lines</h3>
               ${macroPanel(TOTALS, GOALS, undefined, MEALS)}
             </section>
 
@@ -247,6 +286,19 @@
                       ([caption, vals, goal]) =>
                           `<div class="hint" style="margin-bottom:6px">${caption}</div>${
                               macroStat(ALCOHOL, macroCtxOf(vals, goal)) ||
+                              '<div class="hint" style="opacity:.6;margin-bottom:20px">(nothing)</div>'
+                          }`,
+                  )
+                  .join("")}
+            </section>
+
+            <section class="card">
+              <h3>Caffeine stat line — every state</h3>
+              ${caffeineStates
+                  .map(
+                      ([caption, vals, goal]) =>
+                          `<div class="hint" style="margin-bottom:6px">${caption}</div>${
+                              macroStat(CAFFEINE, macroCtxOf(vals, goal)) ||
                               '<div class="hint" style="opacity:.6;margin-bottom:20px">(nothing)</div>'
                           }`,
                   )

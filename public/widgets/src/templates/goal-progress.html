@@ -170,7 +170,7 @@
             // ---- Sample data so the file renders on its own (browser preview) ----
             const SAMPLE = {
                 date: "2026-07-10",
-                meal_count: 4,
+                meal_count: 5,
                 water_entries: 6,
                 goals: {
                     calories: 2200,
@@ -180,6 +180,8 @@
                     fiber_g: 30,
                     sugar_g: 45,
                     alcohol_g: 20,
+                    // A ceiling, like sugar and alcohol: EFSA's 400 mg/day.
+                    caffeine_mg: 400,
                     water_ml: 2500,
                 },
                 totals: {
@@ -193,6 +195,10 @@
                     // Alcohol tracking ON in this sample; null would mean the
                     // user has it off and the stat line disappears.
                     alcohol_g: 27.7,
+                    // Over its ceiling too, so the stat line flags it. null
+                    // here (nothing recorded today) would drop the line rather
+                    // than claim a 0 mg day against the 400 mg limit.
+                    caffeine_mg: 470,
                     water_ml: 2100,
                 },
                 weight: {
@@ -213,6 +219,7 @@
                         fiber_g: 9.4,
                         sugar_g: 24.6,
                         alcohol_g: 0,
+                        caffeine_mg: null,
                     },
                     {
                         description: "Grilled chicken & rice bowl",
@@ -225,6 +232,7 @@
                         fiber_g: 6.2,
                         sugar_g: 9.4,
                         alcohol_g: 0,
+                        caffeine_mg: null,
                     },
                     {
                         description: "Greek yogurt & almonds",
@@ -237,6 +245,7 @@
                         fiber_g: 1.1,
                         sugar_g: 12.6,
                         alcohol_g: 0,
+                        caffeine_mg: null,
                     },
                     {
                         description: "Salmon with quinoa & veg",
@@ -249,6 +258,23 @@
                         fiber_g: 7.9,
                         sugar_g: 14.7,
                         alcohol_g: 27.7,
+                        caffeine_mg: null,
+                    },
+                    {
+                        // Where the day's caffeine came from. The food rows
+                        // carry null, not 0 — a nutrient nobody filled in is
+                        // absent, not zero.
+                        description: "Double espresso",
+                        meal_type: "snack",
+                        date: null,
+                        calories: 10,
+                        protein_g: 0,
+                        carbs_g: 1,
+                        fat_g: 0,
+                        fiber_g: 0,
+                        sugar_g: 0,
+                        alcohol_g: 0,
+                        caffeine_mg: 470,
                     },
                 ],
             };

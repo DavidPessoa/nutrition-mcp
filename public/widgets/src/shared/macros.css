@@ -1,6 +1,6 @@
-/* Macro panel — calories hero, protein/carbs/fat row, water bar, alcohol stat
-   line, plus the disclosure that reveals a macro's sub-components (carbs →
-   fiber + sugar) and the meals behind it.
+/* Macro panel — calories hero, protein/carbs/fat row, water bar, the alcohol
+   and caffeine stat lines, plus the disclosure that reveals a macro's
+   sub-components (carbs → fiber + sugar) and the meals behind it.
    Pairs with shared/ring.css (the gauge) and shared/macros.js (the markup).
    Include ring.css as well as this file. */
 
@@ -329,8 +329,9 @@
     margin-top: 6px;
 }
 
-/* Alcohol — a plain stat line, never a ring. Hidden entirely when the payload
-   sends null (alcohol tracking off); a 0 from a tracking user still shows. */
+/* Alcohol and caffeine — plain stat lines, never rings. Hidden entirely when
+   the payload sends null (alcohol tracking off, or a nutrient the user has
+   never recorded); a 0 on a covered day still shows. */
 .macro-stat {
     padding: 14px 18px 15px;
     margin-bottom: 20px;

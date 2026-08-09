@@ -2,16 +2,19 @@
 //
 // Renders calories as a full-width hero ring, protein/carbs/fat as three smaller
 // rings in one card, water as a full-width progress bar, fiber/sugar as
-// sub-components revealed inside the carbs disclosure, and alcohol as a plain
-// stat line. Pairs with shared/macros.css (layout) and shared/ring.css (the
-// gauge).
+// sub-components revealed inside the carbs disclosure, and alcohol/caffeine as
+// plain stat lines. Pairs with shared/macros.css (layout) and shared/ring.css
+// (the gauge).
 //
 // Requires fmt(n, decimals) and esc(s) to already be defined in the widget scope.
 //
 // Data contract: `vals` and `goal` are plain objects keyed by macro
 // (`calories`, `protein_g`, `carbs_g`, `fat_g`, `fiber_g`, `sugar_g`,
-// `alcohol_g`, `water_ml`) — e.g. a day's totals, a range's averages, or a
-// computed slice. `wording` tunes the caption verb for the remaining amount on
+// `alcohol_g`, `caffeine_mg`, `water_ml`) — e.g. a day's totals, a range's
+// averages, or a computed slice. Note that `caffeine_mg` is the ONE key not in
+// grams, which is why the unit is in its name at every layer down to the DB
+// column: a bare `caffeine` is how someone's 180 mg becomes 180 g.
+// `wording` tunes the caption verb for the remaining amount on
 // a FLOOR: { under: "left" | "under", over: "over" } (default "left" / "over").
 // A ceiling ignores it — see macroBits.
 //
@@ -24,7 +27,8 @@
 //   ring  one cell of the protein/carbs/fat row
 //   bar   full-width horizontal progress bar (water)
 //   sub   a sub-component of `parent`, shown inside the parent's disclosure
-//   stat  a plain value line under the panel — no ring, no bar (alcohol)
+//   stat  a plain value line under the panel — no ring, no bar (alcohol,
+//         caffeine)
 //
 // `direction` marks a target you stay UNDER rather than reach (mirrors
 // GoalDirection in src/mcp.ts): exceeding a ceiling is flagged with --over,
@@ -89,6 +93,23 @@ const MACROS = [
         decimals: 1,
         role: "stat",
         direction: "ceiling",
+        // Grams of ethanol mean nothing to most people, so the line leads with
+        // a drink count — see macroStat. No other stat has a second unit.
+        gloss: "drinks",
+    },
+    {
+        key: "caffeine_mg",
+        label: "Caffeine",
+        unit: "mg",
+        color: "var(--caffeine)",
+        // Whole milligrams. Every label and guideline is quoted that way (EFSA:
+        // 400 mg/day), a tenth of a milligram is below anything anyone can act
+        // on, and matching the model-facing text keeps "95 mg" one number in
+        // both places. NOT a `sub` of carbs and NOT a ring: caffeine carries
+        // zero kcal, so it must never become a segment of an energy split.
+        decimals: 0,
+        role: "stat",
+        direction: "ceiling",
     },
     {
         key: "water_ml",
@@ -103,8 +124,9 @@ const MACROS = [
 // The metrics that stand on their own as evidence that a day was logged at all
 // — used by trends to count logged days. Derived from the roles so a new entry
 // joins the test only if it is a top-level metric: fiber and sugar never appear
-// without a meal that already contributes calories, and alcohol_g is null (not
-// 0) for a user with alcohol tracking off, so neither belongs in the test.
+// without a meal that already contributes calories, and alcohol_g / caffeine_mg
+// are null (not 0) on a day that recorded neither, so none of them belongs in
+// the test.
 const TOP_LEVEL_MACRO_KEYS = MACROS.filter(
     (m) => m.role === "hero" || m.role === "ring" || m.role === "bar",
 ).map((m) => m.key);
@@ -314,29 +336,37 @@ function macroBar(m, ctx) {
       </div>`;
 }
 
-// Alcohol — a plain stat line, never a ring: grams with the drink count as the
-// intuitive gloss ("2.1 US drinks · 28 g"), plus the limit when one is set.
+// A stat macro — a plain value line, never a ring. Alcohol leads with the drink
+// count as an intuitive gloss ("2.1 US drinks · 28 g"); caffeine has no second
+// unit anyone thinks in, so it is milligrams alone ("95 mg"). Both carry the
+// limit underneath when one is set.
 //
-// null vs 0 is load-bearing. `alcohol_g: null` is how a payload in src/mcp.ts
-// says "nothing to show here" — either the user does not track alcohol at all
-// (see AlcoholDisplay), or (trends' per-day/averaged series only) this day or
-// window has zero covered days for it (see trendsDayPayloadOf) — so the line
-// is dropped entirely either way. A 0 from a user who DOES track it, on a day
-// or window that DOES cover it, is a real alcohol-free reading and stays on
-// screen — unlike the water bar, whose 0 means "never logged any" because
-// water has no such opt-in to distinguish the two.
+// null vs 0 is load-bearing, and for these two lines it is the ONLY suppression
+// there is. `alcohol_g: null` is how a payload in src/mcp.ts says "nothing to
+// show here" — either the user does not track alcohol at all (see
+// AlcoholDisplay), or (trends' per-day/averaged series only) this day or window
+// has zero covered days for it (see trendsDayPayloadOf). `caffeine_mg: null`
+// only ever means the second: caffeine has no opt-in flag by design, so the
+// covered-days signal is the whole gate — and what it prevents is a "0 mg of
+// 400 mg" line invented for someone who has never recorded any. A 0 on a day or
+// window that DOES cover the nutrient is a real reading and stays on screen —
+// unlike the water bar, whose 0 means "never logged any" because water has no
+// covered-days signal to tell the two apart.
 function macroStat(m, ctx) {
-    const grams = ctx.vals?.[m.key];
-    if (grams == null) return "";
+    const val = ctx.vals?.[m.key];
+    if (val == null) return "";
     const b = macroBits(m, ctx.vals, ctx.goal, ctx.wording);
-    const unitName = DRINK_LABEL[ctx.drinkUnit];
-    const drinks = grams / DRINK_GRAMS[ctx.drinkUnit];
     const flag = b.over && m.direction === "ceiling";
-    const gramsHtml = `${fmt(grams, m.decimals)}<span class="ssub">${m.unit}</span>`;
-    const value =
-        grams > 0
-            ? `${drinks.toFixed(1)}<span class="ssub">${esc(unitName)}</span><span class="ssep">·</span>${gramsHtml}`
-            : `${gramsHtml}<span class="ssep">·</span><span class="ssub">none logged</span>`;
+    const amount = `${fmt(val, m.decimals)}<span class="ssub">${m.unit}</span>`;
+    let value;
+    if (!(val > 0)) {
+        value = `${amount}<span class="ssep">·</span><span class="ssub">none logged</span>`;
+    } else if (m.gloss === "drinks") {
+        const drinks = val / DRINK_GRAMS[ctx.drinkUnit];
+        value = `${drinks.toFixed(1)}<span class="ssub">${esc(DRINK_LABEL[ctx.drinkUnit])}</span><span class="ssep">·</span>${amount}`;
+    } else {
+        value = amount;
+    }
     return `
       <div class="mcard macro-stat">
         <div class="stop">
@@ -367,8 +397,9 @@ function macroCtxOf(vals, goal, wording, meals, opts) {
     };
 }
 
-// Full macro panel: calories hero + protein/carbs/fat row + water bar + alcohol
-// stat line, laid out by role (never by a hardcoded key list).
+// Full macro panel: calories hero + protein/carbs/fat row + water bar + the
+// alcohol and caffeine stat lines, laid out by role (never by a hardcoded key
+// list).
 //
 // `meals` is optional: when a non-empty array of per-meal breakdown rows is
 // passed (each { description, meal_type, date, calories, protein_g, carbs_g,

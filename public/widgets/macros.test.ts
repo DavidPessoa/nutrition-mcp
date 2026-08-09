@@ -27,7 +27,7 @@ const macrosApi = await (async () => {
     const factory = new Function(
         "fmt",
         "esc",
-        `${src}\nreturn { macroBits, MACROS, macroPanel };`,
+        `${src}\nreturn { macroBits, MACROS, macroPanel, macroStat, macroCtxOf, dayHasData };`,
     );
     return factory(fmt, esc) as {
         macroBits: (
@@ -44,6 +44,15 @@ const macrosApi = await (async () => {
             meals?: unknown[],
             opts?: { drinkUnit?: string },
         ) => string;
+        macroStat: (m: Macro, ctx: unknown) => string;
+        macroCtxOf: (
+            vals: Vals,
+            goal?: Vals | null,
+            wording?: unknown,
+            meals?: unknown[],
+            opts?: { drinkUnit?: string },
+        ) => unknown;
+        dayHasData: (day: Vals) => boolean;
     };
 })();
 
@@ -138,6 +147,7 @@ const VALS = {
     fiber_g: 26.4,
     sugar_g: 58.2,
     alcohol_g: 12.5,
+    caffeine_mg: 185,
     water_ml: 2100,
 };
 const GOALS = {
@@ -148,6 +158,7 @@ const GOALS = {
     fiber_g: 30,
     sugar_g: 45,
     alcohol_g: 20,
+    caffeine_mg: 400,
     water_ml: 2500,
 };
 const MEALS = [
@@ -233,6 +244,69 @@ test("a static tile keeps its ring label and goal caption exposed", () => {
     expect(html).not.toContain('data-macro="protein_g"');
 });
 
+// ---- caffeine: milligrams, a ceiling, and no invented zero ----------------
+//
+// The one nutrient not measured in grams, and the one with no profile opt-in to
+// hide it — so the null in the payload is the whole display gate.
+const caffeineStat = (vals: Vals, goal: Vals | null) =>
+    macrosApi.macroStat(
+        macroOf("caffeine_mg"),
+        macrosApi.macroCtxOf(vals, goal),
+    );
+
+test("caffeine reads in whole milligrams against a ceiling", () => {
+    expect(line("caffeine_mg", 320, 400)).toBe("limit 400 mg · 80 mg under");
+    expect(line("caffeine_mg", 470, 400)).toBe("limit 400 mg · 70 mg over");
+    // Whole milligrams even though the payload rounds to a tenth like its
+    // siblings: a tenth of a milligram is below anything anyone can act on.
+    expect(line("caffeine_mg", 95.4, 400)).toBe("limit 400 mg · 305 mg under");
+});
+
+// "None today" is a limit people really set, the same way it is for alcohol.
+test("a caffeine limit of 0 is a real limit", () => {
+    expect(line("caffeine_mg", 0, 0)).toBe("limit 0 mg · at limit");
+    expect(line("caffeine_mg", 95, 0)).toBe("limit 0 mg · 95 mg over");
+});
+
+// The trap from issue #78: most meals predate the column and carry NULL, so a
+// user who has never recorded caffeine must not be congratulated on being
+// 400 mg under a limit they never went near.
+test("caffeine never recorded renders nothing; a recorded 0 stays", () => {
+    expect(caffeineStat({ caffeine_mg: null }, GOALS)).toBe("");
+    expect(caffeineStat({ caffeine_mg: 0 }, GOALS)).toContain("none logged");
+    expect(
+        macrosApi.macroPanel({ ...VALS, caffeine_mg: null }, GOALS),
+    ).not.toContain("Caffeine");
+    expect(macrosApi.macroPanel(VALS, GOALS)).toContain("Caffeine");
+});
+
+test("caffeine is milligrams alone — the drink gloss is alcohol's only", () => {
+    const html = caffeineStat({ caffeine_mg: 185 }, GOALS);
+    expect(html).toContain('185<span class="ssub">mg</span>');
+    expect(html).not.toContain("drinks");
+    expect(
+        macrosApi.macroStat(
+            macroOf("alcohol_g"),
+            macrosApi.macroCtxOf({ alcohol_g: 28 }, GOALS),
+        ),
+    ).toContain("US drinks");
+});
+
+// Caffeine carries zero kcal, so it is a stat line and nothing else: never a
+// ring, never a segment of one, and never evidence that a day was logged.
+test("caffeine is a stat line, not a macro", () => {
+    const m = macroOf("caffeine_mg") as Macro & {
+        role: string;
+        parent?: string;
+    };
+    expect(m.role).toBe("stat");
+    expect(m.parent).toBeUndefined();
+    expect(macrosApi.macroPanel(VALS, GOALS, undefined, MEALS)).not.toContain(
+        'data-macro="caffeine_mg"',
+    );
+    expect(macrosApi.dayHasData({ caffeine_mg: 185 })).toBe(false);
+});
+
 // ---- import widget: the alcohol opt-in ------------------------------------
 //
 // The map step is evaluated the way the assembler ships it: the real assembled
@@ -256,13 +330,20 @@ const importWidget = await (async () => {
              setDrinkUnit: (u) => { CFG = Object.assign({}, CFG, { drink_unit: u }); },
              autoMap,
              mapStep,
+             buildRows,
+             previewStep,
          };`,
     );
     return factory() as {
-        S: Record<string, unknown>;
+        S: Record<string, unknown> & {
+            mapping: Record<string, number>;
+            rows: Record<string, unknown>[];
+        };
         setDrinkUnit: (u: string | null) => void;
         autoMap: () => void;
         mapStep: () => string;
+        buildRows: () => void;
+        previewStep: () => string;
     };
 })();
 
@@ -359,4 +440,85 @@ test("the importer defaults to alcohol tracking OFF", async () => {
     );
     // Nothing leaves the browser unless it is on.
     expect(html).toContain("alcohol_g: alcoholTracked()");
+});
+
+// ---- import widget: caffeine is milligrams, and the header has to say so ---
+//
+// The whole naming contract exists to stop one specific import: a column headed
+// "Caffeine (g)" binding to the milligram field and storing 0.18 where the
+// user's own label reads 180 mg — legal, silent, and reported as a clean
+// import. The guard is three parts (an ALIASES list carrying no _g spelling,
+// CAFFEINE_GRAMS_RE, and the notice that explains the blank row), so all three
+// are pinned here; deleting any one of them left every test passing.
+const CAF_MG = [
+    ["Date", "Food Name", "Energy (kcal)", "Caffeine (mg)"],
+    ["2026-07-18", "Flat white", "120", "185"],
+] as const;
+const CAF_G = [
+    ["Date", "Food Name", "Energy (kcal)", "Caffeine (g)"],
+    ["2026-07-18", "Flat white", "120", "0.185"],
+] as const;
+
+test("a milligram caffeine column auto-maps, with no opt-in to satisfy", () => {
+    // Both drink_unit states, because caffeine deliberately has no
+    // alcohol-style gate: the alcohol opt-in must not reach it in either
+    // direction.
+    for (const unit of [null, "us"]) {
+        const html = mapStepFor(CAF_MG[0], CAF_MG[1], unit);
+        // The row is always rendered, so the selected index is what proves the
+        // column bound — and the sample cell is what the user sees confirm it.
+        expect(html).toContain('data-field="caffeine_mg"');
+        expect(importWidget.S.mapping.caffeine_mg).toBe(3);
+        expect(html).toContain(
+            '<div class="map-src">Caffeine (mg)</div><div class="map-sample">e.g. 185</div>',
+        );
+        expect(html).not.toContain("is in grams");
+    }
+});
+
+test("a bare 'Caffeine' header maps too — the unit is only ever mg", () => {
+    const html = mapStepFor(
+        ["Date", "Food Name", "Energy (kcal)", "Caffeine"],
+        ["2026-07-18", "Flat white", "120", "185"],
+        null,
+    );
+    expect(html).toContain('data-field="caffeine_mg"');
+    expect(importWidget.S.mapping.caffeine_mg).toBe(3);
+});
+
+test("a caffeine column headed in GRAMS is refused, and the notice says why", () => {
+    const html = mapStepFor(CAF_G[0], CAF_G[1], null);
+    // Never auto-mapped — this is the 1000x error the contract is about.
+    expect(importWidget.S.mapping.caffeine_mg).toBe(-1);
+    expect(html).toContain("is in grams");
+    // Names the user's own header text, like the alcohol notice, so they can
+    // tell which column is meant.
+    expect(html).toContain("caffeine column (Caffeine (g))");
+    // And says the loss is permanent: caffeine_mg sits outside the import
+    // digest, so a re-import of the corrected file dedupes to a no-op.
+    expect(html).toContain("will not fill it in");
+    expect(html).toContain("before importing, not after");
+});
+
+test("caffeine reaches the row only when a column is mapped to it", () => {
+    mapStepFor(CAF_MG[0], CAF_MG[1], null);
+    importWidget.buildRows();
+    expect(importWidget.S.rows[0]!.caffeine_mg).toBe(185);
+    // And the user sees it before confirming, in milligrams. The preview
+    // column is data-driven like fiber and sugar — not gated on an opt-in.
+    const preview = importWidget.previewStep();
+    expect(preview).toContain("Caf mg");
+    expect(preview).toContain("185");
+
+    // No caffeine column at all: the key is absent rather than a fabricated 0,
+    // which is what keeps a pre-feature-shaped export out of the averages.
+    mapStepFor(NO_ALCOHOL[0], NO_ALCOHOL[1], null);
+    importWidget.buildRows();
+    expect(importWidget.S.rows[0]!.caffeine_mg).toBeUndefined();
+    expect(importWidget.previewStep()).not.toContain("Caf mg");
+
+    // And a grams-headed column stays out of the payload entirely.
+    mapStepFor(CAF_G[0], CAF_G[1], null);
+    importWidget.buildRows();
+    expect(importWidget.S.rows[0]!.caffeine_mg).toBeUndefined();
 });

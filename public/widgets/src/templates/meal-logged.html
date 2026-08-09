@@ -67,6 +67,11 @@
                     // null = this user has alcohol tracking off, which is also
                     // why the panel below shows no alcohol stat line.
                     alcohol_g: null,
+                    // Caffeine is NOT gated on that opt-in — there is no
+                    // caffeine flag at all — so it shows in the same panel that
+                    // hides alcohol. Its own suppression is the data: null on
+                    // this salad, a figure on the coffee below.
+                    caffeine_mg: null,
                 },
                 has_goals: true,
                 goals: {
@@ -77,13 +82,14 @@
                     fiber_g: 30,
                     sugar_g: 45,
                     alcohol_g: null,
+                    caffeine_mg: 400,
                     water_ml: 2500,
                 },
                 totals: {
-                    calories: 1480,
-                    protein_g: 118,
-                    carbs_g: 165,
-                    fat_g: 52,
+                    calories: 1600,
+                    protein_g: 125,
+                    carbs_g: 175,
+                    fat_g: 58,
                     fiber_g: 21.8,
                     sugar_g: 38.4,
                     // Alcohol tracking OFF in this sample (the other widgets'
@@ -91,6 +97,7 @@
                     // entirely", distinct from a 0 that means an alcohol-free
                     // day. No stat line renders.
                     alcohol_g: null,
+                    caffeine_mg: 165,
                     water_ml: 1600,
                 },
                 meals: [
@@ -105,6 +112,7 @@
                         fiber_g: 9.4,
                         sugar_g: 24.6,
                         alcohol_g: null,
+                        caffeine_mg: null,
                     },
                     {
                         description: "Greek yogurt & almonds",
@@ -117,6 +125,7 @@
                         fiber_g: 1.1,
                         sugar_g: 12.6,
                         alcohol_g: null,
+                        caffeine_mg: null,
                     },
                     {
                         description: "Turkey sandwich",
@@ -129,6 +138,20 @@
                         fiber_g: 3.8,
                         sugar_g: 5.2,
                         alcohol_g: null,
+                        caffeine_mg: null,
+                    },
+                    {
+                        description: "Flat white",
+                        meal_type: "snack",
+                        date: null,
+                        calories: 120,
+                        protein_g: 7,
+                        carbs_g: 10,
+                        fat_g: 6,
+                        fiber_g: 0,
+                        sugar_g: 9.8,
+                        alcohol_g: null,
+                        caffeine_mg: 165,
                     },
                     {
                         description: "Grilled chicken salad",
@@ -141,6 +164,7 @@
                         fiber_g: 7.4,
                         sugar_g: 6.1,
                         alcohol_g: null,
+                        caffeine_mg: null,
                     },
                 ],
             };
