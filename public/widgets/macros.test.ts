@@ -27,7 +27,7 @@ const macrosApi = await (async () => {
     const factory = new Function(
         "fmt",
         "esc",
-        `${src}\nreturn { macroBits, MACROS, macroPanel, macroStat, macroCtxOf, dayHasData };`,
+        `${src}\nreturn { macroBits, MACROS, macroPanel, macroLimit, macroCtxOf, dayHasData };`,
     );
     return factory(fmt, esc) as {
         macroBits: (
@@ -44,7 +44,7 @@ const macrosApi = await (async () => {
             meals?: unknown[],
             opts?: { drinkUnit?: string },
         ) => string;
-        macroStat: (m: Macro, ctx: unknown) => string;
+        macroLimit: (m: Macro, ctx: unknown) => string;
         macroCtxOf: (
             vals: Vals,
             goal?: Vals | null,
@@ -183,18 +183,28 @@ test("an interactive tile names its value and goal state, then the action", () =
         "Calories 2,035 kcal, of 2,200 kcal, 165 kcal left. Show the meals that contributed.",
     );
     expect(labels.carbs_g).toBe(
-        "Carbs 205 g, of 220 g, 15 g left. Show fiber and sugar, and the meals that contributed.",
+        "Carbs 205 g, of 220 g, 15 g left. Show the meals that contributed.",
     );
+    // The calorie row and the three macro bars, and nothing else — a limit
+    // cell discloses nothing, so it is never a button.
+    expect(Object.keys(labels).sort()).toEqual([
+        "calories",
+        "carbs_g",
+        "fat_g",
+        "protein_g",
+    ]);
 });
 
-// The panel trends builds: no meals, so carbs is a button only because of its
-// sub-components — and its panel was fully static (fully readable) before.
-test("a tile made interactive by sub-components alone still names its value", () => {
-    const labels = tileLabels(macrosApi.macroPanel(VALS, GOALS));
-    expect(Object.keys(labels)).toEqual(["carbs_g"]);
-    expect(labels.carbs_g).toBe(
-        "Carbs 205 g, of 220 g, 15 g left. Show fiber and sugar.",
-    );
+// The strip trends builds. Fiber and sugar used to be reachable only by
+// tapping carbs, which made that one tile a button even with no meals behind
+// it; they now have cells of their own in the limits row, so a strip built
+// without meals discloses nothing and is entirely static.
+test("without meals nothing is a button, and fiber and sugar are on show anyway", () => {
+    const html = macrosApi.macroPanel(VALS, GOALS);
+    expect(tileLabels(html)).toEqual({});
+    expect(html).not.toContain("data-macro-panel");
+    expect(html).toContain("Fiber");
+    expect(html).toContain("Sugar");
 });
 
 test("no goal is still a value, not a bare action", () => {
@@ -236,20 +246,146 @@ test("every interactive tile carries its formatted value, and none is spoken as 
 
 // The static tiles are the reason the button ones needed fixing — they were
 // always readable, and must stay that way.
-test("a static tile keeps its ring label and goal caption exposed", () => {
+test("a static tile keeps its label, figure and goal caption exposed", () => {
     const html = macrosApi.macroPanel(VALS, GOALS);
-    expect(html).toContain('aria-label="Protein 148 g"');
-    expect(html).toContain("of 160 g · 12 g left");
+    expect(html).toContain('aria-label="Calories 2,035 kcal"');
+    expect(html).toContain(
+        '148<span class="msub">/160<span class="munit"> g</span></span>',
+    );
+    expect(html).toContain("12 g left");
     // …and is not a button, so those children are not presentational.
     expect(html).not.toContain('data-macro="protein_g"');
+});
+
+// ---- no goal, and the goal of 0 that means the same thing ------------------
+//
+// A strip with no goals is a real state (get_goal_progress, get_trends and
+// get_nutrition_summary all send `goals: null`), and it has to SAY so — a bare
+// figure beside an empty ring reads as a widget that failed to load. The
+// calorie block has exactly one slot for it.
+test("with no goals every tile says so, calorie block included", () => {
+    const html = macrosApi.macroPanel(VALS, null);
+    expect(html).toContain('<div class="cal-left">no goal set</div>');
+    expect(html).not.toContain("cal-goal");
+    // …and the macro captions opt out of the phone layout's caption hiding,
+    // because there is no "148/160" to imply the goal instead.
+    expect(html).toContain('class="mtile nogoal"');
+});
+
+// A floor target of 0 is "no goal set" (a 0 g protein goal is meaningless) —
+// but set_nutrition_goals stores it happily, so every figure has to agree with
+// that caption instead of rendering "/ 0" beside it.
+test("a floor goal of 0 never reaches the figure", () => {
+    const zeroed = { calories: 0, protein_g: 0, water_ml: 0 };
+    const html = macrosApi.macroPanel(VALS, zeroed);
+    expect(html).not.toContain("/ 0<");
+    expect(html).not.toContain("/0<");
+    expect(html).not.toContain("/0.0 L");
+    expect(html).toContain("no goal set");
+});
+
+// ---- the limits row -------------------------------------------------------
+//
+// One row, one to four cells, no special cases: alcohol simply is or is not
+// among them, and the column count travels with the markup.
+const limitKeys = (html: string) =>
+    [...html.matchAll(/<span class="mkey">([^<]+)<\/span>/g)]
+        .map((m) => m[1]!)
+        .slice(3); // the first three are protein / carbs / fat
+
+test("the limits row is sugar, alcohol, caffeine, fiber — in that order", () => {
+    expect(limitKeys(macrosApi.macroPanel(VALS, GOALS))).toEqual([
+        "Sugar",
+        "Alcohol",
+        "Caffeine",
+        "Fiber",
+    ]);
+});
+
+test("alcohol tracking off drops its cell and the row stays three-up", () => {
+    const html = macrosApi.macroPanel({ ...VALS, alcohol_g: null }, GOALS);
+    expect(limitKeys(html)).toEqual(["Sugar", "Caffeine", "Fiber"]);
+    expect(html).toContain("--lc:3;--lcw:3");
+    // Four cells do not fit across a phone, so they become a 2×2 there and
+    // stay one row from 560px up.
+    expect(macrosApi.macroPanel(VALS, GOALS)).toContain("--lc:2;--lcw:4");
+});
+
+// Grams of ethanol mean nothing to most people; the caption leads with the
+// count the server quotes in its own text.
+test("alcohol's caption leads with the drink count, in the user's unit", () => {
+    expect(macrosApi.macroPanel(VALS, GOALS)).toContain(
+        "0.9 US drinks · limit 20 g",
+    );
+    expect(
+        macrosApi.macroPanel(VALS, GOALS, undefined, undefined, {
+            drinkUnit: "uk",
+        }),
+    ).toContain("1.6 UK units · limit 20 g");
+});
+
+// A limit cell's caption is the limit itself; the distance to it joins only
+// when that is the thing to act on. Under a limit the distance is noise in a
+// cell this size — but a breach earns its space, and "at limit" is a state the
+// --over colour cannot express (`over` is pct > 100, so exactly at a ceiling
+// would otherwise look comfortably under it).
+test("a breached or exactly-met limit says by how much; an unbreached one does not", () => {
+    const cap = (vals: Vals, goal: Vals | null) => {
+        const m = /<div class="mcap">([^<]*)<\/div>/.exec(
+            macrosApi.macroLimit(
+                macroOf("sugar_g"),
+                macrosApi.macroCtxOf(vals, goal),
+            ),
+        );
+        return m?.[1] ?? "";
+    };
+    expect(cap({ sugar_g: 31.9 }, { sugar_g: 45 })).toBe("limit 45 g");
+    expect(cap({ sugar_g: 58.1 }, { sugar_g: 45 })).toBe(
+        "limit 45 g · 13.1 g over",
+    );
+    expect(cap({ sugar_g: 45 }, { sugar_g: 45 })).toBe("limit 45 g · at limit");
+    expect(cap({ sugar_g: 31.9 }, null)).toBe("no goal set");
+});
+
+// TOTALS_ITEM types fiber_g and sugar_g as plain numbers, so a day that
+// predates the column is indistinguishable from a genuine zero — the cell has
+// to be earned by a value or by a goal of the user's own. Alcohol and caffeine
+// carry a real null for that, so their recorded 0 always shows.
+test("fiber and sugar earn a cell with data or a goal; alcohol's 0 always shows", () => {
+    const bare = { calories: 500, protein_g: 20, carbs_g: 60, fat_g: 10 };
+    expect(
+        limitKeys(macrosApi.macroPanel({ ...bare, fiber_g: 0 }, null)),
+    ).toEqual([]);
+    expect(
+        limitKeys(
+            macrosApi.macroPanel({ ...bare, fiber_g: 0 }, { fiber_g: 30 }),
+        ),
+    ).toEqual(["Fiber"]);
+    expect(
+        limitKeys(macrosApi.macroPanel({ ...bare, fiber_g: 4.2 }, null)),
+    ).toEqual(["Fiber"]);
+    expect(
+        limitKeys(macrosApi.macroPanel({ ...bare, alcohol_g: 0 }, null)),
+    ).toEqual(["Alcohol"]);
+});
+
+// The payload is millilitres because that is what a glass is logged in; a
+// day's intake is read in litres.
+test("water reads in litres, and an untracked day has no line at all", () => {
+    expect(macrosApi.macroPanel(VALS, GOALS)).toContain(
+        '2.1<span class="wsub">/2.5 L</span>',
+    );
+    expect(macrosApi.macroPanel({ ...VALS, water_ml: 0 }, GOALS)).not.toContain(
+        "wrow",
+    );
 });
 
 // ---- caffeine: milligrams, a ceiling, and no invented zero ----------------
 //
 // The one nutrient not measured in grams, and the one with no profile opt-in to
 // hide it — so the null in the payload is the whole display gate.
-const caffeineStat = (vals: Vals, goal: Vals | null) =>
-    macrosApi.macroStat(
+const caffeineCell = (vals: Vals, goal: Vals | null) =>
+    macrosApi.macroLimit(
         macroOf("caffeine_mg"),
         macrosApi.macroCtxOf(vals, goal),
     );
@@ -272,8 +408,8 @@ test("a caffeine limit of 0 is a real limit", () => {
 // user who has never recorded caffeine must not be congratulated on being
 // 400 mg under a limit they never went near.
 test("caffeine never recorded renders nothing; a recorded 0 stays", () => {
-    expect(caffeineStat({ caffeine_mg: null }, GOALS)).toBe("");
-    expect(caffeineStat({ caffeine_mg: 0 }, GOALS)).toContain("none logged");
+    expect(caffeineCell({ caffeine_mg: null }, GOALS)).toBe("");
+    expect(caffeineCell({ caffeine_mg: 0 }, GOALS)).toContain("none logged");
     expect(
         macrosApi.macroPanel({ ...VALS, caffeine_mg: null }, GOALS),
     ).not.toContain("Caffeine");
@@ -281,25 +417,32 @@ test("caffeine never recorded renders nothing; a recorded 0 stays", () => {
 });
 
 test("caffeine is milligrams alone — the drink gloss is alcohol's only", () => {
-    const html = caffeineStat({ caffeine_mg: 185 }, GOALS);
-    expect(html).toContain('185<span class="ssub">mg</span>');
+    const html = caffeineCell({ caffeine_mg: 185 }, GOALS);
+    // The limit underneath carries the unit; with no limit to carry it, the
+    // one unit here nobody can guess goes back beside the figure.
+    expect(html).toContain('<span class="mnum">185</span>');
+    expect(html).toContain("limit 400 mg");
+    expect(caffeineCell({ caffeine_mg: 185 }, null)).toContain(
+        '185<span class="msub"> mg</span>',
+    );
     expect(html).not.toContain("drinks");
     expect(
-        macrosApi.macroStat(
+        macrosApi.macroLimit(
             macroOf("alcohol_g"),
             macrosApi.macroCtxOf({ alcohol_g: 28 }, GOALS),
         ),
     ).toContain("US drinks");
 });
 
-// Caffeine carries zero kcal, so it is a stat line and nothing else: never a
-// ring, never a segment of one, and never evidence that a day was logged.
-test("caffeine is a stat line, not a macro", () => {
+// Caffeine carries zero kcal, so it is a limit cell and nothing else: never a
+// macro bar, never a segment of an energy split, and never evidence that a day
+// was logged.
+test("caffeine is a limit, not a macro", () => {
     const m = macroOf("caffeine_mg") as Macro & {
         role: string;
         parent?: string;
     };
-    expect(m.role).toBe("stat");
+    expect(m.role).toBe("limit");
     expect(m.parent).toBeUndefined();
     expect(macrosApi.macroPanel(VALS, GOALS, undefined, MEALS)).not.toContain(
         'data-macro="caffeine_mg"',
