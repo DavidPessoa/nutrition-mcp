@@ -384,6 +384,16 @@ body.landing {
     --line: #d2d2d7;
     --accent: #4a7c59;
     --accent-hover: #3d6649;
+    /* World map. The land dots are ground and the timezone marks are figure,
+       so the marks must out-contrast the land in BOTH themes. Tokens rather
+       than literals because the first version hardcoded these light values,
+       leaving the dark map with the two the wrong way round. */
+    --map-land: #9097a0;
+    --map-core: #3d6649;
+    --map-halo: #4a7c59;
+    --map-halo-op: 0.32;
+    --map-halo-lo: 0.12;
+    --map-halo-hi: 0.4;
 
     display: block;
     align-items: stretch;
@@ -1013,26 +1023,26 @@ html:has(body.landing) {
     overflow: visible;
 }
 .land-dot {
-    fill: #9097a0;
+    fill: var(--map-land);
 }
 .tz-halo {
-    fill: #4a7c59;
-    opacity: 0.32;
+    fill: var(--map-halo);
+    opacity: var(--map-halo-op);
     transform-box: fill-box;
     transform-origin: center;
     animation: tzpulse 3s ease-in-out infinite;
 }
 .tz-core {
-    fill: #3d6649;
+    fill: var(--map-core);
 }
 @keyframes tzpulse {
     0%,
     100% {
-        opacity: 0.12;
+        opacity: var(--map-halo-lo);
         transform: scale(0.8);
     }
     50% {
-        opacity: 0.4;
+        opacity: var(--map-halo-hi);
         transform: scale(1.6);
     }
 }
@@ -2110,6 +2120,16 @@ html:has(body.landing) {
         --line: #38383b;
         --accent: #5e9b6f;
         --accent-hover: #74b487;
+        /* Keeping the light map values here inverts the map: the grey land reads
+           at 6.13 against #161617 while the marks read at 2.75, so the geography
+           shouts and the data whispers. Dimming the land and lifting the marks
+           puts the figure back in front, where light already has it. */
+        --map-land: #55555e;
+        --map-core: #6ab98a;
+        --map-halo: #6ab98a;
+        --map-halo-op: 0.55;
+        --map-halo-lo: 0.28;
+        --map-halo-hi: 0.75;
         color-scheme: dark;
     }
 }
@@ -2123,6 +2143,16 @@ body.landing[data-theme="dark"] {
     --line: #38383b;
     --accent: #5e9b6f;
     --accent-hover: #74b487;
+    /* Keeping the light map values here inverts the map: the grey land reads
+       at 6.13 against #161617 while the marks read at 2.75, so the geography
+       shouts and the data whispers. Dimming the land and lifting the marks
+       puts the figure back in front, where light already has it. */
+    --map-land: #55555e;
+    --map-core: #6ab98a;
+    --map-halo: #6ab98a;
+    --map-halo-op: 0.55;
+    --map-halo-lo: 0.28;
+    --map-halo-hi: 0.75;
     color-scheme: dark;
 }
 
