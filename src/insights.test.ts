@@ -105,6 +105,7 @@ function meal(logged_at: string, fields: Partial<Meal> = {}): Meal {
         fiber_g: null,
         sugar_g: null,
         alcohol_g: null,
+        caffeine_mg: null,
         notes: null,
         idempotency_key: null,
         ...fields,
@@ -121,6 +122,7 @@ function goals(fields: Partial<NutritionGoals> = {}): NutritionGoals {
         daily_fiber_g: null,
         daily_sugar_g: null,
         daily_alcohol_g: null,
+        daily_caffeine_mg: null,
         daily_water_ml: null,
         target_weight_g: null,
         updated_at: "2026-06-02T00:00:00Z",
@@ -388,6 +390,147 @@ test("computeWeeklyDigest reports a zero-limit nutrient held at zero as clear", 
     const buckets = twoDayBuckets({ sugar_g: 0 }, { sugar_g: 0 });
     const out = computeWeeklyDigest(buckets, goals({ daily_sugar_g: 0 }));
     expect(out).toContain("  Sugar: 0g / 0g limit (clear)");
+});
+
+// ---------- caffeine ----------
+//
+// The partial-nutrient problem in its sharpest form: caffeine shipped long after
+// the meals table, so every historical row is NULL and most future rows will be
+// too. It is also the one nutrient here that carries no energy — it must never
+// reach a calorie figure — and the one with no per-user opt-in flag, so the
+// data-driven suppression below is the entire gate on rendering it.
+
+test("buildDailyBuckets sums caffeine per day in mg without touching calories", () => {
+    const buckets = buildDailyBuckets(
+        [
+            meal("2026-06-01T08:00:00Z", { caffeine_mg: 95 }),
+            meal("2026-06-01T14:00:00Z", { caffeine_mg: 63 }),
+            meal("2026-06-02T12:00:00Z"), // caffeine null
+        ],
+        [],
+        "2026-06-01",
+        "2026-06-02",
+        "UTC",
+    );
+    expect(buckets[0]!.caffeine_mg).toBe(158);
+    // Nulls contribute 0 rather than NaN, and caffeine adds no kcal to either day.
+    expect(buckets[1]!.caffeine_mg).toBe(0);
+    expect(buckets[0]!.calories).toBe(1000);
+    expect(buckets[1]!.calories).toBe(500);
+});
+
+test("computeTrends averages caffeine over its covered days, never a null as zero", () => {
+    // 30 logged days, caffeine recorded on the last 5 — 200 mg each.
+    const buckets = windowBuckets(30, 5, { caffeine_mg: 200 });
+    const out = computeTrends(buckets, goals({ daily_caffeine_mg: 400 }));
+
+    // The null days are out of the denominator: 1000/30 = 33.3 mg would be the
+    // pre-feature history answering a question it has no data for.
+    expect(out).not.toContain("30d avg: 33.3 mg");
+    expect(out).toContain("  30d avg: 200 mg (5 of 30 days with data)");
+    expect(out).toContain("  Limit: 400 mg");
+    expect(out).toContain("  Days over limit: 0/5 days with data");
+    // Zero energy: the calorie line is untouched by 200 mg of caffeine.
+    expect(out).toContain("  30d avg: 500 kcal");
+});
+
+test("computeTrends renders no caffeine line for a history that never recorded any", () => {
+    const buckets = windowBuckets(30, 0, {});
+    const out = computeTrends(buckets, goals({ daily_caffeine_mg: 400 }));
+    expect(out).not.toContain("Caffeine");
+    expect(out).not.toContain("0 mg");
+    expect(out).toContain("Calories:");
+});
+
+test("computeTrends suppresses a recorded but flat-zero caffeine series", () => {
+    // Recorded zeroes are data, but a trend over them is noise — and there is no
+    // profile flag to fall back on, so this check has to catch it.
+    const buckets = twoDayBuckets({ caffeine_mg: 0 }, { caffeine_mg: 0 });
+    const out = computeTrends(buckets, goals({ daily_caffeine_mg: 400 }));
+    expect(out).not.toContain("Caffeine");
+});
+
+test("computeTrends honours a caffeine limit of zero", () => {
+    const buckets = twoDayBuckets({ caffeine_mg: 95 }, { caffeine_mg: 0 });
+    const out = computeTrends(buckets, goals({ daily_caffeine_mg: 0 }));
+    // "None at all" is a real limit for caffeine as much as for alcohol.
+    expect(out).toContain("Caffeine:");
+    expect(out).toContain("  7d avg: 48 mg");
+    expect(out).toContain("  Limit: 0 mg");
+    expect(out).toContain("  Days over limit: 1/2 days with data");
+});
+
+// Every other nutrient here reads to one decimal, and caffeine used to as well
+// — so one chat could carry "Caffeine: 165 mg" from get_goal_progress and
+// "165.1 mg" from get_trends for the same day, with nothing to reconcile them.
+// mcp.ts renders whole milligrams (formatMg); this is the other half of that.
+// Three consecutive days whose caffeine figures do not land on a whole number.
+function awkwardCaffeineBuckets(): DailyBucket[] {
+    return buildDailyBuckets(
+        [
+            meal("2026-06-01T08:00:00Z", { caffeine_mg: 95.4, fiber_g: 4.44 }),
+            meal("2026-06-02T08:00:00Z", { caffeine_mg: 212.3, fiber_g: 7.77 }),
+            meal("2026-06-03T08:00:00Z", {
+                caffeine_mg: 187.55,
+                fiber_g: 2.22,
+            }),
+        ],
+        [],
+        "2026-06-01",
+        "2026-06-03",
+        "UTC",
+    );
+}
+
+test("computeTrends renders caffeine in whole milligrams, siblings unchanged", () => {
+    const out = computeTrends(
+        awkwardCaffeineBuckets(),
+        goals({ daily_caffeine_mg: 399.6 }),
+    );
+    // 495.25 / 3 = 165.083…
+    expect(out).toContain("  7d avg: 165 mg");
+    expect(out).not.toContain("165.1 mg");
+    // The std dev and the limit take the same precision — a decimal on any one
+    // of them reintroduces a tenth the database, the labels and the export all
+    // lack. numeric(7,2) is why the limit can carry one at all.
+    expect(out).toContain("  Std dev: 62 mg (CV 37.3%)");
+    expect(out).toContain("  Limit: 400 mg");
+    expect(out).not.toContain("399.6");
+    // Sibling nutrients keep their tenth: 14.43 / 3 = 4.81.
+    expect(out).toContain("  7d avg: 4.8g");
+});
+
+test("computeWeeklyDigest rounds caffeine and its limit to whole milligrams", () => {
+    const out = computeWeeklyDigest(
+        awkwardCaffeineBuckets(),
+        goals({ daily_caffeine_mg: 400 }),
+    );
+    expect(out).toContain("  Caffeine: 165 mg / 400 mg limit (41%)");
+    expect(out).not.toContain("165.1");
+});
+
+test("computeWeeklyDigest reports caffeine in mg against a limit", () => {
+    const buckets = windowBuckets(7, 2, { caffeine_mg: 300 });
+    const out = computeWeeklyDigest(buckets, goals({ daily_caffeine_mg: 400 }));
+    expect(out).toContain(
+        "  Caffeine: 300 mg / 400 mg limit (75%) — over 2 of 7 days with data",
+    );
+    // Not 600/7 = 85.7 mg: the five null days are not zeroes.
+    expect(out).not.toContain("Caffeine: 85.7 mg");
+});
+
+test("computeWeeklyDigest drops the caffeine row when there is no caffeine", () => {
+    const none = computeWeeklyDigest(
+        windowBuckets(7, 0, {}),
+        goals({ daily_caffeine_mg: 400 }),
+    );
+    expect(none).not.toContain("Caffeine");
+    // Recorded zeroes are suppressed too — "Caffeine: 0 mg" is the noise.
+    const zeroes = computeWeeklyDigest(
+        twoDayBuckets({ caffeine_mg: 0 }, { caffeine_mg: 0 }),
+        goals({ daily_caffeine_mg: 400 }),
+    );
+    expect(zeroes).not.toContain("Caffeine");
 });
 
 // ---------- the calendar-day denominator is stated (issue #70) ----------

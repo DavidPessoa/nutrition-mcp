@@ -18,6 +18,7 @@ export interface DailyBucket {
     fiber_g: number;
     sugar_g: number;
     alcohol_g: number;
+    caffeine_mg: number;
     mealTypes: Set<string>;
 }
 
@@ -83,6 +84,7 @@ export function buildDailyBuckets(
             fiber_g: 0,
             sugar_g: 0,
             alcohol_g: 0,
+            caffeine_mg: 0,
             mealTypes: new Set(),
         });
     }
@@ -99,6 +101,7 @@ export function buildDailyBuckets(
         b.fiber_g += m.fiber_g ?? 0;
         b.sugar_g += m.sugar_g ?? 0;
         b.alcohol_g += m.alcohol_g ?? 0;
+        b.caffeine_mg += m.caffeine_mg ?? 0;
         if (m.meal_type) b.mealTypes.add(m.meal_type);
     }
 
@@ -112,13 +115,16 @@ export function buildDailyBuckets(
     return [...buckets.values()].sort((a, b) => a.date.localeCompare(b.date));
 }
 
-/** The three nutrients added by the fiber/sugar/alcohol pass. Every meal written
- * before it shipped carries NULL for all three, so — unlike calories or protein,
- * where a missing value has always meant zero and users have history built on
- * that — a null here means "not recorded", not "ate none". Summing them as zero
- * over every logged day reported 5 g/day for a user eating 30 g, and scored 25
- * data-less days as days under a sugar limit. */
-export type PartialNutrient = "fiber_g" | "sugar_g" | "alcohol_g";
+/** The nutrients added after the fact — fiber, sugar and alcohol in one pass,
+ * caffeine in a later one. Every meal written before each pass shipped carries
+ * NULL for its nutrients, so — unlike calories or protein, where a missing value
+ * has always meant zero and users have history built on that — a null here means
+ * "not recorded", not "ate none". Summing them as zero over every logged day
+ * reported 5 g/day for a user eating 30 g, and scored 25 data-less days as days
+ * under a sugar limit. Caffeine is the same story and then some: most meals will
+ * legitimately never carry a value. */
+export type PartialNutrient =
+    "fiber_g" | "sugar_g" | "alcohol_g" | "caffeine_mg";
 
 /** THE RULE, shared with mcp.ts: a day carries a nutrient when at least one of
  * that day's meals has a non-null value for it. Only carrying days count toward
@@ -258,12 +264,17 @@ function nonEmpty(b: DailyBucket): boolean {
     return b.meals.length > 0 || b.waterMl > 0;
 }
 
-/** Whether an alcohol series is worth rendering at all. For most users it is
- * flat zero, and averages / a std dev / a CV over all-zero data are noise —
- * the same instinct as the widget hiding the water bar until water is tracked.
- * (Note this is data-driven only; the per-user alcohol_tracking_enabled flag
- * lives in mcp.ts, since this module stays free of Supabase.) */
-function hasAlcohol(values: number[]): boolean {
+/** Whether a suppressible series (alcohol, caffeine) is worth rendering at all.
+ * For most users it is flat zero, and averages / a std dev / a CV over all-zero
+ * data are noise — the same instinct as the widget hiding the water bar until
+ * water is tracked.
+ *
+ * Note this is data-driven only. For alcohol it pairs with the per-user
+ * alcohol_tracking_enabled flag, which lives in mcp.ts since this module stays
+ * free of Supabase. Caffeine deliberately has NO such flag — the opt-in exists
+ * for a specific harm (surfacing trace alcohol to a user in recovery) that has
+ * no caffeine equivalent — so for caffeine this check is the whole gate. */
+function hasAnyPositive(values: number[]): boolean {
     return values.some((v) => v > 0);
 }
 
@@ -300,6 +311,12 @@ function formatStatLine(
     series: StatSeries,
     target: number | null,
     direction: StatDirection = "floor",
+    // Decimal places for every figure that carries `unit`. Caffeine passes 0:
+    // mcp.ts renders it as whole milligrams everywhere (see formatMg there), and
+    // a model narrating get_goal_progress and get_trends in one breath must not
+    // report the same day as "165 mg" and "165.1 mg". The tenth is not real
+    // precision either — no label, export or column in this database carries it.
+    decimals = 1,
 ): string | null {
     const { values, trailing, partial } = series;
     if (partial && values.length === 0) return null;
@@ -323,30 +340,36 @@ function formatStatLine(
             : t.loggedDays < t.window
               ? ` (calendar-day average; ${t.loggedDays} of ${t.window} days logged)`
               : "";
-        parts.push(`  ${t.n}d avg: ${round(t.avg)}${unit}${note}`);
+        parts.push(`  ${t.n}d avg: ${round(t.avg, decimals)}${unit}${note}`);
     }
     if (targetApplies(target, direction)) {
         const limit = target!;
+        // Displayed at the nutrient's own precision; the comparisons below stay
+        // on the raw stored figure, so rounding the label can never move a day
+        // across the line it is being judged against.
+        const shownLimit = round(limit, decimals);
         if (direction === "ceiling") {
             // A limit is not something to land within ±10% of — hitting a sugar
             // cap dead-on is not the goal. Count the misses rather than the
             // wins: "Days under limit" would score every never-logged day as a
             // success, and a high hit-rate on a cap reads as praise for it.
             const daysOver = values.filter((v) => v > limit).length;
-            parts.push(`  Limit: ${limit}${unit}`);
+            parts.push(`  Limit: ${shownLimit}${unit}`);
             parts.push(`  Days over limit: ${daysOver}${of}`);
         } else {
             const daysOnTarget = values.filter(
                 (v) => v >= limit * 0.9 && v <= limit * 1.1,
             ).length;
-            parts.push(`  Target: ${limit}${unit}`);
+            parts.push(`  Target: ${shownLimit}${unit}`);
             parts.push(`  Days within ±10% of target: ${daysOnTarget}${of}`);
         }
     }
     const sd = stdDev(values);
     const m = mean(values);
     const cv = m > 0 ? (sd / m) * 100 : 0;
-    parts.push(`  Std dev: ${round(sd)}${unit} (CV ${round(cv)}%)`);
+    // The CV keeps a decimal whatever the nutrient: it is a ratio in percent,
+    // not a quantity in `unit`, so the precision argument above does not apply.
+    parts.push(`  Std dev: ${round(sd, decimals)}${unit} (CV ${round(cv)}%)`);
     return parts.join("\n");
 }
 
@@ -358,8 +381,9 @@ export function computeTrends(
 
     const logged = buckets.filter(nonEmpty);
     // Calories/protein/carbs/fat/water: every day counts, as they always have.
-    // Fiber/sugar/alcohol: only the days that carry them (see coveredSeries).
+    // Fiber/sugar/alcohol/caffeine: only the days that carry them (coveredSeries).
     const alcoholSeries = coveredSeries(buckets, "alcohol_g");
+    const caffeineSeries = coveredSeries(buckets, "caffeine_mg");
 
     const sections: string[] = [];
     const push = (line: string | null) => {
@@ -436,7 +460,7 @@ export function computeTrends(
     // Alcohol only appears once there is alcohol to talk about — a recorded but
     // flat-zero series is suppressed too (that is also how mcp.ts's opt-in
     // reaches this module: it zeroes the series).
-    if (hasAlcohol(alcoholSeries.values)) {
+    if (hasAnyPositive(alcoholSeries.values)) {
         push(
             formatStatLine(
                 "Alcohol",
@@ -444,6 +468,25 @@ export function computeTrends(
                 alcoholSeries,
                 goals?.daily_alcohol_g ?? null,
                 "ceiling",
+            ),
+        );
+    }
+    // Caffeine is milligrams, and a ceiling: the guidelines people set against
+    // it (EFSA's 400 mg/day) are limits, and 0 mg is a meaningful one. It is a
+    // stat line and nothing more — it carries no energy, so it never enters the
+    // calorie figures above or any macro split. Suppression is data-driven only:
+    // there is no caffeine equivalent of alcohol_tracking_enabled in mcp.ts, so
+    // this check is what keeps a pre-feature history from reading "0 mg". The
+    // trailing 0 is the decimal count: whole milligrams, matching mcp.ts.
+    if (hasAnyPositive(caffeineSeries.values)) {
+        push(
+            formatStatLine(
+                "Caffeine",
+                " mg",
+                caffeineSeries,
+                goals?.daily_caffeine_mg ?? null,
+                "ceiling",
+                0,
             ),
         );
     }
@@ -740,7 +783,7 @@ export function computeWeeklyDigest(
     const avgCarbs = round(mean(buckets.map((b) => b.carbs_g)));
     const avgFat = round(mean(buckets.map((b) => b.fat_g)));
     // Same rule as computeTrends, so the two narratives cannot disagree: these
-    // three average over the days that carry them, not over the whole week.
+    // average over the days that carry them, not over the whole week.
     const covered = (nutrient: PartialNutrient) => {
         const days = buckets.filter((b) => dayCarries(b.meals, nutrient));
         return {
@@ -754,6 +797,12 @@ export function computeWeeklyDigest(
     const fiber = covered("fiber_g");
     const sugar = covered("sugar_g");
     const alcohol = covered("alcohol_g");
+    const caffeine = covered("caffeine_mg");
+    // Whole milligrams, like every other caffeine figure the model reads (see
+    // formatMg in mcp.ts and the trends line's `decimals` argument). Rounded
+    // here rather than at the call site so the suppression below is keyed on
+    // the figure that would actually be printed.
+    const caffeineAvg = caffeine.avg != null ? Math.round(caffeine.avg) : null;
     const avgWater = round(mean(buckets.map((b) => b.waterMl)));
     const totalMeals = buckets.reduce((s, b) => s + b.meals.length, 0);
 
@@ -838,7 +887,7 @@ export function computeWeeklyDigest(
             ),
         );
     }
-    // Suppressed for the same reason as the trends line (see hasAlcohol), but
+    // Suppressed for the same reason as the trends line (see hasAnyPositive), but
     // keyed on the rendered average rather than the raw series: a row reading
     // "Alcohol: 0g" is exactly the noise the suppression exists to avoid.
     if (alcohol.avg != null && alcohol.avg > 0) {
@@ -850,6 +899,27 @@ export function computeWeeklyDigest(
                 goals?.daily_alcohol_g ?? null,
                 "limit",
                 alcohol.days,
+            ),
+        );
+    }
+    // Same suppression, and for caffeine it is the only one there is (no profile
+    // flag by design — see hasAnyPositive). A row reading "Caffeine: 0 mg" for
+    // someone who has never recorded a cup is exactly what it exists to avoid.
+    if (caffeineAvg != null && caffeineAvg > 0) {
+        lines.push(
+            line(
+                "Caffeine",
+                caffeineAvg,
+                " mg",
+                // The limit is rendered at the same whole-milligram precision
+                // as the figure it is compared against, and as formatGoals in
+                // mcp.ts already echoes it. daily_caffeine_mg is numeric(7,2),
+                // so it is the one goal column that can carry a stray decimal.
+                goals?.daily_caffeine_mg != null
+                    ? Math.round(goals.daily_caffeine_mg)
+                    : null,
+                "limit",
+                caffeine.days,
             ),
         );
     }
