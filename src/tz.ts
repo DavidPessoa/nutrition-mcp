@@ -53,6 +53,15 @@ export function formatLocalDateTime(
     return `${get("year")}-${get("month")}-${get("day")} ${hour}:${get("minute")}:${get("second")}`;
 }
 
+/** Local weekday name ("Monday") of an absolute instant in the given IANA timezone. */
+export function weekdayInTz(instant: Date | string, tz: string): string {
+    const d = instant instanceof Date ? instant : new Date(instant);
+    return new Intl.DateTimeFormat("en-US", {
+        timeZone: tz,
+        weekday: "long",
+    }).format(d);
+}
+
 /** Local hour (0-23) of an absolute instant in the given IANA timezone. */
 export function hourInTz(instant: Date | string, tz: string): number {
     const d = instant instanceof Date ? instant : new Date(instant);

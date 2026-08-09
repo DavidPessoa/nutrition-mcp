@@ -49,7 +49,7 @@ import type {
     WaterEntry,
     WeightEntry,
 } from "./supabase.js";
-import { dateInTz } from "./tz.js";
+import { dateInTz, formatLocalDateTime, weekdayInTz } from "./tz.js";
 
 function meal(over: Partial<Meal> = {}): Meal {
     return {
@@ -3134,5 +3134,153 @@ describe("manual write tools resolve logged_at in the profile timezone", () => {
             );
             expect(loggedAtOf(db.inserted[0])).toBe("2026-07-20T19:00:00.000Z");
         });
+    });
+});
+
+// ---------- the server is the clock (issue #102) ----------
+//
+// Several hosts (Claude Desktop among them) keep the wall clock out of the
+// model's context. With no clock the model either interrogated the user ("what
+// time is it?") on every single log, or guessed — and a guessed time lands on
+// the wrong local day for anyone far from UTC. The server always knows both the
+// instant and the user's zone, so it says so.
+//
+// These read the real clock, so they assert SHAPE and ZONE, never a pinned
+// value: the date is compared against dateInTz sampled around the call, which
+// is both zone-sensitive and immune to a midnight rollover mid-test.
+describe("current-time disclosure", () => {
+    /** "Local time now: Sunday 2026-08-09 15:04:22 (Europe/Kyiv)." */
+    const clockRe = (tz: string) =>
+        new RegExp(
+            `Local time now: ([A-Z][a-z]+day) (\\d{4}-\\d{2}-\\d{2}) (\\d{2}:\\d{2}:\\d{2}) \\(${tz}\\)\\.`,
+        );
+    const UTC_NOW_RE =
+        /UTC now: (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z)\./;
+
+    /** Assert the clock line names `tz`'s local day and weekday right now. */
+    function expectClockIn(text: string, tz: string, sampled: string[]): void {
+        const m = text.match(clockRe(tz));
+        expect(m).not.toBeNull();
+        const utc = text.match(UTC_NOW_RE);
+        expect(utc).not.toBeNull();
+        const instant = utc![1]!;
+        // The two halves are one instant rendered twice, so the zone is
+        // genuinely applied and not merely printed in the label — this holds at
+        // every hour, including the ones where tz and UTC share a date.
+        expect(`${m![2]} ${m![3]}`).toBe(formatLocalDateTime(instant, tz));
+        expect(m![1]).toBe(weekdayInTz(instant, tz));
+        // ...and that instant is now, not a fixture.
+        expect(sampled).toContain(dateInTz(instant, tz));
+    }
+
+    /** Local dates in `tz` before and after the call, to absorb a rollover. */
+    async function around(
+        tz: string,
+        run: () => Promise<string>,
+    ): Promise<{ text: string; sampled: string[] }> {
+        const before = dateInTz(new Date(), tz);
+        const text = await run();
+        const after = dateInTz(new Date(), tz);
+        return { text, sampled: [...new Set([before, after])] };
+    }
+
+    test("get_timezone reports the zone AND the user's current wall clock", async () => {
+        db.profile = { ...PROFILE_BASE, timezone: "Europe/Kyiv" };
+        await withTools(null, async (call) => {
+            const { text, sampled } = await around("Europe/Kyiv", async () =>
+                textOf(await call("get_timezone")),
+            );
+            expect(text).toContain("Timezone: Europe/Kyiv.");
+            expectClockIn(text, "Europe/Kyiv", sampled);
+            // The old line gave a date and no time, which is what left the
+            // model reconstructing an hour.
+            expect(text).not.toContain("Local today is");
+        });
+    });
+
+    test("get_timezone still gives a clock when no timezone is set", async () => {
+        db.profile = null;
+        await withTools(null, async (call) => {
+            const { text, sampled } = await around("UTC", async () =>
+                textOf(await call("get_timezone")),
+            );
+            expect(text).toContain("No timezone set yet (defaulting to UTC).");
+            expectClockIn(text, "UTC", sampled);
+            // Knowing the time must not cost the caller the nudge to configure
+            // a zone — UTC is a fallback, not the user's clock.
+            expect(text).toContain("set_timezone");
+        });
+    });
+
+    test("get_current_time answers in the profile's zone, and is measured", async () => {
+        db.profile = { ...PROFILE_BASE, timezone: "Asia/Tokyo" };
+        await withTools(null, async (call) => {
+            const { text, sampled } = await around("Asia/Tokyo", async () =>
+                textOf(await call("get_current_time")),
+            );
+            expectClockIn(text, "Asia/Tokyo", sampled);
+            expect(text).not.toContain("No timezone is set");
+        });
+
+        const rows = db.analyticsRows.filter(
+            (r) => r.tool_name === "get_current_time",
+        );
+        expect(rows).toHaveLength(1);
+        expect(rows[0]!.user_id).toBe("u1");
+        expect(rows[0]!.success).toBe(true);
+    });
+
+    // Without this the UTC fallback reads as the user's real local time, and a
+    // model would resolve "this morning" against a clock up to 14 hours off.
+    test("get_current_time flags that an unset zone means UTC, not local", async () => {
+        db.profile = null;
+        await withTools(null, async (call) => {
+            const { text, sampled } = await around("UTC", async () =>
+                textOf(await call("get_current_time")),
+            );
+            expectClockIn(text, "UTC", sampled);
+            expect(text).toContain("No timezone is set for this account");
+            expect(text).toContain("set_timezone");
+        });
+    });
+
+    // The shipped guidance is the actual fix: the three "log it now" tools used
+    // to tell the model to ask the user for the time before calling them. Now
+    // they tell it to omit the field and let the server stamp now.
+    test("log_meal, log_water and log_weight tell the model to omit logged_at, not to ask", async () => {
+        const server = new McpServer(
+            { name: "t", version: "0.0.0" },
+            { capabilities: { tools: {}, resources: {} } },
+        );
+        registerTools(server, "u1", true, null);
+        const [ct, st] = InMemoryTransport.createLinkedPair();
+        const client = new Client({ name: "c", version: "0.0.0" });
+        await Promise.all([server.connect(st), client.connect(ct)]);
+        try {
+            const { tools } = await client.listTools();
+            for (const name of ["log_meal", "log_water", "log_weight"]) {
+                const props = (
+                    tools.find((t) => t.name === name)?.inputSchema as {
+                        properties?: Record<string, { description?: string }>;
+                    }
+                )?.properties;
+                const desc = props?.logged_at?.description ?? "";
+                expect(desc).not.toBe("");
+                expect(desc).not.toContain(
+                    "ask the user before calling this tool",
+                );
+                // The only surviving mention of asking is the prohibition.
+                expect(
+                    desc.replaceAll("Do NOT ask the user what time it is.", ""),
+                ).not.toContain("ask the user");
+                expect(desc).toContain("omit this field entirely");
+                expect(desc).toContain("get_current_time");
+            }
+            // ...and the tool that replaces the question is actually reachable.
+            expect(tools.map((t) => t.name)).toContain("get_current_time");
+        } finally {
+            await client.close();
+            await server.close();
+        }
     });
 });
