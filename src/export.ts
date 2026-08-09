@@ -33,6 +33,10 @@ const CSV_COLUMNS = [
     "fiber_g",
     "sugar_g",
     "alcohol_g",
+    // Milligrams, and the header says so. Every other nutrient column here is
+    // grams, so a bare "caffeine" header is exactly how a re-import — ours or
+    // anyone else's — turns 180 mg into 180 g.
+    "caffeine_mg",
     "notes",
 ] as const;
 
@@ -68,6 +72,7 @@ export function buildMealsCsv(meals: Meal[], tz: string): string {
                 csvEscape(m.fiber_g),
                 csvEscape(m.sugar_g),
                 csvEscape(m.alcohol_g),
+                csvEscape(m.caffeine_mg),
                 csvEscape(m.notes),
             ].join(","),
         );

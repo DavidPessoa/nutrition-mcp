@@ -1,6 +1,6 @@
 # Nutrition MCP
 
-A remote MCP server for personal nutrition tracking — log meals with calories, macros, fiber and total sugar, log water and body weight, review nutrition history, and import an existing food diary from another app, all through conversation. Alcohol tracking is opt-in and off by default.
+A remote MCP server for personal nutrition tracking — log meals with calories, macros, fiber, total sugar and caffeine, log water and body weight, review nutrition history, and import an existing food diary from another app, all through conversation. Alcohol tracking is opt-in and off by default.
 
 [Help me pay for the servers on Patreon][patreon]
 
@@ -38,7 +38,7 @@ Read the story behind it: [How I Replaced MyFitnessPal and Other Apps with a Sin
 
 | Tool                       | Description                                                                                                                                      |
 | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `log_meal`                 | Log a meal with description, type, calories, macros, fiber, total sugar, alcohol, notes — from text or a photo of your plate                     |
+| `log_meal`                 | Log a meal with description, type, calories, macros, fiber, total sugar, alcohol, caffeine (mg), notes — from text or a photo of your plate      |
 | `start_meal_import`        | Open the in-chat CSV importer: pick an export from another app, map its columns, preview, confirm                                                |
 | `bulk_import_meals`        | Write up to 50 imported rows per call — each row validated, duplicates skipped so a re-send is safe                                              |
 | `lookup_barcode`           | Look up a packaged product's label nutrition by barcode via Open Food Facts (read from a photo or typed)                                         |
@@ -49,7 +49,7 @@ Read the story behind it: [How I Replaced MyFitnessPal and Other Apps with a Sin
 | `get_nutrition_summary`    | Daily nutrition totals + goal progress for a date range                                                                                          |
 | `update_meal`              | Update any fields of an existing meal                                                                                                            |
 | `delete_meal`              | Delete a meal by ID                                                                                                                              |
-| `set_nutrition_goals`      | Set daily calorie, macro, fiber and water targets to reach, sugar and alcohol limits to stay under, plus an optional target weight               |
+| `set_nutrition_goals`      | Set daily calorie, macro, fiber and water targets to reach, sugar/alcohol/caffeine limits to stay under, plus an optional target weight          |
 | `get_nutrition_goals`      | Get the current daily targets and limits                                                                                                         |
 | `get_goal_progress`        | Get intake vs. targets and limits for a given day (default: today), plus latest weight vs. target                                                |
 | `log_water`                | Log a hydration entry in milliliters                                                                                                             |

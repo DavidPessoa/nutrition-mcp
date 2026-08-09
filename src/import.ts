@@ -42,6 +42,14 @@ export const MAX_MACRO_G = 5_000;
  *  while rejecting the likely mistake of pointing the column at millilitres of
  *  drink (a 750 mL bottle of wine) or at a stray extra digit. */
 export const MAX_ALCOHOL_G = 500;
+/** Milligrams, not grams — the only nutrient bound here that is not in grams.
+ *  5,000 mg is ~50 espressos or ~12 g of pure caffeine, well past the lethal
+ *  range and far above any single row a real export can produce, while still
+ *  catching the mistake that matters: a column pointed at grams of coffee
+ *  BEANS, or a stray digit. A grams-valued caffeine column is the opposite
+ *  failure — 0.18 instead of 180 — and no ceiling can catch that, which is why
+ *  the header must carry the unit (see CSV_COLUMNS in src/export.ts). */
+export const MAX_CAFFEINE_MG = 5_000;
 const MAX_DESCRIPTION_CHARS = 2_000;
 const MAX_NOTES_CHARS = 4_000;
 const MAX_PAST_MS = 20 * 365.25 * 24 * 3600 * 1000;
@@ -90,6 +98,12 @@ export interface ImportRow {
      *  profile has alcohol tracking off: that flag gates DISPLAY only, and
      *  dropping a value at the write layer would lose data silently. */
     alcohol_g?: number;
+    /** MILLIGRAMS, unlike every gram-valued sibling above — labels, exports and
+     *  guidelines all state caffeine in mg, and a shot of espresso is 0.063 g.
+     *  The field name carries the unit for the same reason the CSV header does:
+     *  a caller reading "caffeine" off a column and sending grams is off by
+     *  1000x, and no bound can distinguish that from a genuinely small dose. */
+    caffeine_mg?: number;
     notes?: string;
     /** Caller-chosen correlation label. Echoed back; never used as a key. */
     client_row_id?: string;
@@ -655,6 +669,9 @@ export function validateRow(
         ["fiber_g", row.fiber_g, MAX_MACRO_G, "g"],
         ["sugar_g", row.sugar_g, MAX_MACRO_G, "g"],
         ["alcohol_g", row.alcohol_g, MAX_ALCOHOL_G, "g"],
+        // The one row whose unit is not "g". numberError renders this unit into
+        // the message, so a caffeine bound must never report grams.
+        ["caffeine_mg", row.caffeine_mg, MAX_CAFFEINE_MG, "mg"],
     ] as const) {
         const err = checkMacro(field, value, max, unit);
         if (err) return fail(err);
@@ -678,6 +695,14 @@ export function validateRow(
     // Stored unconditionally. alcohol_tracking_enabled hides alcohol from the
     // rendered output; it must never suppress the write.
     if (row.alcohol_g !== undefined) input.alcohol_g = row.alcohol_g;
+    // Also unconditional, but for a different reason: caffeine has no opt-in
+    // flag at all — no caffeine_tracking_enabled, no tool pair, nothing for the
+    // importer to consult. Where alcohol is written despite a flag that could
+    // have gated it, caffeine simply has no gate. Suppression is data-driven on
+    // the read side (a caffeine line appears only once some value is > 0), so a
+    // meal that never carried caffeine stays NULL rather than becoming a 0 that
+    // would drag every average down.
+    if (row.caffeine_mg !== undefined) input.caffeine_mg = row.caffeine_mg;
     if (row.notes !== undefined) input.notes = row.notes;
 
     return {
@@ -707,7 +732,7 @@ function sha256Hex(parts: (string | number | null | undefined)[]): string {
 /** Content digest of a resolved row. Excludes source_line so that re-exporting
  *  a file with lines added or removed still dedupes against a prior import. */
 export function rowContentDigest(userId: string, input: MealInput): string {
-    // DO NOT ADD fiber_g, sugar_g OR alcohol_g TO THIS ARRAY.
+    // DO NOT ADD fiber_g, sugar_g, alcohol_g OR caffeine_mg TO THIS ARRAY.
     //
     // The list below is not "the fields of a meal" — it is a frozen positional
     // hash input. Appending to it changes the digest of every row hashed from
@@ -717,9 +742,10 @@ export function rowContentDigest(userId: string, input: MealInput): string {
     // deriveIdempotencyKey in src/supabase.ts is frozen for the same reason and
     // must stay in step with this one.
     //
-    // The accepted cost: two meals differing ONLY in fiber/sugar/alcohol collapse
-    // to one. Dedup stability is worth more than that precision here, and a
-    // caller that needs the rows kept apart can pass an explicit idempotency_key.
+    // The accepted cost: two meals differing ONLY in fiber/sugar/alcohol/caffeine
+    // collapse to one. Dedup stability is worth more than that precision here,
+    // and a caller that needs the rows kept apart can pass an explicit
+    // idempotency_key.
     return sha256Hex([
         userId,
         input.description,

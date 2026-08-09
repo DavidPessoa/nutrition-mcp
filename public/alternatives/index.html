@@ -281,8 +281,9 @@
                             by name; any other CSV works too, you just point the
                             mapper at each column once. What comes across is the
                             date and time, food, meal, calories, protein, carbs,
-                            fat, fiber, and total sugar — and alcohol as well,
-                            if you've switched alcohol tracking on first.
+                            fat, fiber, total sugar, and caffeine in milligrams
+                            — and alcohol as well, if you've switched alcohol
+                            tracking on first.
                         </p>
                         <p>
                             The awkward parts of real export files are handled:
@@ -293,12 +294,12 @@
                             inside them, trailing totals rows, and deleted-row
                             flags. Column headings don't have to be English
                             either — a German export's Kalorien or Ballaststoffe
-                            is recognised, and fiber and sugar are matched in
-                            Spanish, French, Italian, and Dutch too. Where a
-                            file is genuinely ambiguous — 05/06 could be May or
-                            June — the importer shows its reading next to a row
-                            from your own file and asks you to confirm rather
-                            than guessing. And each row carries a content
+                            is recognised, and fiber, sugar, and caffeine are
+                            matched in Spanish, French, Italian, and Dutch too.
+                            Where a file is genuinely ambiguous — 05/06 could be
+                            May or June — the importer shows its reading next to
+                            a row from your own file and asks you to confirm
+                            rather than guessing. And each row carries a content
                             fingerprint, so re-importing the same file reports
                             the meals as already logged instead of duplicating
                             them.

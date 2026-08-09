@@ -141,6 +141,7 @@ repaint a whole series with it (see the ring convention below).
 | `--sugar`    | `#65a30d` | `#a3e635` |
 | `--fat`      | `#f43f7e` | `#fb7199` |
 | `--alcohol`  | `#a21caf` | `#e879f9` |
+| `--caffeine` | `#7a5230` | `#c79a6d` |
 | `--water`    | `#0ea5e9` | `#38bdf8` |
 | `--over`     | `#d0452b` | `#ff6b52` |
 | `--warn`     | `#b26a00` | `#e0a030` |
@@ -150,7 +151,9 @@ deeper teal and a lime), because fiber and sugar are _parts of_ carbs and only
 ever appear inside the carbs disclosure — they should read as related to
 `--carbs`, not compete with it. `--alcohol` is the one series with no
 neighbour, so it takes the otherwise-unused plum/fuchsia slot, well clear of
-`--protein` (violet) and `--fat` (rose).
+`--protein` (violet) and `--fat` (rose). `--caffeine` is coffee brown, the last
+unused hue: it must not drift amber, because `--calories` and `--warn` already
+own that end of the wheel.
 
 Two additions the block above elides for brevity, both present in all four theme
 blocks in `tokens.css`:
@@ -390,13 +393,16 @@ The intake-vs-goal view shared by `nutrition-summary`, `goal-progress`,
 the macros out by importance: **calories** as a full-width hero ring
 (`.macro-hero`), **protein / carbs / fat** as three smaller rings in one row card
 (`.macro-row` → `.macro-cell`), and **water** as a full-width horizontal progress
-bar (`.macro-water`). All of it — CSS and markup — lives in `shared/macros.css` +
+bar (`.macro-water`), with **alcohol** and **caffeine** as plain stat lines
+underneath (`.macro-stat`). All of it — CSS and markup — lives in `shared/macros.css` +
 `shared/macros.js`; include both (plus `shared/ring.css`, which the rings depend
 on) and call one function:
 
 ```js
 // vals / goal: objects keyed by calories, protein_g, carbs_g, fat_g, fiber_g,
-//   sugar_g, alcohol_g, water_ml (a day's totals, a range's averages, a slice…)
+//   sugar_g, alcohol_g, caffeine_mg, water_ml (a day's totals, a range's
+//   averages, a slice…). caffeine_mg is the one key not in grams — the unit is
+//   in the name at every layer down to the DB column for exactly that reason.
 // wording: { under: "left" | "under", over: "over" } — default "left" / "over".
 //          trends uses { under: "under" } ("421 kcal under"). FLOORS only;
 //          a ceiling always reads "under" / "over" / "at limit".
@@ -414,18 +420,26 @@ protein/carbs/fat row), `bar` (the water bar), `sub` (a sub-component of
 no gauge). `TOP_LEVEL_MACRO_KEYS` / `dayHasData()` are derived the same way, so
 "was anything logged this day?" stays a question about top-level metrics only.
 
-Three rules the newer nutrients encode:
+Four rules the newer nutrients encode:
 
 - **Fiber and sugar are `sub`s of carbs, not rings.** Tapping carbs opens the
   same disclosure that lists contributing meals, with an "of which" block of
   compact bar stats above the list. A six-ring panel was explicitly rejected.
 - **Alcohol is a `stat` line** — grams with the drink count as a gloss
-  ("2.0 US drinks · 27.7 g"). `alcohol_g: null` means the user has alcohol
-  tracking off and the line is dropped entirely; `0` from a tracking user is a
-  real alcohol-free day and stays on screen. (Contrast the water bar, which
-  hides at 0 — water has no opt-in, so its 0 cannot mean anything but
-  "untracked".)
-- **`direction: "ceiling"`** (sugar, alcohol) mirrors `GoalDirection` in
+  ("2.0 US drinks · 27.7 g"), which is what its `gloss: "drinks"` entry asks
+  for. `alcohol_g: null` means the user has alcohol tracking off and the line is
+  dropped entirely; `0` from a tracking user is a real alcohol-free day and
+  stays on screen. (Contrast the water bar, which hides at 0 — water has no
+  opt-in, so its 0 cannot mean anything but "untracked".)
+- **Caffeine is a second `stat` line, in whole milligrams and with no gloss** —
+  there is no second unit anyone thinks in, so it reads "185 mg". It carries
+  **zero kcal**, which is why it is a stat and never a ring, a `sub` of carbs or
+  a segment of any energy split. And unlike alcohol it has **no profile opt-in**
+  by design: `caffeine_mg: null` is the entire display gate, and it means "the
+  user has never recorded any" — the line then disappears rather than inventing
+  a "0 mg of 400 mg" reading for someone who never went near the limit. A `0` on
+  a day that does carry the nutrient is a real reading and stays.
+- **`direction: "ceiling"`** (sugar, alcohol, caffeine) mirrors `GoalDirection` in
   `src/mcp.ts`: the caption reads "limit 45 g · 16 g over" and only a ceiling
   turns `var(--over)` when exceeded — passing a fiber goal is the goal being
   met, not a warning. A ceiling never says "left": staying under a limit is not

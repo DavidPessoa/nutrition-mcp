@@ -11,9 +11,9 @@
   7 / 14 / 30-day toggle slices it CLIENT-SIDE and re-renders — no host round-trip,
   so switching ranges is instant. Each range shows a calories/day line chart and
   the trailing average vs goal as rings (average over the window; calories,
-  protein, carbs, fat and water count empty days as 0, while fiber, sugar and
-  alcohol average only over the days that recorded them — see avgOf below —
-  matching the tool's text output).
+  protein, carbs, fat and water count empty days as 0, while fiber, sugar,
+  alcohol and caffeine average only over the days that recorded them — see avgOf
+  below — matching the tool's text output).
 
   The denominator is EVERY CALENDAR DAY in the window, not just the logged ones:
   these rings answer "how am I doing across this stretch of time?", so a skipped
@@ -94,6 +94,15 @@
                         // day (still shows), a value on the rest. null on
                         // every day (tracking off) hides the stat line.
                         alcohol_g: skip ? null : i % 7 ? 0 : r(13.9 + w * 4),
+                        // Caffeine on most days but not all, and never a 0 on
+                        // a day that simply has none: avgOf must divide by the
+                        // days that recorded it, not by the window. null on
+                        // every day (nobody ever logged any) hides the line —
+                        // there is no opt-in flag to hide it any other way.
+                        caffeine_mg:
+                            skip || i % 5 === 0
+                                ? null
+                                : Math.round(185 + w * 60),
                         water_ml: skip ? 0 : Math.round(2200 + w * 320),
                     });
                 }
@@ -108,6 +117,7 @@
                         fiber_g: 30,
                         sugar_g: 45,
                         alcohol_g: 20,
+                        caffeine_mg: 400,
                         water_ml: 2500,
                     },
                     days,
@@ -136,15 +146,15 @@
             // sum / count of non-null days — matches computeTrends'
             // coveredSeries (src/insights.ts), which is where the tool's text
             // trailingAverage comes from. Calories/protein/carbs/fat/water are
-            // never null (every day counts, as always), but fiber_g, sugar_g
-            // and alcohol_g arrive null on a day that never recorded them —
-            // dividing by days.length there would count a no-data day as a
-            // real zero, exactly the drift this fixes.
+            // never null (every day counts, as always), but fiber_g, sugar_g,
+            // alcohol_g and caffeine_mg arrive null on a day that never
+            // recorded them — dividing by days.length there would count a
+            // no-data day as a real zero, exactly the drift this fixes.
             //
-            // A key that is null on EVERY day averages to null, not 0. That is
-            // the alcohol opt-in: alcohol_g arrives null when the user has
-            // tracking off, and a 0 there would claim an alcohol-free window
-            // instead of hiding the metric.
+            // A key that is null on EVERY day averages to null, not 0, which is
+            // what hides a metric the user has nothing to say about: alcohol_g
+            // when tracking is off, caffeine_mg when it was never recorded. A 0
+            // there would claim an alcohol-free / caffeine-free window instead.
             function avgOf(days, key) {
                 if (!days.length) return 0;
                 let sum = 0;
@@ -250,9 +260,10 @@
                 // unlogged days), so the array is basically never empty — treat
                 // an all-zero series (nothing logged) as empty too.
                 // dayHasData (shared/macros.js) derives the test from MACROS,
-                // so it covers exactly the top-level metrics — fiber, sugar and
-                // alcohol never appear without a meal that already contributes
-                // calories, and a null alcohol_g must not count as a logged day.
+                // so it covers exactly the top-level metrics — fiber, sugar,
+                // alcohol and caffeine never appear without a meal that already
+                // contributes calories, and a null on any of them must not
+                // count as a logged day.
                 const anyLogged =
                     data &&
                     Array.isArray(data.days) &&

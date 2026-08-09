@@ -115,6 +115,10 @@ export interface Meal {
     fiber_g: number | null;
     sugar_g: number | null;
     alcohol_g: number | null;
+    // MILLIGRAMS, unlike every other nutrient here — labels and guidelines are
+    // all stated in mg, so the unit rides in the name at every layer.
+    // Contributes no energy: never feed this into a kcal derivation.
+    caffeine_mg: number | null;
     notes: string | null;
     idempotency_key: string | null;
 }
@@ -129,6 +133,8 @@ export interface MealInput {
     fiber_g?: number;
     sugar_g?: number;
     alcohol_g?: number;
+    // Milligrams — see Meal.caffeine_mg.
+    caffeine_mg?: number;
     logged_at?: string;
     notes?: string;
     idempotency_key?: string;
@@ -151,17 +157,18 @@ export function mealIdempotencyKey(
     loggedAt: string,
 ): string {
     // DO NOT ADD FIELDS TO THIS ARRAY. It is deliberately incomplete:
-    // fiber_g, sugar_g and alcohol_g are EXCLUDED on purpose, and any future
-    // meal column must be too. The digest is positional over exactly these
-    // values, so appending one changes the derived key of every future write —
-    // a user re-logging or re-importing something they already have would get a
-    // duplicate row instead of a clean no-op. This repo has shipped that bug
-    // once already (see CLAUDE.md, "Bulk meal import"); the mirror of this array
-    // is rowContentDigest in src/import.ts, which carries the same warning.
+    // fiber_g, sugar_g, alcohol_g and caffeine_mg are EXCLUDED on purpose, and
+    // any future meal column must be too. The digest is positional over exactly
+    // these values, so appending one changes the derived key of every future
+    // write — a user re-logging or re-importing something they already have
+    // would get a duplicate row instead of a clean no-op, and every "auto:" key
+    // already stored would be orphaned. This repo has shipped that bug once
+    // already (see CLAUDE.md, "Bulk meal import"); the mirror of this array is
+    // rowContentDigest in src/import.ts, which carries the same warning.
     //
     // Accepted consequence: two meals identical except for their fiber (or
-    // sugar, or alcohol) dedupe to one. Dedup stability beats precision here,
-    // and a caller who needs distinct rows can pass an explicit
+    // sugar, or alcohol, or caffeine) dedupe to one. Dedup stability beats
+    // precision here, and a caller who needs distinct rows can pass an explicit
     // idempotency_key.
     return deriveIdempotencyKey([
         userId,
@@ -220,6 +227,7 @@ export async function insertMeal(
             fiber_g: meal.fiber_g ?? null,
             sugar_g: meal.sugar_g ?? null,
             alcohol_g: meal.alcohol_g ?? null,
+            caffeine_mg: meal.caffeine_mg ?? null,
             logged_at: loggedAt,
             notes:
                 meal.notes != null ? decodeEscapeSequences(meal.notes) : null,
@@ -504,6 +512,8 @@ export async function updateMeal(
     if (fields.fiber_g !== undefined) update.fiber_g = fields.fiber_g;
     if (fields.sugar_g !== undefined) update.sugar_g = fields.sugar_g;
     if (fields.alcohol_g !== undefined) update.alcohol_g = fields.alcohol_g;
+    if (fields.caffeine_mg !== undefined)
+        update.caffeine_mg = fields.caffeine_mg;
     if (fields.logged_at !== undefined) update.logged_at = fields.logged_at;
     if (fields.notes !== undefined)
         update.notes =
@@ -674,6 +684,9 @@ export interface NutritionGoals {
     // every other goal here, which is a floor — see formatGoalLine in mcp.ts.
     daily_sugar_g: number | null;
     daily_alcohol_g: number | null;
+    // Milligrams, and a ceiling too — 0 means "none". numeric(7,2) in the DB,
+    // since mg targets run three orders larger than the gram ones above.
+    daily_caffeine_mg: number | null;
     daily_water_ml: number | null;
     target_weight_g: number | null;
     updated_at: string;
@@ -687,6 +700,7 @@ export interface NutritionGoalsInput {
     daily_fiber_g?: number | null;
     daily_sugar_g?: number | null;
     daily_alcohol_g?: number | null;
+    daily_caffeine_mg?: number | null;
     daily_water_ml?: number | null;
     target_weight_g?: number | null;
 }
@@ -701,8 +715,9 @@ export async function upsertNutritionGoals(
             {
                 user_id: userId,
                 // daily_calories and daily_water_ml are integer columns; the
-                // gram targets are numeric(6,2). See toStoredInteger — a water
-                // goal converted from "half a gallon" arrives fractional.
+                // gram targets are numeric(6,2) and daily_caffeine_mg is
+                // numeric(7,2). See toStoredInteger — a water goal converted
+                // from "half a gallon" arrives fractional.
                 daily_calories:
                     input.daily_calories == null
                         ? null
@@ -713,6 +728,7 @@ export async function upsertNutritionGoals(
                 daily_fiber_g: input.daily_fiber_g ?? null,
                 daily_sugar_g: input.daily_sugar_g ?? null,
                 daily_alcohol_g: input.daily_alcohol_g ?? null,
+                daily_caffeine_mg: input.daily_caffeine_mg ?? null,
                 daily_water_ml:
                     input.daily_water_ml == null
                         ? null

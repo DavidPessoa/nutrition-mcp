@@ -14,6 +14,7 @@ import {
     buildSummaryText,
     runImport,
     MAX_ROWS_PER_CALL,
+    MAX_CAFFEINE_MG,
     type ImportRow,
     type ImportDeps,
 } from "./import.js";
@@ -380,6 +381,116 @@ test("validateRow bounds alcohol far tighter than the other macros", () => {
     }
 });
 
+// ---------- caffeine (issue #101) ----------
+
+test("caffeine rides through in MILLIGRAMS and is never gated", async () => {
+    // Two claims in one, because they are the two ways caffeine differs from
+    // its siblings: the number is milligrams (a double espresso is ~126, not
+    // 0.126), and there is no opt-in flag anywhere on the path — unlike
+    // alcohol, nothing could suppress the write even in principle.
+    const v = validateRow(
+        row({ source_line: 4, caffeine_mg: 126 }),
+        0,
+        { tz: TZ, nowMs: NOW },
+        undefined,
+    );
+    expect(v.ok).toBe(true);
+    if (!v.ok) return;
+    expect(v.resolved.input.caffeine_mg).toBe(126);
+
+    const { deps, inserted } = makeStore();
+    const result = await runImport(
+        args([row({ source_line: 2, caffeine_mg: 95 })]),
+        deps,
+    );
+    expect(result.summary.created).toBe(1);
+    expect(inserted[0]!.caffeine_mg).toBe(95);
+});
+
+test("a meal with no caffeine column stays NULL, never 0", () => {
+    // The partial-nutrient rule: every meal logged before this shipped carries
+    // no caffeine, and a 0 would be a claim ("this coffee had none") that drags
+    // every daily average down. Absent must stay absent — including for the
+    // shapes a model actually sends when a cell is empty.
+    const omitted = validateRow(
+        row({ source_line: 5 }),
+        0,
+        { tz: TZ, nowMs: NOW },
+        undefined,
+    );
+    expect(omitted.ok).toBe(true);
+    if (!omitted.ok) return;
+    expect("caffeine_mg" in omitted.resolved.input).toBe(false);
+
+    const explicitUndefined = validateRow(
+        row({ source_line: 6, caffeine_mg: undefined }),
+        0,
+        { tz: TZ, nowMs: NOW },
+        undefined,
+    );
+    expect(explicitUndefined.ok).toBe(true);
+    if (explicitUndefined.ok)
+        expect("caffeine_mg" in explicitUndefined.resolved.input).toBe(false);
+
+    // An explicit null or an empty string is NOT silently read as "none": it is
+    // a non-finite value and is reported, exactly as for the gram-valued
+    // siblings. Asserted side by side so caffeine can never drift into a
+    // special case of its own.
+    for (const blank of [null, ""] as unknown as number[]) {
+        const caffeine = validateRow(
+            row({ source_line: 7, caffeine_mg: blank }),
+            0,
+            { tz: TZ, nowMs: NOW },
+            undefined,
+        );
+        const sugar = validateRow(
+            row({ source_line: 7, sugar_g: blank }),
+            0,
+            { tz: TZ, nowMs: NOW },
+            undefined,
+        );
+        expect(caffeine.ok).toBe(sugar.ok);
+        expect(caffeine.ok).toBe(false);
+        if (!caffeine.ok) {
+            expect(caffeine.error.field).toBe("caffeine_mg");
+            expect(caffeine.error.code).toBe("value_not_finite");
+        }
+    }
+});
+
+test("the caffeine bound is in mg and SAYS mg when it rejects", () => {
+    const check = (caffeine_mg: number) =>
+        validateRow(
+            row({ source_line: 2, caffeine_mg }),
+            0,
+            { tz: TZ, nowMs: NOW },
+            undefined,
+        );
+
+    expect(MAX_CAFFEINE_MG).toBe(5_000);
+    // A caffeinated pre-workout at 400 mg, and the ceiling itself, both pass.
+    expect(check(400).ok).toBe(true);
+    expect(check(MAX_CAFFEINE_MG).ok).toBe(true);
+
+    const over = check(MAX_CAFFEINE_MG + 1);
+    expect(over.ok).toBe(false);
+    if (!over.ok) {
+        expect(over.error.field).toBe("caffeine_mg");
+        expect(over.error.code).toBe("value_out_of_range");
+        expect(over.error.message).toContain("5000");
+        // The unit in the message is the whole point: this is the only bound
+        // here that is not grams, and a message reading "5000 g" would send the
+        // caller off to divide by a thousand.
+        expect(over.error.message).toContain("mg");
+        expect(over.error.message).not.toMatch(/\d\s*g\b/);
+    }
+
+    const neg = check(-1);
+    expect(neg.ok).toBe(false);
+    if (!neg.ok) expect(neg.error.field).toBe("caffeine_mg");
+    expect(check(Number.NaN).ok).toBe(false);
+});
+
 test("validateRow rejects implausible and malformed numbers with the observed value", () => {
     const bad = (over: Partial<ImportRow>) =>
         validateRow(
@@ -495,7 +606,7 @@ test("keys exclude source_line so a re-exported file still dedupes", () => {
     expect(build(5)).toBe(build(37));
 });
 
-test("fiber, sugar and alcohol are EXCLUDED from the content digest", async () => {
+test("fiber, sugar, alcohol and caffeine are EXCLUDED from the content digest", async () => {
     // The regression guard for the whole feature. rowContentDigest is a frozen
     // positional hash: adding the new fields would change the key of every row
     // hashed from then on, so a user re-importing a file they already imported
@@ -518,7 +629,10 @@ test("fiber, sugar and alcohol are EXCLUDED from the content digest", async () =
     expect(keyFor({ fiber_g: 3 })).toBe(plain);
     expect(keyFor({ sugar_g: 11 })).toBe(plain);
     expect(keyFor({ alcohol_g: 14 })).toBe(plain);
-    expect(keyFor({ fiber_g: 3, sugar_g: 11, alcohol_g: 14 })).toBe(plain);
+    expect(keyFor({ caffeine_mg: 95 })).toBe(plain);
+    expect(
+        keyFor({ fiber_g: 3, sugar_g: 11, alcohol_g: 14, caffeine_mg: 95 }),
+    ).toBe(plain);
     // A field that IS in the digest still moves it, so the test above is not
     // just asserting that every key is identical.
     expect(keyFor({ calories: 301 })).not.toBe(plain);
@@ -529,7 +643,15 @@ test("fiber, sugar and alcohol are EXCLUDED from the content digest", async () =
     const first = await runImport(args([row({ source_line: 2 })]), deps);
     expect(first.summary.created).toBe(1);
     const second = await runImport(
-        args([row({ source_line: 2, fiber_g: 3, sugar_g: 11, alcohol_g: 14 })]),
+        args([
+            row({
+                source_line: 2,
+                fiber_g: 3,
+                sugar_g: 11,
+                alcohol_g: 14,
+                caffeine_mg: 95,
+            }),
+        ]),
         deps,
     );
     expect(second.summary.created).toBe(0);
@@ -961,6 +1083,23 @@ test("serialized output validates against the declared outputSchema on every pat
                     ],
                     { on_error: "abort" },
                 ),
+                deps,
+            );
+        },
+        // A bound rejection is the caller's likeliest caffeine mistake (a
+        // grams column, or a stray digit), and it must come back as a complete
+        // result row rather than a thrown schema violation — the report IS the
+        // product. Bounds live in the handler for exactly this reason.
+        async caffeine_out_of_range() {
+            const { deps } = makeStore();
+            return runImport(
+                args([
+                    row({ source_line: 2 }),
+                    row({
+                        source_line: 3,
+                        caffeine_mg: MAX_CAFFEINE_MG + 1,
+                    }),
+                ]),
                 deps,
             );
         },

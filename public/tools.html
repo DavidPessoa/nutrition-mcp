@@ -552,12 +552,12 @@
                                 </div>
                                 <p class="tool-desc">
                                     Log what you ate with calories and macros —
-                                    plus fiber, total sugar and alcohol when the
-                                    numbers are there. Describe it in plain
-                                    language — the AI estimates the numbers,
-                                    asks about portion size when it's unclear,
-                                    and can pull label data from a barcode or
-                                    the web first.
+                                    plus fiber, total sugar, alcohol and
+                                    caffeine when the numbers are there.
+                                    Describe it in plain language — the AI
+                                    estimates the numbers, asks about portion
+                                    size when it's unclear, and can pull label
+                                    data from a barcode or the web first.
                                 </p>
                                 <div class="tool-params">
                                     <span class="tool-params-label"
@@ -634,6 +634,20 @@
                                             ABV — the AI works it out from the
                                             pour size and strength (a 330 ml 5%
                                             beer is 13 g)
+                                        </li>
+                                        <li>
+                                            <code>caffeine_mg</code>
+                                            <span class="param-opt"
+                                                >optional</span
+                                            >
+                                            — Caffeine in
+                                            <b>milligrams</b>, not grams — the
+                                            one field here that isn't in grams,
+                                            because that is how every label and
+                                            guideline states it (a brewed coffee
+                                            is about 95 mg, an espresso 63 mg, a
+                                            can of cola 34 mg). Caffeine adds no
+                                            calories
                                         </li>
                                         <li>
                                             <code>logged_at</code>
@@ -727,13 +741,13 @@
                                     history over from another app — pick the
                                     file you exported from MyFitnessPal,
                                     Cronometer, Lose It! or MacroFactor, match
-                                    its columns to calories, macros, fiber and
-                                    sugar — plus alcohol if you've turned
-                                    alcohol tracking on — and review what will
-                                    be added before you confirm. The file is
-                                    read in your browser, nothing is saved until
-                                    you approve the preview, and importing the
-                                    same file again won't create duplicates.
+                                    its columns to calories, macros, fiber,
+                                    sugar and caffeine — plus alcohol if you've
+                                    turned alcohol tracking on — and review what
+                                    will be added before you confirm. The file
+                                    is read in your browser, nothing is saved
+                                    until you approve the preview, and importing
+                                    the same file again won't create duplicates.
                                 </p>
                                 <div class="tool-ex">
                                     <span class="tool-ex-label"
@@ -783,9 +797,11 @@
                                             <code>carbs_g</code>,
                                             <code>fat_g</code>,
                                             <code>fiber_g</code>,
-                                            <code>sugar_g</code> (total sugars)
-                                            and <code>alcohol_g</code> (grams of
-                                            pure ethanol)
+                                            <code>sugar_g</code> (total sugars),
+                                            <code>alcohol_g</code> (grams of
+                                            pure ethanol) and
+                                            <code>caffeine_mg</code>
+                                            (milligrams, not grams)
                                         </li>
                                         <li>
                                             <code>expected_row_count</code>
@@ -857,7 +873,8 @@
                                 <p class="tool-desc">
                                     Change the details of a meal you already
                                     logged — its description, any macro, fiber,
-                                    sugar or alcohol, the time, or notes.
+                                    sugar, alcohol or caffeine, the time, or
+                                    notes.
                                 </p>
                                 <div class="tool-params">
                                     <span class="tool-params-label"
@@ -921,6 +938,13 @@
                                             >
                                             — Grams of pure ethanol, not the
                                             volume of the drink
+                                        </li>
+                                        <li>
+                                            <code>caffeine_mg</code>
+                                            <span class="param-opt"
+                                                >optional</span
+                                            >
+                                            — Milligrams, not grams
                                         </li>
                                         <li>
                                             <code>logged_at</code>
@@ -1640,13 +1664,13 @@
                                 </div>
                                 <p class="tool-desc">
                                     Set your daily calorie, macro, fiber, sugar,
-                                    alcohol and water goals, plus an optional
-                                    target body weight. Calories, protein,
-                                    carbs, fat, fiber and water are targets to
-                                    reach; sugar and alcohol are limits to stay
-                                    under, and progress is worded accordingly.
-                                    Update only the fields you name; the rest
-                                    stay put.
+                                    alcohol, caffeine and water goals, plus an
+                                    optional target body weight. Calories,
+                                    protein, carbs, fat, fiber and water are
+                                    targets to reach; sugar, alcohol and
+                                    caffeine are limits to stay under, and
+                                    progress is worded accordingly. Update only
+                                    the fields you name; the rest stay put.
                                 </p>
                                 <div class="tool-params">
                                     <span class="tool-params-label"
@@ -1717,6 +1741,20 @@
                                             clear.
                                         </li>
                                         <li>
+                                            <code>daily_caffeine_mg</code>
+                                            <span class="param-opt"
+                                                >optional</span
+                                            >
+                                            — Daily caffeine limit in
+                                            <b>milligrams</b>, a maximum to stay
+                                            under. The EFSA and FDA ceiling for
+                                            healthy adults is 400 mg a day
+                                            (roughly four brewed coffees), and
+                                            200 mg in pregnancy. 0 is a real
+                                            limit meaning none at all. Null to
+                                            clear.
+                                        </li>
+                                        <li>
                                             <code>daily_water_ml</code>
                                             <span class="param-opt"
                                                 >optional</span
@@ -1750,9 +1788,9 @@
                                 </div>
                                 <p class="tool-desc">
                                     See your current daily calorie and macro
-                                    targets, any fiber target and sugar limit,
-                                    and — if you track alcohol — your alcohol
-                                    limit.
+                                    targets, any fiber target and sugar or
+                                    caffeine limit, and — if you track alcohol —
+                                    your alcohol limit.
                                 </p>
                                 <div class="tool-ex">
                                     <span class="tool-ex-label"

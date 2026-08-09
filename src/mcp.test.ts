@@ -25,7 +25,9 @@ import {
     MAX_CALORIES,
     MAX_MACRO_G,
     MAX_ALCOHOL_G,
+    MAX_CAFFEINE_MG,
     MAX_GOAL_G,
+    MAX_GOAL_MG,
     gateAlcohol,
 } from "./mcp.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -42,6 +44,7 @@ import {
 } from "./insights.js";
 import type {
     Meal,
+    MealInput,
     NutritionGoals,
     WaterEntry,
     WeightEntry,
@@ -62,6 +65,12 @@ function meal(over: Partial<Meal> = {}): Meal {
         fiber_g: 6,
         sugar_g: 12,
         alcohol_g: 14,
+        // NULL on the base fixture on purpose: caffeine is the partial nutrient
+        // where absence is the norm rather than a relic of pre-feature history,
+        // and a pasta-and-beer dinner genuinely carries none. Giving every
+        // fixture meal a milligram figure would hide the suppression this whole
+        // feature turns on — the tests that want caffeine ask for it.
+        caffeine_mg: null,
         notes: null,
         idempotency_key: null,
         ...over,
@@ -78,6 +87,8 @@ function goals(over: Partial<NutritionGoals> = {}): NutritionGoals {
         daily_fiber_g: 30,
         daily_sugar_g: 40,
         daily_alcohol_g: 28,
+        // Milligrams, and the EFSA/FDA figure the tool description offers.
+        daily_caffeine_mg: 400,
         daily_water_ml: 2500,
         target_weight_g: null,
         updated_at: "2026-07-26T00:00:00.000Z",
@@ -229,7 +240,12 @@ describe("sumMeals", () => {
 // treat that as zero (it adds nothing); an average cannot, or a window spanning
 // the deploy divides real data by every logged day.
 describe("nutrientPresence", () => {
-    const blank = { fiber_g: null, sugar_g: null, alcohol_g: null };
+    const blank = {
+        fiber_g: null,
+        sugar_g: null,
+        alcohol_g: null,
+        caffeine_mg: null,
+    };
 
     test("one non-null meal makes the day carry the nutrient", () => {
         expect(
@@ -238,6 +254,7 @@ describe("nutrientPresence", () => {
             fiber_g: true,
             sugar_g: false,
             alcohol_g: false,
+            caffeine_mg: false,
         });
     });
 
@@ -246,12 +263,36 @@ describe("nutrientPresence", () => {
             fiber_g: true,
             sugar_g: false,
             alcohol_g: false,
+            caffeine_mg: false,
         });
         expect(nutrientPresence([])).toEqual({
             fiber_g: false,
             sugar_g: false,
             alcohol_g: false,
+            caffeine_mg: false,
         });
+    });
+
+    // Caffeine is the flag with no profile setting behind it, so presence is
+    // the ONLY thing standing between a NULL column and a fabricated "0 mg vs
+    // 400 mg limit". A coffee among otherwise caffeine-free meals has to flip
+    // it on its own, and a measured decaf 2 mg counts as much as a double
+    // espresso.
+    test("caffeine flips on its own, and a measured zero counts", () => {
+        expect(
+            nutrientPresence([
+                meal(blank),
+                meal({ ...blank, caffeine_mg: 95 }),
+            ]),
+        ).toEqual({
+            fiber_g: false,
+            sugar_g: false,
+            alcohol_g: false,
+            caffeine_mg: true,
+        });
+        expect(
+            nutrientPresence([meal({ ...blank, caffeine_mg: 0 })]).caffeine_mg,
+        ).toBe(true);
     });
 });
 
@@ -262,7 +303,12 @@ describe("rangeAverages", () => {
         totals.water_ml = water;
         return { meals, totals };
     };
-    const blank = { fiber_g: null, sugar_g: null, alcohol_g: null };
+    const blank = {
+        fiber_g: null,
+        sugar_g: null,
+        alcohol_g: null,
+        caffeine_mg: null,
+    };
 
     // The measured regression: 30 g of fiber a day, but a window that reaches
     // back before the columns existed, reported "5g" against a 30g target.
@@ -319,8 +365,37 @@ describe("rangeAverages", () => {
         ]);
         expect(recordedDays.fiber_g).toBe(0);
         expect(averages.fiber_g).toBe(0);
+        expect(recordedDays.caffeine_mg).toBe(0);
+        expect(averages.caffeine_mg).toBe(0);
         expect(Number.isFinite(averages.sugar_g)).toBe(true);
         expect(Number.isNaN(averages.alcohol_g)).toBe(false);
+        expect(Number.isNaN(averages.caffeine_mg)).toBe(false);
+    });
+
+    // Caffeine's realistic shape, and the one that breaks a naive average: a
+    // day is a coffee plus three meals that carry no caffeine figure at all.
+    // The day CARRIES caffeine (95 mg of it) even though most of its meals are
+    // NULL, and a day with no coffee carries none — so the divisor is days that
+    // recorded it, never meals and never every logged day.
+    test("a day mixing null and recorded caffeine meals still counts as one covered day", () => {
+        const coffeeDay = (mg: number) => {
+            const meals = [
+                meal({ ...blank, caffeine_mg: mg }),
+                meal(blank),
+                meal(blank),
+            ];
+            return { meals, totals: sumMeals(meals) };
+        };
+        const { averages, recordedDays } = rangeAverages([
+            coffeeDay(95),
+            { meals: [meal(blank)], totals: sumMeals([meal(blank)]) },
+            coffeeDay(105),
+        ]);
+        expect(recordedDays.caffeine_mg).toBe(2);
+        expect(averages.caffeine_mg).toBe(100);
+        // The wrong answers this pins out: 200/3 (every logged day) and
+        // 200/7 (every meal).
+        expect(averages.caffeine_mg).not.toBe(200 / 3);
     });
 
     test("an empty range divides nothing by zero", () => {
@@ -333,19 +408,29 @@ describe("rangeAverages", () => {
 // A pre-feature day must not print a fabricated "Fiber: 0g" — but the line
 // cannot just vanish when a target is set either, or tracking looks broken.
 describe("formatProgress suppresses unrecorded nutrients", () => {
-    const blank = { fiber_g: null, sugar_g: null, alcohol_g: null };
+    const blank = {
+        fiber_g: null,
+        sugar_g: null,
+        alcohol_g: null,
+        caffeine_mg: null,
+    };
     const present = nutrientPresence([meal(blank)]);
     const totals = sumMeals([meal(blank)]);
 
     test("no data and no target prints no line at all", () => {
         const text = formatProgress(
             totals,
-            goals({ daily_fiber_g: null, daily_sugar_g: null }),
+            goals({
+                daily_fiber_g: null,
+                daily_sugar_g: null,
+                daily_caffeine_mg: null,
+            }),
             null,
             present,
         );
         expect(text).not.toContain("Fiber");
         expect(text).not.toContain("Sugar");
+        expect(text).not.toContain("Caffeine");
         // The always-on macros are untouched.
         expect(text).toContain("Calories:");
         expect(text).toContain("Water:");
@@ -355,8 +440,10 @@ describe("formatProgress suppresses unrecorded nutrients", () => {
         const text = formatProgress(totals, goals(), null, present);
         expect(text).toContain("Fiber: not recorded / 30g target");
         expect(text).toContain("Sugar: not recorded / 40g limit");
+        expect(text).toContain("Caffeine: not recorded / 400 mg limit");
         expect(text).not.toContain("Fiber: 0");
         expect(text).not.toContain("Sugar: 0");
+        expect(text).not.toContain("Caffeine: 0");
     });
 
     test("recorded data is reported normally", () => {
@@ -439,15 +526,220 @@ describe("alcohol opt-in gating", () => {
     });
 
     test("structured payloads null alcohol out when tracking is off", () => {
-        expect(totalsPayloadOf(totals, null).alcohol_g).toBeNull();
-        expect(totalsPayloadOf(totals, "us").alcohol_g).toBe(14);
+        expect(totalsPayloadOf(totals, null, false).alcohol_g).toBeNull();
+        expect(totalsPayloadOf(totals, "us", false).alcohol_g).toBe(14);
         expect(goalsPayloadOf(goals(), null)!.alcohol_g).toBeNull();
         expect(goalsPayloadOf(goals(), "us")!.alcohol_g).toBe(28);
         expect(mealBreakdown([meal()], null, null)[0]!.alcohol_g).toBeNull();
         expect(mealBreakdown([meal()], null, "us")[0]!.alcohol_g).toBe(14);
         // Never gated, either way.
-        expect(totalsPayloadOf(totals, null).fiber_g).toBe(6);
+        expect(totalsPayloadOf(totals, null, false).fiber_g).toBe(6);
         expect(goalsPayloadOf(goals(), null)!.sugar_g).toBe(40);
+    });
+});
+
+// ---------- caffeine ----------
+//
+// Caffeine deliberately has NO profile flag: no caffeine_tracking_enabled, no
+// tool pair, nothing an AlcoholDisplay-shaped argument could carry. Everything
+// that decides whether a caffeine figure is shown is the DATA — dayCarries on
+// the write side, hasAnyPositive in insights.ts on the narrative side. These
+// pin that, and pin the unit, because caffeine is the one nutrient in this
+// schema stored in milligrams and a silent grams/mg mix-up is a 1000x error
+// that still looks like a plausible number.
+describe("caffeine is suppressed by absence, never by a flag", () => {
+    const coffee = { description: "Flat white", caffeine_mg: 95 };
+    const recorded = [meal(coffee)];
+    const none = [meal()]; // base fixture: caffeine_mg null
+
+    /** The one line of the progress block this describe is about. */
+    const caffeineLine = (
+        meals: Meal[],
+        g: NutritionGoals | null = goals(),
+    ): string | undefined =>
+        formatProgress(sumMeals(meals), g, null, nutrientPresence(meals))
+            .split("\n")
+            .find((l) => l.startsWith("Caffeine:"));
+
+    test("a recorded figure is reported against the limit, as a ceiling", () => {
+        const line = caffeineLine(recorded);
+        expect(line).toBe("Caffeine: 95 / 400 mg limit (24%, under)");
+        // A limit is not a budget — same wording rule as sugar and alcohol.
+        // (Asserted on the caffeine line alone: the floor-directed macro lines
+        // in the same block legitimately say "to go".)
+        expect(line).not.toContain("to go");
+        expect(line).not.toContain("left");
+        expect(line).not.toContain("remaining");
+    });
+
+    test("over the limit says how far over, in whole milligrams", () => {
+        expect(caffeineLine([meal({ ...coffee, caffeine_mg: 470 })])).toBe(
+            "Caffeine: 470 / 400 mg limit (118%, 70 mg over)",
+        );
+    });
+
+    // The trap this feature is not allowed to fall into (the same one as #78):
+    // most meals carry NULL caffeine forever, so a user who has never logged a
+    // coffee must never be shown a caffeine figure — not "0 mg", and not
+    // "0 / 400 mg limit" either.
+    test("a nutrient nobody ever recorded produces no line at all", () => {
+        const text = formatProgress(
+            sumMeals(none),
+            goals({ daily_caffeine_mg: null }),
+            null,
+            nutrientPresence(none),
+        );
+        expect(text).not.toContain("Caffeine");
+        expect(text).not.toContain("0 mg");
+    });
+
+    // With a limit set the line cannot simply vanish — that reads as tracking
+    // having broken — but it still refuses to invent the number.
+    test("a limit with nothing recorded says 'not recorded', never 0 mg", () => {
+        const text = formatProgress(
+            sumMeals(none),
+            goals(),
+            null,
+            nutrientPresence(none),
+        );
+        expect(text).toContain("Caffeine: not recorded / 400 mg limit");
+        expect(text).not.toContain("Caffeine: 0");
+    });
+
+    // A caffeine limit of 0 is the point of the ceiling direction: someone
+    // cutting caffeine out entirely sets it, and it has to behave like a real
+    // limit rather than like "unset" — stored, echoed AND honoured.
+    test("a zero limit is a real limit in all three places", () => {
+        const zero = goals({ daily_caffeine_mg: 0 });
+        expect(formatGoals(zero, "kg", null)).toContain(
+            "- Caffeine (max): 0 mg",
+        );
+        expect(goalsPayloadOf(zero, null)!.caffeine_mg).toBe(0);
+
+        const over = formatProgress(
+            sumMeals(recorded),
+            zero,
+            null,
+            nutrientPresence(recorded),
+        );
+        expect(over).toContain("Caffeine: 95 / 0 mg limit (95 mg over)");
+        expect(over).not.toContain("NaN");
+        expect(over).not.toContain("Infinity");
+
+        // A measured zero against a zero limit is the day the user set it to
+        // see, so it reports "clear" rather than disappearing.
+        const clearDay = [meal({ ...coffee, caffeine_mg: 0 })];
+        expect(
+            formatProgress(
+                sumMeals(clearDay),
+                zero,
+                null,
+                nutrientPresence(clearDay),
+            ),
+        ).toContain("Caffeine: 0 / 0 mg limit (clear)");
+    });
+
+    // A tenth of a milligram is below the precision of any label or export, so
+    // the model-facing text rounds to whole mg — while the structured payload
+    // keeps the sibling `* 10 / 10` rounding for the widgets.
+    test("text is whole milligrams; the payload keeps one decimal", () => {
+        const fussy = [meal({ ...coffee, caffeine_mg: 95.44 })];
+        expect(
+            formatProgress(
+                sumMeals(fussy),
+                goals({ daily_caffeine_mg: null }),
+                null,
+                nutrientPresence(fussy),
+            ),
+        ).toContain("Caffeine: 95 mg");
+        expect(
+            formatMeal(meal({ ...coffee, caffeine_mg: 95.44 }), null),
+        ).toContain("Caffeine: 95 mg");
+        expect(totalsPayloadOf(sumMeals(fussy), null, true).caffeine_mg).toBe(
+            95.4,
+        );
+    });
+
+    // The alcohol opt-in must not reach caffeine: a user with tracking off sees
+    // their coffee, and a user with it on sees no extra caffeine line either.
+    test("the alcohol opt-in changes nothing about caffeine", () => {
+        for (const alcohol of ["us", "uk", null] as const) {
+            const text = formatProgress(
+                sumMeals(recorded),
+                goals(),
+                alcohol,
+                nutrientPresence(recorded),
+            );
+            expect(text).toContain("Caffeine: 95 / 400 mg limit");
+            expect(formatMeal(meal(coffee), alcohol)).toContain(
+                "Caffeine: 95 mg",
+            );
+            expect(formatGoals(goals(), "kg", alcohol)).toContain(
+                "- Caffeine (max): 400 mg",
+            );
+            expect(goalsPayloadOf(goals(), alcohol)!.caffeine_mg).toBe(400);
+        }
+    });
+
+    test("formatGoals lists an unset caffeine limit as not set", () => {
+        expect(
+            formatGoals(goals({ daily_caffeine_mg: null }), "kg", null),
+        ).toContain("- Caffeine (max): not set");
+    });
+
+    // Per-meal, absence is per-meal: the sandwich in a day that also had a
+    // coffee shows no caffeine line of its own.
+    test("formatMeal omits the line for a meal with no caffeine figure", () => {
+        expect(formatMeal(meal(), null)).not.toContain("Caffeine");
+        // ...but a measured zero — an explicitly decaf entry — is data.
+        expect(formatMeal(meal({ caffeine_mg: 0 }), null)).toContain(
+            "Caffeine: 0 mg",
+        );
+    });
+});
+
+// Caffeine carries no energy. Fiber, sugar and alcohol all do, which is exactly
+// why this needs pinning: every one of its siblings is legitimately part of an
+// energy or macro story and caffeine is not, so the easy mistake is to treat
+// the fourth column like the first three.
+describe("caffeine never reaches an energy figure", () => {
+    const plain = meal({ caffeine_mg: null });
+    const caffeinated = meal({ caffeine_mg: MAX_CAFFEINE_MG });
+
+    test("5,000 mg of caffeine changes no calorie or macro figure", () => {
+        const a = sumMeals([plain]);
+        const b = sumMeals([caffeinated]);
+        expect(b.calories).toBe(a.calories);
+        expect(b.protein_g).toBe(a.protein_g);
+        expect(b.carbs_g).toBe(a.carbs_g);
+        expect(b.fat_g).toBe(a.fat_g);
+        expect(b.caffeine_mg).toBe(MAX_CAFFEINE_MG);
+
+        const pa = totalsPayloadOf(a, "us", false);
+        const pb = totalsPayloadOf(b, "us", true);
+        expect(pb.calories).toBe(pa.calories);
+        expect(pb.protein_g).toBe(pa.protein_g);
+        expect(pb.carbs_g).toBe(pa.carbs_g);
+        expect(pb.fat_g).toBe(pa.fat_g);
+    });
+
+    test("the per-meal breakdown the macro rings read from is unchanged too", () => {
+        const [a] = mealBreakdown([plain], null, "us");
+        const [b] = mealBreakdown([caffeinated], null, "us");
+        expect(b!.calories).toBe(a!.calories);
+        expect(b!.protein_g).toBe(a!.protein_g);
+        expect(b!.carbs_g).toBe(a!.carbs_g);
+        expect(b!.fat_g).toBe(a!.fat_g);
+        // Present as its own stat, in milligrams, not folded into anything.
+        expect(b!.caffeine_mg).toBe(MAX_CAFFEINE_MG);
+    });
+
+    test("the calorie line of the progress text is byte-identical", () => {
+        const line = (m: Meal) =>
+            formatProgress(sumMeals([m]), goals(), "us", nutrientPresence([m]))
+                .split("\n")
+                .find((l) => l.startsWith("Calories:"));
+        expect(line(caffeinated)).toBe(line(plain));
     });
 });
 
@@ -458,7 +750,7 @@ describe("alcohol opt-in gating", () => {
 describe("gateAlcohol", () => {
     const buckets: DailyBucket[] = ["2026-07-20", "2026-07-21"].map((date) => ({
         date,
-        meals: [meal()],
+        meals: [meal({ caffeine_mg: 95 })],
         waterMl: 1000,
         calories: 700,
         protein_g: 25,
@@ -467,6 +759,7 @@ describe("gateAlcohol", () => {
         fiber_g: 6,
         sugar_g: 12,
         alcohol_g: 14,
+        caffeine_mg: 95,
         mealTypes: new Set(["dinner"]),
     }));
 
@@ -478,6 +771,21 @@ describe("gateAlcohol", () => {
         expect(off[0]!.sugar_g).toBe(12);
         expect(off[0]!.calories).toBe(700);
         expect(buckets[0]!.alcohol_g).toBe(14);
+    });
+
+    // The spread has to carry caffeine_mg through untouched. There is no
+    // caffeine flag to reach insights.ts with, so zeroing it here — the one
+    // mechanism that could — would silently delete the caffeine narrative for
+    // every user who has alcohol tracking off, which is most of them.
+    test("caffeine rides through the alcohol gate in both positions", () => {
+        expect(gateAlcohol(buckets, "us")[0]!.caffeine_mg).toBe(95);
+        expect(gateAlcohol(buckets, null)[0]!.caffeine_mg).toBe(95);
+        expect(computeTrends(gateAlcohol(buckets, null), goals())).toContain(
+            "Caffeine",
+        );
+        expect(
+            computeWeeklyDigest(gateAlcohol(buckets, null), goals()),
+        ).toContain("Caffeine");
     });
 
     test("keeps alcohol out of the trends narrative when tracking is off", () => {
@@ -835,7 +1143,7 @@ describe("structuredContent literals satisfy their schemas", () => {
     test("totals, goals and breakdown parse with alcohol on and off", () => {
         for (const alcohol of ["us", null] as const) {
             expect(() =>
-                TOTALS_ITEM.parse(totalsPayloadOf(totals, alcohol)),
+                TOTALS_ITEM.parse(totalsPayloadOf(totals, alcohol, false)),
             ).not.toThrow();
             expect(() =>
                 GOALS_ITEM.parse(goalsPayloadOf(goals(), alcohol)),
@@ -855,6 +1163,7 @@ describe("structuredContent literals satisfy their schemas", () => {
                     daily_fiber_g: null,
                     daily_sugar_g: null,
                     daily_alcohol_g: null,
+                    daily_caffeine_mg: null,
                 }),
                 "us",
             ),
@@ -862,10 +1171,44 @@ describe("structuredContent literals satisfy their schemas", () => {
         expect(parsed.fiber_g).toBeNull();
         expect(parsed.sugar_g).toBeNull();
         expect(parsed.alcohol_g).toBeNull();
+        expect(parsed.caffeine_mg).toBeNull();
     });
 
     test("no goals at all is null, not a half-filled object", () => {
         expect(goalsPayloadOf(null, "us")).toBeNull();
+    });
+
+    // The specific failure mode of a .nullable() field: the emitted JSON Schema
+    // marks it REQUIRED with an anyOf[number, null] value, so a builder that
+    // OMITS the key on the "nothing to report" path fails validation instead of
+    // quietly defaulting to null — and the host then drops the whole result.
+    // Caffeine is the field most likely to hit that path, since a null is its
+    // normal state rather than an edge case.
+    test("an unrecorded caffeine emits an explicit null, with the key present", () => {
+        const payload = totalsPayloadOf(sumMeals([meal()]), "us", false);
+        expect(payload.caffeine_mg).toBeNull();
+        expect(Object.keys(payload)).toContain("caffeine_mg");
+        expect(TOTALS_ITEM.parse(payload).caffeine_mg).toBeNull();
+
+        const [row] = mealBreakdown([meal()], null, "us");
+        expect(row!.caffeine_mg).toBeNull();
+        expect(Object.keys(row!)).toContain("caffeine_mg");
+        expect(() => MEAL_BREAKDOWN_ITEM.parse(row)).not.toThrow();
+    });
+
+    // The mirror: a day that DID record caffeine, and recorded none of it, must
+    // survive as 0 rather than being collapsed back into the null that means
+    // "never recorded". `caffeineRecorded` is what tells the two apart.
+    test("a recorded zero survives as 0, not as the absence null", () => {
+        const decaf = [meal({ caffeine_mg: 0 })];
+        const payload = totalsPayloadOf(
+            sumMeals(decaf),
+            "us",
+            nutrientPresence(decaf).caffeine_mg,
+        );
+        expect(payload.caffeine_mg).toBe(0);
+        expect(payload.caffeine_mg).not.toBeNull();
+        expect(mealBreakdown(decaf, null, "us")[0]!.caffeine_mg).toBe(0);
     });
 });
 
@@ -888,17 +1231,24 @@ describe("trendsDayPayloadOf", () => {
         fiber_g: mealsForDay.reduce((s, m) => s + (m.fiber_g ?? 0), 0),
         sugar_g: mealsForDay.reduce((s, m) => s + (m.sugar_g ?? 0), 0),
         alcohol_g: mealsForDay.reduce((s, m) => s + (m.alcohol_g ?? 0), 0),
+        caffeine_mg: mealsForDay.reduce((s, m) => s + (m.caffeine_mg ?? 0), 0),
         mealTypes: new Set(["dinner"]),
     });
 
-    test("nulls fiber/sugar/alcohol on a day that never recorded them", () => {
+    test("nulls fiber/sugar/alcohol/caffeine on a day that never recorded them", () => {
         const bucket = bucketWith([
-            meal({ fiber_g: null, sugar_g: null, alcohol_g: null }),
+            meal({
+                fiber_g: null,
+                sugar_g: null,
+                alcohol_g: null,
+                caffeine_mg: null,
+            }),
         ]);
         const payload = trendsDayPayloadOf(bucket, "us");
         expect(payload.fiber_g).toBeNull();
         expect(payload.sugar_g).toBeNull();
         expect(payload.alcohol_g).toBeNull();
+        expect(payload.caffeine_mg).toBeNull();
         // Everything else sums normally — only the three partial nutrients
         // get the covered-days treatment.
         expect(payload.calories).toBe(bucket.calories);
@@ -907,12 +1257,27 @@ describe("trendsDayPayloadOf", () => {
 
     test("keeps a real recorded zero as 0, not null", () => {
         const bucket = bucketWith([
-            meal({ fiber_g: 0, sugar_g: 0, alcohol_g: 0 }),
+            meal({ fiber_g: 0, sugar_g: 0, alcohol_g: 0, caffeine_mg: 0 }),
         ]);
         const payload = trendsDayPayloadOf(bucket, "us");
         expect(payload.fiber_g).toBe(0);
         expect(payload.sugar_g).toBe(0);
         expect(payload.alcohol_g).toBe(0);
+        expect(payload.caffeine_mg).toBe(0);
+    });
+
+    // Caffeine gets the covered-days treatment one level down, inside
+    // totalsPayloadOf, rather than through an override in the returned literal
+    // — so it needs its own pin: a day whose coffee is one meal among several
+    // NULL ones is covered and reports the day's total.
+    test("a day with one coffee among null meals reports the day's total", () => {
+        const bucket = bucketWith([
+            meal({ caffeine_mg: 95 }),
+            meal({ caffeine_mg: null }),
+        ]);
+        expect(trendsDayPayloadOf(bucket, "us").caffeine_mg).toBe(95);
+        // And the alcohol opt-in has no say over it, in either position.
+        expect(trendsDayPayloadOf(bucket, null).caffeine_mg).toBe(95);
     });
 
     test("alcohol tracking off nulls alcohol_g regardless of coverage", () => {
@@ -920,11 +1285,12 @@ describe("trendsDayPayloadOf", () => {
         expect(trendsDayPayloadOf(bucket, null).alcohol_g).toBeNull();
     });
 
-    test("a day with no meals at all is null across all three partial nutrients", () => {
+    test("a day with no meals at all is null across every partial nutrient", () => {
         const payload = trendsDayPayloadOf(bucketWith([]), "us");
         expect(payload.fiber_g).toBeNull();
         expect(payload.sugar_g).toBeNull();
         expect(payload.alcohol_g).toBeNull();
+        expect(payload.caffeine_mg).toBeNull();
         expect(() => TRENDS_DAY_ITEM.parse(payload)).not.toThrow();
     });
 
@@ -989,6 +1355,7 @@ function storedMeal(input: Record<string, unknown>): Meal {
         fiber_g: null,
         sugar_g: null,
         alcohol_g: null,
+        caffeine_mg: null,
         ...defined,
     });
 }
@@ -1241,6 +1608,7 @@ describe("write-tool numeric bounds", () => {
         const payload = totalsPayloadOf(
             sumMeals([meal({ fiber_g: 1e308 })]),
             null,
+            false,
         );
         expect(payload.fiber_g).toBe(Infinity);
         expect(TOTALS_ITEM.safeParse(payload).success).toBe(false);
@@ -1256,6 +1624,7 @@ describe("write-tool numeric bounds", () => {
                 "fiber_g",
                 "sugar_g",
                 "alcohol_g",
+                "caffeine_mg",
             ]) {
                 const r = await call("log_meal", {
                     description: "Oatmeal",
@@ -1301,6 +1670,44 @@ describe("write-tool numeric bounds", () => {
         });
     });
 
+    // 5,000 mg is ~50 espressos and well past a lethal single dose, so anything
+    // above it is a unit slip (grams read as mg, or a coffee-bean weight) rather
+    // than a drink. The rejection has to name the field, because the useful
+    // correction is "you sent grams" and only `caffeine_mg` says so.
+    test("caffeine has its own milligram ceiling, named in the rejection", async () => {
+        await withTools(null, async (call) => {
+            const ok = await call("log_meal", {
+                description: "A pot of coffee",
+                meal_type: "snack",
+                caffeine_mg: MAX_CAFFEINE_MG,
+            });
+            expect(ok.isError).toBeFalsy();
+            expect(db.inserted[0]!.caffeine_mg).toBe(MAX_CAFFEINE_MG);
+
+            const tooMuch = await call("log_meal", {
+                description: "Coffee",
+                meal_type: "snack",
+                caffeine_mg: MAX_CAFFEINE_MG + 1,
+            });
+            expect(tooMuch.isError).toBe(true);
+            expect(textOf(tooMuch)).toContain("caffeine_mg");
+            expect(db.inserted).toHaveLength(1);
+        });
+    });
+
+    test("a negative caffeine figure is refused before the DB check fires", async () => {
+        await withTools(null, async (call) => {
+            const r = await call("log_meal", {
+                description: "Coffee",
+                meal_type: "snack",
+                caffeine_mg: -1,
+            });
+            expect(r.isError).toBe(true);
+            expect(textOf(r)).toContain("caffeine_mg");
+            expect(db.inserted).toHaveLength(0);
+        });
+    });
+
     test("the top of each range is still accepted", async () => {
         await withTools(null, async (call) => {
             const r = await call("log_meal", {
@@ -1330,6 +1737,34 @@ describe("write-tool numeric bounds", () => {
             ).toBe(true);
             expect(
                 (await call("set_nutrition_goals", { daily_alcohol_g: 1e308 }))
+                    .isError,
+            ).toBe(true);
+        });
+    });
+
+    // daily_caffeine_mg is numeric(7,2), not the (6,2) every gram target uses —
+    // milligram figures run three orders larger, so it needs a ceiling of its
+    // own or a legitimate limit would be refused by a bound sized for grams.
+    test("the caffeine goal ceiling is what numeric(7,2) can hold", async () => {
+        expect(MAX_GOAL_MG).toBe(99999.99);
+        expect(MAX_GOAL_MG).toBeGreaterThan(MAX_GOAL_G);
+        await withTools(null, async (call) => {
+            expect(
+                (
+                    await call("set_nutrition_goals", {
+                        daily_caffeine_mg: MAX_GOAL_MG,
+                    })
+                ).isError,
+            ).toBeFalsy();
+            expect(
+                (
+                    await call("set_nutrition_goals", {
+                        daily_caffeine_mg: MAX_GOAL_MG + 1,
+                    })
+                ).isError,
+            ).toBe(true);
+            expect(
+                (await call("set_nutrition_goals", { daily_caffeine_mg: -1 }))
                     .isError,
             ).toBe(true);
         });
@@ -1437,6 +1872,266 @@ describe("log_meal / update_meal surface hidden alcohol", () => {
                 await call("update_meal", { id: "m1", alcohol_g: 14 }),
             );
             expect(text).not.toContain("set_alcohol_tracking");
+        });
+    });
+});
+
+// ---------- caffeine, end to end through the real tools ----------
+
+describe("log_meal and update_meal round-trip caffeine_mg", () => {
+    const coffee = {
+        description: "Flat white",
+        meal_type: "snack",
+        calories: 120,
+        caffeine_mg: 95,
+    };
+
+    test("the milligram figure reaches the DB layer, the text and the widget", async () => {
+        await withTools(null, async (call) => {
+            const r = await call("log_meal", coffee);
+            expect(r.isError).toBeFalsy();
+            expect(db.inserted[0]!.caffeine_mg).toBe(95);
+            expect(textOf(r)).toContain("Caffeine: 95 mg");
+            const sc = r.structuredContent as unknown as {
+                logged_meal: { caffeine_mg: number | null };
+                totals: { caffeine_mg: number | null };
+            };
+            expect(sc.logged_meal.caffeine_mg).toBe(95);
+            expect(sc.totals.caffeine_mg).toBe(95);
+        });
+    });
+
+    // z.coerce, for the same reason log_meal's other numbers have it: models
+    // emit "95" as a string often enough that refusing it is a worse failure
+    // than coercing it.
+    test("a stringified figure is coerced like every other number", async () => {
+        await withTools(null, async (call) => {
+            await call("log_meal", { ...coffee, caffeine_mg: "95" });
+            expect(db.inserted[0]!.caffeine_mg).toBe(95);
+        });
+    });
+
+    test("omitting it stores nothing at all, rather than a 0", async () => {
+        await withTools(null, async (call) => {
+            const r = await call("log_meal", {
+                description: "Oatmeal",
+                meal_type: "breakfast",
+                calories: 300,
+            });
+            expect(db.inserted[0]).not.toHaveProperty("caffeine_mg");
+            expect(textOf(r)).not.toContain("Caffeine");
+            const sc = r.structuredContent as unknown as {
+                logged_meal: { caffeine_mg: number | null };
+                totals: { caffeine_mg: number | null };
+            };
+            // The key is present and null — a .nullable() outputSchema field is
+            // REQUIRED, so omitting it would fail validation, not default.
+            expect(sc.logged_meal.caffeine_mg).toBeNull();
+            expect(sc.totals.caffeine_mg).toBeNull();
+        });
+    });
+
+    test("update_meal passes a corrected figure through", async () => {
+        await withTools(null, async (call) => {
+            const r = await call("update_meal", { id: "m1", caffeine_mg: 126 });
+            expect(r.isError).toBeFalsy();
+            expect(db.mealUpdates[0]!.caffeine_mg).toBe(126);
+            expect(textOf(r)).toContain("Caffeine: 126 mg");
+        });
+
+        await withTools(null, async (call) => {
+            const r = await call("update_meal", {
+                id: "m1",
+                caffeine_mg: MAX_CAFFEINE_MG + 1,
+            });
+            expect(r.isError).toBe(true);
+            // Still just the accepted write above — the rejection never
+            // reached the DB layer.
+            expect(db.mealUpdates).toHaveLength(1);
+        });
+    });
+
+    // CONTRACT: no caffeine_tracking_enabled, no tool pair, no nudge. Alcohol
+    // has all three because surfacing trace alcohol to someone in recovery is a
+    // real harm; caffeine has no equivalent, and inventing a settings surface
+    // for it would be a second thing to keep in sync forever.
+    test("there is no caffeine opt-in anywhere on the tool surface", async () => {
+        const server = new McpServer(
+            { name: "t", version: "0.0.0" },
+            { capabilities: { tools: {}, resources: {} } },
+        );
+        registerTools(server, "u1", true, null);
+        const [ct, st] = InMemoryTransport.createLinkedPair();
+        const client = new Client({ name: "c", version: "0.0.0" });
+        await Promise.all([server.connect(st), client.connect(ct)]);
+        const { tools } = await client.listTools();
+        expect(
+            tools.map((t) => t.name).filter((n) => n.includes("caffeine")),
+        ).toEqual([]);
+        await client.close();
+        await server.close();
+
+        await withTools(null, async (call) => {
+            const text = textOf(await call("log_meal", coffee));
+            expect(text).not.toContain("caffeine_tracking");
+            expect(text).not.toContain("set_caffeine_tracking");
+        });
+    });
+
+    // The digest is frozen (CONTRACT, and the "DO NOT ADD" comments in
+    // src/supabase.ts and src/import.ts). Adding caffeine_mg to it would orphan
+    // every `auto:` key already stored, so the same meal logged with and
+    // without a caffeine figure must still derive one key — and that key must
+    // still be the literal value the pre-caffeine code produced.
+    test("caffeine does not enter the derived idempotency key", async () => {
+        const PRE_CAFFEINE_KEY =
+            "auto:ce32507d8d98f40ce37b9dcd4161d18dfb5628f1c97316342dda1f0d02ce95c6";
+        const at = "2026-07-20T12:00:00.000Z";
+        await withTools(null, async (call) => {
+            await call("log_meal", { ...coffee, logged_at: at });
+            await call("log_meal", {
+                ...coffee,
+                caffeine_mg: undefined,
+                logged_at: at,
+            });
+        });
+        const keys = db.inserted.map((input) =>
+            actualSupabase.mealIdempotencyKey(
+                "u1",
+                input as unknown as MealInput,
+                at,
+            ),
+        );
+        expect(keys[0]).toBe(keys[1]!);
+        expect(keys[0]).toBe(PRE_CAFFEINE_KEY);
+    });
+});
+
+describe("set_nutrition_goals accepts a caffeine limit", () => {
+    test("the limit is stored in milligrams and echoed back", async () => {
+        await withTools(null, async (call) => {
+            const r = await call("set_nutrition_goals", {
+                daily_caffeine_mg: 400,
+            });
+            expect(r.isError).toBeFalsy();
+            expect(db.goals!.daily_caffeine_mg).toBe(400);
+            expect(textOf(r)).toContain("- Caffeine (max): 400 mg");
+            expect(textOf(await call("get_nutrition_goals"))).toContain(
+                "- Caffeine (max): 400 mg",
+            );
+        });
+    });
+
+    // The whole reason caffeine is a ceiling rather than a floor: 0 is the goal
+    // someone cutting it out entirely sets, and a floor would file that as
+    // "unset" — stored, echoed, then silently ignored, which is how the 0 g
+    // alcohol limit bug went.
+    test("a limit of 0 is stored, echoed and honoured", async () => {
+        await withTools(null, async (call) => {
+            const r = await call("set_nutrition_goals", {
+                daily_caffeine_mg: 0,
+            });
+            expect(db.goals!.daily_caffeine_mg).toBe(0);
+            expect(textOf(r)).toContain("- Caffeine (max): 0 mg");
+            expect(textOf(r)).not.toContain("Caffeine (max): not set");
+        });
+        // ...and the progress line then reports anything at all as over it.
+        expect(
+            formatProgress(
+                sumMeals([meal({ caffeine_mg: 95 })]),
+                goals({ daily_caffeine_mg: 0 }),
+                null,
+                nutrientPresence([meal({ caffeine_mg: 95 })]),
+            ),
+        ).toContain("Caffeine: 95 / 0 mg limit (95 mg over)");
+    });
+
+    test("null clears it, and an omitted field keeps the stored value", async () => {
+        await withTools(null, async (call) => {
+            await call("set_nutrition_goals", { daily_caffeine_mg: 400 });
+            await call("set_nutrition_goals", { daily_protein_g: 130 });
+            expect(db.goals!.daily_caffeine_mg).toBe(400);
+            await call("set_nutrition_goals", { daily_caffeine_mg: null });
+            expect(db.goals!.daily_caffeine_mg).toBeNull();
+        });
+    });
+});
+
+// IMPORT_ROW_SCHEMA is a plain z.object, so zod STRIPS any key it does not
+// declare — exactly the silent failure the source_id block below pins. Drop
+// caffeine_mg from that schema and src/import.ts's unit tests all still pass
+// while every imported milligram is discarded on the way in.
+describe("bulk_import_meals carries caffeine_mg through the row schema", () => {
+    const call = (
+        c: CallTool,
+        meals: Record<string, unknown>[],
+        extra: Record<string, unknown> = {},
+    ) =>
+        c("bulk_import_meals", {
+            meals,
+            expected_row_count: meals.length,
+            dry_run: false,
+            ...extra,
+        });
+
+    test("an imported milligram figure reaches insertMeal", async () => {
+        await withTools(null, async (c) => {
+            const r = await call(c, [
+                {
+                    source_line: 2,
+                    description: "Cold brew",
+                    logged_at: "2026-07-20",
+                    calories: 5,
+                    caffeine_mg: 200,
+                },
+            ]);
+            expect(r.isError).toBeFalsy();
+            expect(db.inserted[0]!.caffeine_mg).toBe(200);
+        });
+    });
+
+    // Bounds live in validateRow, not in Zod: a schema-level rejection happens
+    // before the handler runs and discards the structured report, the warnings
+    // and the analytics row — for what will be the caller's most common
+    // mistake (a grams column mapped straight across).
+    test("an out-of-range figure is a per-row error, not a lost batch", async () => {
+        await withTools(null, async (c) => {
+            const r = await call(c, [
+                {
+                    source_line: 2,
+                    description: "Oatmeal",
+                    logged_at: "2026-07-20",
+                    calories: 300,
+                },
+                {
+                    source_line: 3,
+                    description: "Coffee",
+                    logged_at: "2026-07-20",
+                    caffeine_mg: MAX_CAFFEINE_MG + 1,
+                },
+            ]);
+            expect(r.isError).toBeFalsy();
+            const sc = r.structuredContent as unknown as {
+                status: string;
+                summary: { created: number; failed: number };
+                results: {
+                    source_line: number;
+                    status: string;
+                    error: { field: string; message: string } | null;
+                }[];
+            };
+            // The good row still landed and the bad one is named — the whole
+            // point of validating in the handler rather than in Zod.
+            expect(sc.status).toBe("partial_success");
+            expect(sc.summary.created).toBe(1);
+            expect(sc.summary.failed).toBe(1);
+            const bad = sc.results.find((row) => row.source_line === 3)!;
+            expect(bad.status).toBe("failed");
+            expect(bad.error!.field).toBe("caffeine_mg");
+            // Milligrams in the message — reporting a gram bound here would
+            // send the caller off correcting the wrong thing.
+            expect(bad.error!.message).toContain(`${MAX_CAFFEINE_MG} mg`);
+            expect(bad.error!.message).not.toContain(" g;");
         });
     });
 });
@@ -1967,6 +2662,106 @@ describe("get_nutrition_summary discloses its logged-day denominator", () => {
             })) as ToolResult;
             const sc = r.structuredContent as unknown as SummaryPayload;
             expect(sc.days_in_range).toBe(1);
+        });
+    });
+});
+
+// The same covered-days rule as fiber and sugar, but with no opt-in above it
+// and with the "never recorded" case as the norm rather than the exception —
+// so the summary is where a fabricated "0 mg average" would be most visible.
+describe("get_nutrition_summary reports caffeine over its covered days only", () => {
+    const START = "2026-07-20";
+    const END = "2026-07-24"; // 5 calendar days inclusive
+
+    interface SummaryPayload {
+        averages: Record<string, number | null>;
+        recorded_days: Record<string, number | null>;
+        days: { date: string; caffeine_mg: number | null }[];
+    }
+
+    /** One meal a day for five days; `caffeine` gives each day's figure, with
+     *  null meaning that day recorded no caffeine at all. */
+    function stage(caffeine: (number | null)[]): void {
+        db.meals = caffeine.map((mg, i) =>
+            meal({
+                id: `d-${i}`,
+                logged_at: `2026-07-2${i}T12:00:00.000Z`,
+                calories: 600,
+                fiber_g: null,
+                sugar_g: null,
+                alcohol_g: null,
+                caffeine_mg: mg,
+            }),
+        );
+    }
+
+    const summarize = (call: CallTool) =>
+        call("get_nutrition_summary", { start_date: START, end_date: END });
+
+    test("two coffee days out of five average over the two", async () => {
+        stage([95, null, null, 105, null]);
+        await withTools(null, async (call) => {
+            const r = await summarize(call);
+            const sc = r.structuredContent as unknown as SummaryPayload;
+            expect(sc.recorded_days.caffeine_mg).toBe(2);
+            expect(sc.averages.caffeine_mg).toBe(100);
+            // The wrong answer: 200 / 5 logged days.
+            expect(sc.averages.caffeine_mg).not.toBe(40);
+            // Per-day, an uncovered day is null rather than a summed 0, so the
+            // widget's client-side re-average can tell them apart.
+            expect(sc.days.map((d) => d.caffeine_mg)).toEqual([
+                95,
+                null,
+                null,
+                105,
+                null,
+            ]);
+            // And the text says which days the figure came from.
+            expect(textOf(r)).toContain("caffeine 2");
+        });
+    });
+
+    // The #78 trap in its most likely form: five logged days, none of them a
+    // coffee. Nothing may claim a caffeine figure — not an average, not a
+    // per-day zero, not a line in the text.
+    test("a window with no caffeine at all reports null, not 0", async () => {
+        stage([null, null, null, null, null]);
+        await withTools(null, async (call) => {
+            const r = await summarize(call);
+            const sc = r.structuredContent as unknown as SummaryPayload;
+            expect(sc.recorded_days.caffeine_mg).toBe(0);
+            expect(sc.averages.caffeine_mg).toBeNull();
+            expect(sc.days.every((d) => d.caffeine_mg === null)).toBe(true);
+            expect(textOf(r)).not.toContain("Caffeine");
+            expect(textOf(r)).not.toContain("caffeine");
+        });
+    });
+
+    // recorded_days.caffeine_mg is a non-nullable declared field and averages
+    // is a TOTALS_ITEM, so the empty-window early return has to build both — an
+    // omitted key there is a validation error, not a null.
+    test("an empty window still emits a complete, valid payload", async () => {
+        await withTools(null, async (call) => {
+            const r = await summarize(call);
+            const sc = r.structuredContent as unknown as SummaryPayload;
+            expect(r.isError).toBeFalsy();
+            expect(sc.recorded_days.caffeine_mg).toBe(0);
+            expect(sc.averages.caffeine_mg).toBeNull();
+            expect(Object.keys(sc.averages)).toContain("caffeine_mg");
+        });
+    });
+
+    // Every day covered: the coverage note is for PARTIAL coverage only, so
+    // naming caffeine here would be noise on the case of a daily coffee
+    // drinker, which is the most common caffeine user there is.
+    test("a fully-covered window stays silent about caffeine coverage", async () => {
+        stage([95, 95, 95, 95, 95]);
+        await withTools(null, async (call) => {
+            const r = await summarize(call);
+            const sc = r.structuredContent as unknown as SummaryPayload;
+            expect(sc.recorded_days.caffeine_mg).toBe(5);
+            expect(sc.averages.caffeine_mg).toBe(95);
+            expect(textOf(r)).not.toContain("caffeine 5");
         });
     });
 });

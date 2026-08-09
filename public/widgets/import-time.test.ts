@@ -114,6 +114,7 @@ function cronometerMapping() {
         fiber_g: -1,
         sugar_g: -1,
         alcohol_g: -1,
+        caffeine_mg: -1,
         notes: -1,
     };
 }

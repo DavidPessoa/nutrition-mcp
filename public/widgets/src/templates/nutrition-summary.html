@@ -50,6 +50,9 @@
                     fiber_g: 30,
                     sugar_g: 45,
                     alcohol_g: 20,
+                    // EFSA's 400 mg/day, the limit almost everyone who sets one
+                    // sets. A ceiling, like sugar and alcohol.
+                    caffeine_mg: 400,
                     water_ml: 2500,
                 },
                 averages: {
@@ -62,6 +65,10 @@
                     // Alcohol tracking ON in this sample. null here (the
                     // opt-in's "off") drops the stat line entirely.
                     alcohol_g: 12.5,
+                    // Averaged over the days that recorded caffeine, never over
+                    // all of them. null here (nothing ever recorded) drops the
+                    // line rather than claiming a 0 mg day.
+                    caffeine_mg: 187,
                     water_ml: 2100,
                 },
                 days: [
@@ -75,6 +82,7 @@
                         fiber_g: 31.2,
                         sugar_g: 64.5,
                         alcohol_g: 27.7,
+                        caffeine_mg: 245,
                         water_ml: 2400,
                     },
                     {
@@ -87,6 +95,10 @@
                         fiber_g: 22.8,
                         sugar_g: 51.4,
                         alcohol_g: 0,
+                        // Nothing caffeinated logged this day — null, not 0,
+                        // so it drops out of the average instead of dragging
+                        // it down.
+                        caffeine_mg: null,
                         water_ml: 1800,
                     },
                     {
@@ -99,6 +111,7 @@
                         fiber_g: 25.1,
                         sugar_g: 58.8,
                         alcohol_g: 9.8,
+                        caffeine_mg: 128,
                         water_ml: 2100,
                     },
                 ],
@@ -114,6 +127,7 @@
                         fiber_g: 6.2,
                         sugar_g: 9.4,
                         alcohol_g: 0,
+                        caffeine_mg: null,
                     },
                     {
                         description: "Salmon with quinoa & veg",
@@ -126,6 +140,7 @@
                         fiber_g: 7.1,
                         sugar_g: 6.8,
                         alcohol_g: 13.9,
+                        caffeine_mg: null,
                     },
                     {
                         description: "Overnight oats with berries",
@@ -138,6 +153,7 @@
                         fiber_g: 9.4,
                         sugar_g: 24.6,
                         alcohol_g: 0,
+                        caffeine_mg: null,
                     },
                     {
                         description: "Steak burrito",
@@ -150,6 +166,7 @@
                         fiber_g: 8.2,
                         sugar_g: 7.9,
                         alcohol_g: 13.8,
+                        caffeine_mg: null,
                     },
                     {
                         description: "Protein shake",
@@ -162,6 +179,7 @@
                         fiber_g: 0.8,
                         sugar_g: 4.2,
                         alcohol_g: 0,
+                        caffeine_mg: null,
                     },
                     {
                         description: "Egg & avocado toast",
@@ -174,6 +192,7 @@
                         fiber_g: 5.4,
                         sugar_g: 3.1,
                         alcohol_g: 0,
+                        caffeine_mg: null,
                     },
                     {
                         description: "Turkey & hummus wrap",
@@ -186,6 +205,7 @@
                         fiber_g: 6.9,
                         sugar_g: 11.2,
                         alcohol_g: 0,
+                        caffeine_mg: null,
                     },
                     {
                         description: "Greek yogurt & almonds",
@@ -198,6 +218,38 @@
                         fiber_g: 1.1,
                         sugar_g: 12.6,
                         alcohol_g: 9.8,
+                        caffeine_mg: null,
+                    },
+                    {
+                        // The two rows the caffeine total comes from. Every
+                        // other row above carries null — a meal logged before
+                        // caffeine existed, or one nobody bothered to fill in —
+                        // which is exactly the partial-nutrient case the panel
+                        // must not average as zero.
+                        description: "Flat white",
+                        meal_type: "snack",
+                        date: "2026-07-05",
+                        calories: 120,
+                        protein_g: 7,
+                        carbs_g: 10,
+                        fat_g: 6,
+                        fiber_g: 0,
+                        sugar_g: 9.8,
+                        alcohol_g: 0,
+                        caffeine_mg: 245,
+                    },
+                    {
+                        description: "Cold brew",
+                        meal_type: "snack",
+                        date: "2026-07-07",
+                        calories: 15,
+                        protein_g: 0,
+                        carbs_g: 2,
+                        fat_g: 0,
+                        fiber_g: 0,
+                        sugar_g: 0,
+                        alcohol_g: 0,
+                        caffeine_mg: 128,
                     },
                 ],
             };
@@ -342,8 +394,9 @@
                     ? `${data.start_date} → ${data.end_date} · ${loggedDaysCaption(data)}`
                     : days[0].date;
 
-                // Calories hero + protein/carbs/fat row + water bar + alcohol
-                // stat line. Tapping carbs also reveals fiber and sugar.
+                // Calories hero + protein/carbs/fat row + water bar + the
+                // alcohol and caffeine stat lines (each dropped when its value
+                // is null). Tapping carbs also reveals fiber and sugar.
                 const panel = macroPanel(
                     data.averages,
                     data.goals,
