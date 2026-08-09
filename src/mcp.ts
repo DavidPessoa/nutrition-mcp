@@ -4356,7 +4356,7 @@ async function buildMcpServer(c: Context, userId: string): Promise<McpServer> {
     const server = new McpServer(
         {
             name: "nutrition-mcp",
-            version: "1.23.4",
+            version: "1.24.0",
             icons: [
                 {
                     src: `${baseUrl}/favicon.ico`,
