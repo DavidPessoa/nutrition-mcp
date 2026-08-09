@@ -244,6 +244,11 @@
                 { key: "sugar_g", label: "Sugar, total (g)" },
                 // Only offered when the user tracks alcohol — see gatedField.
                 { key: "alcohol_g", label: "Alcohol (g)", alcoholOnly: true },
+                // Milligrams, and the label says so. Caffeine has no opt-in
+                // flag of any kind — unlike alcohol it is offered to everyone,
+                // always; it is the read side that stays quiet until there is
+                // caffeine to talk about.
+                { key: "caffeine_mg", label: "Caffeine (mg)" },
                 { key: "notes", label: "Notes" },
                 { key: "time", label: "Time (separate column)" },
                 { key: "deleted", label: "Deleted flag" },
@@ -339,6 +344,29 @@
                     "alkohol",
                     "alkohol_g",
                 ],
+                // MILLIGRAMS. normalizeHeader turns "Caffeine (mg)" — what
+                // Cronometer and every other exporter that carries it writes —
+                // into "caffeine_mg", and a bare "Caffeine" into "caffeine";
+                // both are listed, and both are read as mg because no surveyed
+                // export states caffeine in grams. What is deliberately NOT
+                // listed is any *_g spelling: matching is exact per normalized
+                // header, so "Caffeine (g)" cannot land here by accident, and
+                // caffeineGramsColumns below says so out loud rather than
+                // leaving the row silently blank. Localised headers usually
+                // ship the unit too, hence the _mg forms alongside the bare
+                // words.
+                caffeine_mg: [
+                    "caffeine_mg",
+                    "caffeine",
+                    "koffein",
+                    "koffein_mg",
+                    "cafeina",
+                    "cafeina_mg",
+                    "caffeina",
+                    "caffeina_mg",
+                    "cafeine",
+                    "cafeine_mg",
+                ],
                 notes: ["note", "notes", "comment", "kommentar"],
                 deleted: ["deleted"],
                 // Deliberately narrow. "meal_id" and "entry_id" are NOT here:
@@ -361,6 +389,24 @@
                 if (!S.table) return [];
                 return S.table.headers.filter((h) =>
                     ADDED_SUGAR_RE.test(normalizeHeader(h)),
+                );
+            }
+
+            // Caffeine columns whose header states GRAMS. The server stores
+            // milligrams, so mapping one would record 0.18 where the user meant
+            // 180 — a thousandfold under-report that looks like a clean import
+            // and that no bound can catch, since 0.18 mg is a perfectly legal
+            // value. Never auto-mapped (the ALIASES list holds no _g spelling);
+            // named here so the blank Caffeine row has a stated reason — and,
+            // like the alcohol notice, so does the fact that the omission is
+            // permanent: caffeine_mg sits outside the import digest, so a second
+            // run of a corrected file dedupes to a no-op and back-fills nothing.
+            const CAFFEINE_GRAMS_RE =
+                /^(caffeine|koffein|cafeina|caffeina|cafeine)_(g|gram|grams|gramm)$/;
+            function caffeineGramsColumns() {
+                if (!S.table) return [];
+                return S.table.headers.filter((h) =>
+                    CAFFEINE_GRAMS_RE.test(normalizeHeader(h)),
                 );
             }
 
@@ -651,7 +697,13 @@
                     if (time) when = when + " " + time;
 
                     // Calories only: protein/carbs/fat/fiber/sugar/alcohol are
-                    // all grams in every export, so none of them convert.
+                    // all grams in every export and caffeine is milligrams in
+                    // every export that carries it — each already the unit the
+                    // server stores, so none of them convert. A caffeine column
+                    // headed in grams is the one shape that would need
+                    // converting, and it is refused rather than scaled (see
+                    // CAFFEINE_GRAMS_RE): guessing the factor for a column we
+                    // are not sure about is how a 1000x error gets written.
                     const energy = num(r, m.calories);
 
                     rows.push({
@@ -674,6 +726,10 @@
                         alcohol_g: alcoholTracked()
                             ? num(r, m.alcohol_g)
                             : undefined,
+                        // No gate of any kind, deliberately: caffeine has no
+                        // opt-in, so the only thing that keeps it out of a row
+                        // is the file not having the column.
+                        caffeine_mg: num(r, m.caffeine_mg),
                         notes: cell(r, m.notes),
                         // Passed through untouched. The server decides whether
                         // it names one of this user's meals; the widget must
@@ -1037,6 +1093,16 @@
                           ) +
                           "</span></div>"
                         : "") +
+                    (S.mapping.caffeine_mg === -1 &&
+                    caffeineGramsColumns().length
+                        ? '<div class="notice"><span>i</span><span>' +
+                          esc(
+                              "This file's caffeine column (" +
+                                  caffeineGramsColumns()[0] +
+                                  ") is in grams, but caffeine is stored in milligrams, so Caffeine was left unmapped. Mapping it would record 0.18 where the label says 180 mg. Re-importing the same file later will not fill it in — those rows will already be logged and will be skipped as duplicates. If the header is mislabelled and the values really are milligrams, pick it above; if they really are grams, multiply them by 1000 in the file before importing, not after.",
+                          ) +
+                          "</span></div>"
+                        : "") +
                     (!alcoholTracked() && alcoholColumn()
                         ? '<div class="notice"><span>i</span><span>' +
                           esc(
@@ -1093,18 +1159,20 @@
                     CFG.max_rows_per_call,
                 );
                 const chunks = previewChunks.length;
-                // Fiber, sugar and alcohol are missing from most exports, so
-                // their columns appear only when this file actually carries
-                // them — three columns of "—" would push the macros that do
-                // have values off the visible width for no information.
+                // Fiber, sugar, alcohol and caffeine are missing from most
+                // exports, so their columns appear only when this file actually
+                // carries them — four columns of "—" would push the macros that
+                // do have values off the visible width for no information.
                 // Alcohol additionally never appears with tracking off: the
                 // rows carry none by then, but the column is filtered by the
                 // opt-in as well as by the data, so a stray value could not
-                // put ethanol on screen.
+                // put ethanol on screen. Caffeine has no such gate; it is
+                // filtered by the data alone.
                 const extra = [
                     ["fiber_g", "Fib"],
                     ["sugar_g", "Sug"],
                     ["alcohol_g", "Alc", true],
+                    ["caffeine_mg", "Caf mg"],
                 ].filter(
                     (c) =>
                         (!c[2] || alcoholTracked()) &&

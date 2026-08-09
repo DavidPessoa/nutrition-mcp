@@ -16,6 +16,7 @@ function meal(overrides: Partial<Meal> = {}): Meal {
         fiber_g: 7,
         sugar_g: 12,
         alcohol_g: 3,
+        caffeine_mg: 95,
         notes: null,
         idempotency_key: null,
         ...overrides,
@@ -23,7 +24,7 @@ function meal(overrides: Partial<Meal> = {}): Meal {
 }
 
 const HEADER =
-    "id,logged_at,timezone,meal_type,description,calories,protein_g,carbs_g,fat_g,fiber_g,sugar_g,alcohol_g,notes";
+    "id,logged_at,timezone,meal_type,description,calories,protein_g,carbs_g,fat_g,fiber_g,sugar_g,alcohol_g,caffeine_mg,notes";
 
 /**
  * Minimal RFC-4180 reader: splits a CSV document into rows of fields, honouring
@@ -101,6 +102,7 @@ test("header and data rows have identical field counts", () => {
                 fiber_g: null,
                 sugar_g: null,
                 alcohol_g: null,
+                caffeine_mg: null,
                 meal_type: null,
                 notes: null,
             }),
@@ -133,6 +135,7 @@ test("every value lands under its own header name", () => {
                     fiber_g: 7,
                     sugar_g: 12,
                     alcohol_g: 3,
+                    caffeine_mg: 95,
                     notes: "post-run",
                 }),
             ],
@@ -152,6 +155,7 @@ test("every value lands under its own header name", () => {
         fiber_g: "7",
         sugar_g: "12",
         alcohol_g: "3",
+        caffeine_mg: "95",
         notes: "post-run",
     });
 });
@@ -172,8 +176,30 @@ test("header column order is stable and importer-compatible", () => {
         "fiber_g",
         "sugar_g",
         "alcohol_g",
+        // Between alcohol_g and notes, and spelled with its unit: the importer
+        // matches on this exact string, and "caffeine" alone would let a grams
+        // column bind to a milligram field.
+        "caffeine_mg",
         "notes",
     ]);
+});
+
+test("the caffeine header is the importer's own alias, in milligrams", async () => {
+    // The re-import contract, checked against the importer rather than against
+    // a copy of the name: the widget auto-maps by these aliases, so a rename on
+    // either side silently turns a restored backup into a caffeine-less one.
+    const { findColumn, normalizeHeader } = await import("./csv.js");
+    const header = parseCsv(buildMealsCsv([], "UTC"))[0]!;
+
+    expect(header).toContain("caffeine_mg");
+    expect(normalizeHeader("caffeine_mg")).toBe("caffeine_mg");
+    // "Caffeine (mg)" is what real exports write; both reach the same key.
+    expect(findColumn(header, ["caffeine_mg", "caffeine"])).toBe(
+        header.indexOf("caffeine_mg"),
+    );
+    // A grams spelling must NOT match our header, or a re-import could bind a
+    // milligram column to a grams alias and be wrong by 1000x.
+    expect(findColumn(header, ["caffeine_g"])).toBe(-1);
 });
 
 test("renders timestamps in UTC when tz is UTC", () => {
@@ -201,6 +227,7 @@ test("leaves null macros and notes as empty fields", () => {
                     fiber_g: null,
                     sugar_g: null,
                     alcohol_g: null,
+                    caffeine_mg: null,
                     notes: null,
                 }),
             ],
@@ -215,6 +242,10 @@ test("leaves null macros and notes as empty fields", () => {
         "fiber_g",
         "sugar_g",
         "alcohol_g",
+        // Every meal logged before caffeine existed carries NULL here, so this
+        // is the common case, not an edge one: it must render as an empty cell,
+        // never as a 0 that a re-import would read as "definitely no caffeine".
+        "caffeine_mg",
         "notes",
     ]) {
         expect(f[name]).toBe("");
