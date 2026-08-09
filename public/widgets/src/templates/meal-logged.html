@@ -10,7 +10,8 @@
 
   Shown after log_meal AND update_meal (both tools link this same widget and emit
   the same structuredContent shape via buildMealProgress in src/mcp.ts): the day's
-  running totals vs the user's goals as donut rings. The `action` field ("logged"
+  running totals vs the user's goals in one compact strip, with the meal just
+  logged naming itself on the header line. The `action` field ("logged"
   or "updated") only changes the header wording. Per product decision, it renders
   NOTHING when no nutrition goals are set (there is no target to show progress
   against).
@@ -29,14 +30,10 @@
 
             /*@include shared/base.css@*/
 
-            /* No goals → nothing to show. Collapse padding and drop the
-               full-height fill so an empty widget takes up as little of the
-               host frame as possible. */
-            .wrap:empty {
+            /* No goals → nothing to show. Collapse the gutter so an empty
+               widget takes up as little of the host frame as possible. */
+            .wrap.tight:empty {
                 padding: 0;
-            }
-            body:has(.wrap:empty) {
-                min-height: 0;
             }
 
             /*@include shared/ring.css@*/
@@ -45,7 +42,7 @@
         </style>
     </head>
     <body>
-        <div class="wrap" id="root"></div>
+        <div class="wrap tight" id="root"></div>
 
         <script>
             "use strict";
@@ -205,21 +202,26 @@
                     data.goals,
                     undefined,
                     data.meals,
-                    // Not in the tool's output schema today (it carries
-                    // canonical grams); honoured the moment it is, and "us"
-                    // until then — the server's own default.
+                    // `drink_unit` is null for a user who does not track
+                    // alcohol, which is also the case in which no alcohol
+                    // figure reaches the strip; macroCtxOf falls back to the
+                    // server's own default of "us".
                     { drinkUnit: data.drink_unit },
                 );
 
+                // The meal that was just logged names itself on the header
+                // line; the strip below is the whole day.
                 const meal = data.logged_meal;
-                let sub = "";
+                const bits = [];
                 if (meal && meal.description) {
-                    const bits = [esc(meal.description)];
+                    bits.push(esc(meal.description));
                     if (meal.meal_type) bits.push(esc(meal.meal_type));
-                    if (meal.calories != null)
-                        bits.push(`${fmt(meal.calories, 0)} kcal`);
-                    sub = bits.join(" · ");
                 }
+                const sub = bits.join(" · ");
+                const added =
+                    meal && meal.calories != null
+                        ? `+${fmt(meal.calories, 0)} kcal`
+                        : "";
 
                 // Same widget for log_meal and update_meal — the action only
                 // changes the header wording.
@@ -227,12 +229,14 @@
                     data.action === "updated" ? "Meal updated" : "Meal logged";
 
                 root.innerHTML = `
-          <header class="head">
-            <h1>${title}</h1>
-            ${sub ? `<span class="range">${sub}</span>` : ""}
-          </header>
-          <div class="section-title">Today vs goal</div>
-          ${panel}`;
+          <div class="panel">
+            <div class="phead">
+              <div class="ptitle">${title}</div>
+              ${sub ? `<div class="psub">${sub}</div>` : ""}
+              ${added ? `<div class="pmeta kcal">${added}</div>` : ""}
+            </div>
+            ${panel}
+          </div>`;
             }
 
             // Pull the meal progress out of whatever wrapper the host used.

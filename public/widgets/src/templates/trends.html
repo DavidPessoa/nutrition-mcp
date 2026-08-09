@@ -7,21 +7,23 @@
   bridge. The result is fully self-contained — inline CSS + JS, zero network
   requests — because the MCP Apps sandbox blocks external hosts.
 
-  Shown after get_trends. The tool sends up to 30 days of daily series, and the
-  7 / 14 / 30-day toggle slices it CLIENT-SIDE and re-renders — no host round-trip,
-  so switching ranges is instant. Each range shows a calories/day line chart and
-  the trailing average vs goal as rings (average over the window; calories,
+  Shown after get_trends. The whole widget is ONE panel: a header line carrying
+  the title and the 7 / 14 / 30-day toggle, the calories-per-day chart, then the
+  shared macro strip. The tool sends up to 30 days of daily series and the
+  toggle slices it CLIENT-SIDE and re-renders — no host round-trip, so switching
+  ranges is instant. The strip shows the trailing average vs goal (calories,
   protein, carbs, fat and water count empty days as 0, while fiber, sugar,
   alcohol and caffeine average only over the days that recorded them — see avgOf
   below — matching the tool's text output).
 
   The denominator is EVERY CALENDAR DAY in the window, not just the logged ones:
-  these rings answer "how am I doing across this stretch of time?", so a skipped
-  day pulls the average down. That deliberately differs from the
-  get_nutrition_summary dashboard, whose hero rings divide by logged days only
-  and answer "how does a day I actually log look?" (issue #70). Both are correct
-  for their question and both name their denominator on screen — keep the
-  section title below explicit if you touch it.
+  these averages answer "how am I doing across this stretch of time?", so a
+  skipped day pulls the average down. That deliberately differs from the
+  get_nutrition_summary dashboard, whose figures divide by logged days only and
+  answer "how does a day I actually log look?" (issue #70). Both are correct for
+  their question and both name their denominator on screen — here that is the
+  strip's calorie label ("14-day avg · all days"), which is the only place it is
+  said, so keep it explicit if you touch it.
 
   Data arrives as the `structuredContent` of the get_trends tool result; the
   shared bridge (shared/bridge.js) reads it across host conventions and calls
@@ -37,24 +39,24 @@
 
             /*@include shared/base.css@*/
 
-            /* Segmented control (7 / 14 / 30-day toggle). The active label uses
-               var(--bg) on the accent fill so it stays high-contrast in both
-               themes (off-white on dark-green in light, black on light-green in
-               dark). */
+            /* Segmented control (7 / 14 / 30-day toggle), riding at the right
+               end of the panel header at its .seg-sm pill scale. The active
+               label uses var(--bg) on the accent fill so it stays
+               high-contrast in both themes. */
             /*@include shared/seg.css@*/
 
             /* Calories trend chart (hand-built SVG area + line) */
             /*@include shared/trend.css@*/
 
-            /* Ring gauge + macro panel (calories hero, protein/carbs/fat row,
-               water bar) — shared across widgets. */
+            /* Ring gauge + macro strip (calorie gauge, protein/carbs/fat bars,
+               limits row, water line) — shared across widgets. */
             /*@include shared/ring.css@*/
 
             /*@include shared/macros.css@*/
         </style>
     </head>
     <body>
-        <div class="wrap" id="root"></div>
+        <div class="wrap tight" id="root"></div>
 
         <script>
             "use strict";
@@ -92,12 +94,12 @@
                         // Alcohol tracking ON in this sample: null on an
                         // unlogged day (no data), 0 on a real alcohol-free
                         // day (still shows), a value on the rest. null on
-                        // every day (tracking off) hides the stat line.
+                        // every day (tracking off) hides the alcohol cell.
                         alcohol_g: skip ? null : i % 7 ? 0 : r(13.9 + w * 4),
                         // Caffeine on most days but not all, and never a 0 on
                         // a day that simply has none: avgOf must divide by the
                         // days that recorded it, not by the window. null on
-                        // every day (nobody ever logged any) hides the line —
+                        // every day (nobody ever logged any) hides the cell —
                         // there is no opt-in flag to hide it any other way.
                         caffeine_mg:
                             skip || i % 5 === 0
@@ -168,21 +170,23 @@
                 return sum / seen;
             }
 
-            // MACROS + the macro panel builder (calories hero, protein/carbs/fat
-            // row, water bar). Defines the shared MACROS array the paint() loop
-            // reads. Requires fmt + esc above.
+            // MACROS + the macro strip builder (calorie gauge, protein/carbs/fat
+            // bars, limits row, water line). Defines the shared MACROS array the
+            // averaging loop reads. Requires fmt + esc above.
             /*@include shared/macros.js@*/
 
             // Calories-per-day trend: SVG area + line that scales to any range
-            // (7 to 30 days). Uniform scaling — no preserveAspectRatio
-            // distortion — so it keeps its aspect ratio at any container width.
-            function trendChart(days, goal) {
+            // (7 to 30 days). Compact — a 54-unit-tall viewBox sitting inside
+            // the widget's panel, not a card of its own. Uniform scaling — no
+            // preserveAspectRatio distortion — so it keeps its aspect ratio at
+            // any container width.
+            function trendChart(days, goal, range, logged) {
                 const W = 480,
-                    H = 88,
+                    H = 54,
                     padL = 8,
                     padR = 8,
-                    padT = 10,
-                    padB = 6;
+                    padT = 6,
+                    padB = 4;
                 const n = days.length;
                 const vals = days.map((d) => d.calories || 0);
                 const maxV = Math.max(...vals, goal || 0, 1) * 1.15;
@@ -211,35 +215,29 @@
                     goal && goal > 0
                         ? `<line class="goalline" x1="${padL}" y1="${y(goal).toFixed(1)}" x2="${W - padR}" y2="${y(goal).toFixed(1)}"/>`
                         : "";
-                // Only draw point markers on short ranges to avoid clutter.
+                // Point markers only on the shortest range: at 14 and 30 days
+                // they crowd the line at this height and read as noise.
                 const dots =
-                    n <= 14
+                    n <= 7
                         ? pts
                               .map(
                                   (p) =>
-                                      `<circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="2.4" fill="var(--calories)"/>`,
+                                      `<circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="2.2" fill="var(--calories)"/>`,
                               )
                               .join("")
                         : "";
                 const md = (d) => esc(d.date.slice(5)); // MM-DD
-                const avg = Math.round(avgOf(days, "calories"));
 
                 return `
-          <div class="trend">
-            <div class="thead">
-              <span class="ttitle">Calories / day</span>
-              <span class="tmeta">avg ${fmt(avg, 0)}${goal && goal > 0 ? ` · goal ${fmt(goal, 0)}` : ""}</span>
+          <div class="chart">
+            <div class="chead">
+              <span class="ctitle">Calories / day</span>
+              <span class="cmeta">${logged}/${n} days logged</span>
             </div>
-            <svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Calories per day over the selected range">
-              <defs>
-                <linearGradient id="calfill" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stop-color="var(--calories)" stop-opacity="0.28"/>
-                  <stop offset="100%" stop-color="var(--calories)" stop-opacity="0.02"/>
-                </linearGradient>
-              </defs>
+            <svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Calories per day over the last ${range} days">
               <line class="axis" x1="${padL}" y1="${base}" x2="${W - padR}" y2="${base}"/>
               ${goalLine}
-              <path d="${area}" fill="url(#calfill)"/>
+              <path d="${area}" fill="var(--calories)" opacity="0.16"/>
               <path d="${line}" fill="none" stroke="var(--calories)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
               ${dots}
             </svg>
@@ -290,7 +288,6 @@
                     .sort((a, b) => (a.date < b.date ? -1 : 1));
                 const range = STATE.range;
                 const slice = all.slice(-range);
-                const n = slice.length;
 
                 const avg = {};
                 for (const m of MACROS) avg[m.key] = avgOf(slice, m.key);
@@ -299,11 +296,13 @@
 
                 const seg = RANGES.map(
                     (r) =>
-                        `<button class="seg-btn${r === range ? " active" : ""}" data-n="${r}" role="tab" aria-selected="${r === range}">${r} days</button>`,
+                        `<button class="seg-btn${r === range ? " active" : ""}" data-range="${r}" aria-pressed="${r === range}" aria-label="${r} days">${r}</button>`,
                 ).join("");
 
-                // No per-meal rows in a trends payload, so only carbs is
-                // tappable — for the window's average fiber and sugar.
+                // No per-meal rows in a trends payload, so the strip is static
+                // — macroPanel only makes tiles tappable when meals are passed.
+                // `divided` gives it the leading hairline that separates it from
+                // the chart above.
                 const panel = macroPanel(
                     avg,
                     data.goals,
@@ -311,19 +310,29 @@
                     null,
                     {
                         drinkUnit: data.drink_unit,
+                        divided: true,
+                        // The one place the denominator is named: these are
+                        // averages over every calendar day in the window, skipped
+                        // days included.
+                        calLabel: `${range}-day avg · all days`,
                     },
                 );
-                const chart = trendChart(slice, data.goals?.calories ?? null);
+                const chart = trendChart(
+                    slice,
+                    data.goals?.calories ?? null,
+                    range,
+                    logged,
+                );
 
                 root.innerHTML = `
-          <header class="head">
-            <h1>Trends</h1>
-            <span class="range">${esc(slice[0].date)} → ${esc(slice[n - 1].date)} · ${logged}/${n} days logged</span>
-          </header>
-          <div class="seg" role="tablist" aria-label="Trend window">${seg}</div>
-          ${chart}
-          <div class="section-title">${range}-day average (all calendar days) vs goal</div>
-          ${panel}`;
+          <div class="panel">
+            <div class="phead mid">
+              <div class="ptitle">Trends</div>
+              <div class="seg seg-sm" role="group" aria-label="Trend window">${seg}</div>
+            </div>
+            ${chart}
+            ${panel}
+          </div>`;
             }
 
             // Delegated on #root, which persists across paint()'s innerHTML
@@ -331,7 +340,7 @@
             document.getElementById("root").addEventListener("click", (e) => {
                 const btn = e.target.closest(".seg-btn");
                 if (!btn) return;
-                const n = Number(btn.dataset.n);
+                const n = Number(btn.dataset.range);
                 if (n && n !== STATE.range && STATE.data) {
                     STATE.range = n;
                     paint();
