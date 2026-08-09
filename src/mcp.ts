@@ -105,6 +105,29 @@ const TRENDS_WIDGET_URI = "ui://widget/trends.html";
 const WEIGHT_TRENDS_WIDGET_URI = "ui://widget/weight-trends.html";
 const IMPORT_MEALS_WIDGET_URI = "ui://widget/import-meals.html";
 
+// The completeness rule for the three nutrients the model routinely forgets,
+// declared once and spliced into SERVER_INSTRUCTIONS, log_meal and update_meal
+// so the three cannot drift.
+//
+// Fiber and sugar are unconditional; caffeine deliberately is NOT. That
+// asymmetry is the whole point of this block, and it is a read-side constraint
+// rather than a stylistic one: caffeine's display gate is `!= null` everywhere
+// (limitShown in shared/macros.js, recordedGoalLine and totalsPayloadOf here),
+// so an explicit 0 on a sandwich is not a harmless extra data point — it puts a
+// "0 mg / 400 mg limit" row on the dashboard of someone who has never had a
+// coffee, and drags every caffeine average toward zero by joining the covered
+// set (coveredDailyAverage in insights.ts). Fiber and sugar are typed as plain
+// numbers in TOTALS_ITEM and already read as 0 when absent, so filling them in
+// only ever adds fidelity.
+//
+// The reason omission is worse than an imperfect estimate: a NULL is not a
+// zero, it excludes the entire DAY from that nutrient's averages and goal lines
+// (dayCarries in insights.ts), so one forgotten fiber figure silently deletes a
+// day from the user's fiber trend rather than making it slightly wrong.
+const NUTRIENT_COVERAGE = `Fiber, sugar and caffeine are tracked here alongside the headline macros, and they are only worth tracking if they are actually filled in.
+- fiber_g and sugar_g: send them on EVERY meal, exactly as you already send protein, carbs and fat. Not knowing the exact figure is not a reason to leave one out — you do not know the exact protein either. Work in this order: a nutrition label, a barcode lookup, or a chain's published per-item nutrition; then a web search for that product or dish; then your own estimate from the ingredients and the portion. A 0 is the right answer wherever 0 is true (a steak, eggs, oil, black coffee) — what is wrong is omitting the field, because a missing value is not a zero: it records "nobody measured this" and drops the whole day out of the user's fiber and sugar averages, goal lines and charts.
+- caffeine_mg: decide it deliberately on every entry instead of defaulting to silence, but only send a number when the item really is a caffeine source — coffee of any kind (decaf included, about 2-5 mg), tea, matcha, yerba mate, cola and many other soft drinks, energy drinks, pre-workout, chocolate and cocoa, coffee ice cream, caffeine tablets. If it is one, get the figure from the label or the chain's nutrition, or search the web for the branded drink, or fall back to the typical amounts in the field description. If the item is plainly not a caffeine source, OMIT the field rather than sending 0 — an explicit 0 means "measured, and it was none", which turns on a caffeine row for a user who never consumes any.`;
+
 // Sent to clients in the initialize response (SDK ServerOptions.instructions).
 // Advisory — not every client surfaces it, so the enforcement rule ("interview
 // the user one question at a time; never log from a photo until every open
@@ -119,6 +142,10 @@ Knowing what time it is — some hosts put the current date and time in your con
 - Logging something that just happened: omit logged_at entirely. The server stamps the entry with the current time, which is more accurate than any time you could reconstruct.
 - Resolving a relative time ("this morning", "an hour ago", "last Monday") or working out what "today" means: call get_current_time, then pass the resolved local time as logged_at.
 - Only ask the user for a time when the entry is for some other moment they have not told you.
+
+Recording a complete meal — this applies to every write path (log_meal, update_meal, a barcode lookup you then log, a meal you copied from search_meals), not just to photos.
+${NUTRIENT_COVERAGE}
+When you notice after the fact that a meal went in without its fiber or sugar, do not leave it: fill it in with update_meal rather than mentioning it in prose.
 
 Photo-based meal logging — when the user sends a photo of food, follow these steps in order:
 1. Pick the flow. A packaged product with a visible barcode: transcribe the digits printed under the barcode and call lookup_barcode. A plate, bowl, or prepared meal: continue below.
@@ -1189,6 +1216,31 @@ export function alcoholHiddenNote(
     return `\n\n(${subject}, but alcohol tracking is off for this account so it is not shown. Turn it on with set_alcohol_tracking.)`;
 }
 
+// Tool descriptions and SERVER_INSTRUCTIONS are advisory and are read once, at
+// the top of a session; this note lands in the model's context at the exact
+// moment it left a nutrient out, which is the only feedback in the loop. Same
+// report-only shape as alcoholHiddenNote above — it never writes anything.
+//
+// Deliberately limited to fiber_g and sugar_g. Both are estimable for every
+// food that exists, so a NULL on a meal the model just wrote is an omission and
+// not a fact, and the cost is not one imperfect number: a null excludes the
+// whole DAY from that nutrient's averages, goal lines and charts (dayCarries in
+// insights.ts), so a forgotten fiber figure deletes the day from the trend.
+//
+// Caffeine is NOT checked here, and adding it would undo the suppression the
+// rest of this file is built around: most meals genuinely carry none, its
+// display gate is `!= null` rather than `> 0` (limitShown, recordedGoalLine,
+// totalsPayloadOf), so nagging until every sandwich carries a figure produces
+// precisely the fabricated "0 mg / 400 mg limit" that null exists to prevent.
+export function missingNutrientNote(meal: Meal): string {
+    const missing = [
+        meal.fiber_g == null ? "fiber_g" : null,
+        meal.sugar_g == null ? "sugar_g" : null,
+    ].filter((f): f is string => f !== null);
+    if (missing.length === 0) return "";
+    return `\n\n(Not recorded on this meal: ${missing.join(", ")}. A missing value is not a zero — it leaves the whole day out of that nutrient's totals, averages and goal line. Estimate the value from the ingredients (0 where the food genuinely has none) and fill it in with update_meal, id ${meal.id}.)`;
+}
+
 // `alcohol` is the whole alcohol opt-in, threaded once: the drink unit to render
 // grams in, or null when this user has alcohol tracking off. It is resolved from
 // the profile in buildMcpServer (like widgetsEnabled) rather than re-read inside
@@ -1239,7 +1291,13 @@ export function registerTools(
         {
             title: "Log Meal",
             description:
-                "Log a meal entry with nutritional information. If the user doesn't specify the quantity or portion size, ask how much they ate before estimating calories and macros. When the user gives a barcode — typed, or read from a photo of the package (transcribe the digits printed under the barcode) — call lookup_barcode first to get the product's label data, then scale it to the amount eaten. Fall back to web search or estimation only when no product is found. Use web search for branded products when no barcode is available. When logging from a photo of a plated or prepared meal (no package/barcode): first identify each dish, then establish whether it is a restaurant/takeout meal or homemade before anything else. If it is from a restaurant, ask which restaurant and where, then search the web for its menu — chains publish per-item nutrition worth using directly, independent places usually publish ingredient lists that reveal the butter, cream, and oil the photo hides; if you cannot find the menu or cannot tell which dish it is, say so and put your assumption to the user as a question rather than presenting a guess as menu data. Either way, estimate portions in household measures the user can eyeball (a glass of, a handful of, a tablespoon of — NOT grams; for restaurant servings ask how much of it they actually ate), call search_meals to see how similar meals were logged before and to surface ingredients that may be invisible in the photo, then interview the user across multiple turns — one question per message, covering which variation each dish is, how much they ate, and photo-invisible ingredients (oil, sugar, sauce, what a drink was made with) — until nothing is left open. Do NOT call this tool after a single question-and-answer round; a lone confirmation is not enough. Only call it once every open question is resolved and the user has approved a full summary of the meal (or has told you to stop asking and just log it). Write the confirmed household-measure portions into the description itself (e.g. 'Oatmeal (1 glass raw oats, 2 glasses milk) with banana') so future searches are self-describing, and for a restaurant meal name the venue and city too (e.g. 'Pad thai with chicken (1 plate, finished) at Thai Basil, Podil, Kyiv'). When the entry is coffee, tea, cola, an energy drink or anything else caffeinated, fill in caffeine_mg (in MILLIGRAMS) as well — putting '180 mg caffeine' in the notes instead leaves it out of every total, goal and chart.",
+                // The nutrient-completeness rule is spliced in from the shared
+                // NUTRIENT_COVERAGE rather than restated, because
+                // SERVER_INSTRUCTIONS carries the same paragraph and many hosts
+                // surface only one of the two.
+                "Log a meal entry with nutritional information. If the user doesn't specify the quantity or portion size, ask how much they ate before estimating calories and macros. When the user gives a barcode — typed, or read from a photo of the package (transcribe the digits printed under the barcode) — call lookup_barcode first to get the product's label data, then scale it to the amount eaten. Fall back to web search or estimation only when no product is found. Use web search for branded products when no barcode is available. When logging from a photo of a plated or prepared meal (no package/barcode): first identify each dish, then establish whether it is a restaurant/takeout meal or homemade before anything else. If it is from a restaurant, ask which restaurant and where, then search the web for its menu — chains publish per-item nutrition worth using directly, independent places usually publish ingredient lists that reveal the butter, cream, and oil the photo hides; if you cannot find the menu or cannot tell which dish it is, say so and put your assumption to the user as a question rather than presenting a guess as menu data. Either way, estimate portions in household measures the user can eyeball (a glass of, a handful of, a tablespoon of — NOT grams; for restaurant servings ask how much of it they actually ate), call search_meals to see how similar meals were logged before and to surface ingredients that may be invisible in the photo, then interview the user across multiple turns — one question per message, covering which variation each dish is, how much they ate, and photo-invisible ingredients (oil, sugar, sauce, what a drink was made with) — until nothing is left open. Do NOT call this tool after a single question-and-answer round; a lone confirmation is not enough. Only call it once every open question is resolved and the user has approved a full summary of the meal (or has told you to stop asking and just log it). Write the confirmed household-measure portions into the description itself (e.g. 'Oatmeal (1 glass raw oats, 2 glasses milk) with banana') so future searches are self-describing, and for a restaurant meal name the venue and city too (e.g. 'Pad thai with chicken (1 plate, finished) at Thai Basil, Podil, Kyiv').\n\n" +
+                NUTRIENT_COVERAGE +
+                "\nPutting '180 mg caffeine' or '6 g fiber' in notes or in the description instead of in the field leaves it out of every total, goal and chart.",
             annotations: {
                 readOnlyHint: false,
                 destructiveHint: false,
@@ -1279,19 +1337,26 @@ export function registerTools(
                     .max(MAX_MACRO_G)
                     .optional()
                     .describe("Fat in grams"),
+                // Fiber and sugar carry reference anchors for the same reason
+                // caffeine_mg does: the field is optional in the schema but
+                // effectively mandatory in practice, so the model needs a last
+                // resort that is better than skipping the field. See
+                // NUTRIENT_COVERAGE for why an omission costs the whole day.
                 fiber_g: z.coerce
                     .number()
                     .min(0)
                     .max(MAX_MACRO_G)
                     .optional()
-                    .describe("Dietary fiber in grams"),
+                    .describe(
+                        "Dietary fiber in grams. Send this on every meal — treat it as mandatory alongside protein, carbs and fat, and estimate it rather than omitting it, because a missing value is not a zero and excludes the whole day from the user's fiber average and goal. Prefer a label or a barcode lookup, then a web search, then these anchors per 100 g: cooked lentils or beans 5-8 g, dry rolled oats 10 g, wholemeal bread 7 g, white bread 2.7 g, cooked wholewheat pasta 4 g (white 2 g), cooked brown rice 1.8 g (white 0.4 g), potato with skin 2 g, most vegetables 2-3 g, apple or pear with skin 2.4-3 g, banana 2.6 g, berries 5-7 g, almonds 12 g, chia 34 g. Meat, fish, eggs, dairy, oil and sugar contain none: send 0 there, do not omit the field.",
+                    ),
                 sugar_g: z.coerce
                     .number()
                     .min(0)
                     .max(MAX_MACRO_G)
                     .optional()
                     .describe(
-                        "TOTAL sugars in grams — including sugar naturally present in fruit, milk and juice, not just added sugar. Report the whole figure a nutrition label or database gives for 'Sugars'; do not try to separate out added sugar.",
+                        "TOTAL sugars in grams — including sugar naturally present in fruit, milk and juice, not just added sugar. Report the whole figure a nutrition label or database gives for 'Sugars'; do not try to separate out added sugar. Send this on every meal, estimating rather than omitting it: a missing value is not a zero and drops the whole day out of the sugar average and limit. Anchors per 100 g when you have nothing better: milk 5 g, plain yogurt 4.7 g, fruit yogurt 12 g, apple 10 g, banana 12 g, orange 9 g, berries 5-10 g, dried dates 63 g, cola 10.6 g, orange juice 8.4 g, ketchup 22 g, milk chocolate 52 g, bread 3-5 g. Meat, fish, eggs, cheese, oil, rice, pasta and most vegetables are ~0: send 0 there, do not omit the field.",
                     ),
                 alcohol_g: z.coerce
                     .number()
@@ -1307,7 +1372,7 @@ export function registerTools(
                     .max(MAX_CAFFEINE_MG)
                     .optional()
                     .describe(
-                        "Caffeine in MILLIGRAMS (mg) — this field is the one that is not in grams, and a value under 1 almost certainly means grams were sent by mistake. Typical amounts: a 240 ml brewed coffee 95 mg, a single espresso 63 mg, instant coffee 62 mg, black tea 47 mg, green tea 28 mg, a 355 ml cola 34 mg, a 250 ml energy drink 80 mg, decaf 2 mg. Scale them to what was actually drunk (a double espresso is 126 mg), and for a branded drink prefer the figure on the label or the chain's published nutrition. Caffeine adds no calories, so it never changes the kcal figure. Omit the field for a meal with no caffeine rather than sending 0 — a 0 records 'measured, and it was none'.",
+                        "Caffeine in MILLIGRAMS (mg) — this field is the one that is not in grams, and a value under 1 almost certainly means grams were sent by mistake. Typical amounts: a 240 ml brewed coffee 95 mg, a single espresso 63 mg, instant coffee 62 mg, black tea 47 mg, green tea 28 mg, a 355 ml cola 34 mg, a 250 ml energy drink 80 mg, decaf 2 mg. Scale them to what was actually drunk (a double espresso is 126 mg), and for a branded drink prefer the figure on the label or the chain's published nutrition. Caffeine adds no calories, so it never changes the kcal figure. Unlike fiber_g and sugar_g, this field is conditional, so decide it on every entry rather than skipping it by default: if the item is a caffeine source at all — coffee including decaf, tea, matcha, yerba mate, cola and other soft drinks, energy drinks, pre-workout, chocolate and cocoa, coffee ice cream, caffeine tablets — send a figure, searching the web for a branded drink whose label you do not know and falling back to the amounts above. Omit the field for anything that is not a caffeine source rather than sending 0 — a 0 records 'measured, and it was none', and one on a sandwich puts a caffeine row on the dashboard of a user who never drinks any.",
                     ),
                 logged_at: z
                     .string()
@@ -1365,7 +1430,7 @@ export function registerTools(
                                     (meal.alcohol_g ?? 0) > 0,
                                     alcohol,
                                     "Alcohol saved with this meal",
-                                )}${note}`,
+                                )}${missingNutrientNote(meal)}${note}`,
                             },
                         ],
                         structuredContent,
@@ -1635,7 +1700,7 @@ export function registerTools(
         {
             title: "Look Up Barcode",
             description:
-                "Look up a packaged product's label nutrition by barcode via Open Food Facts. The figures come from the product's own label as transcribed by the Open Food Facts community, so they beat estimating — but they are not verified by this server and can be wrong, stale, or missing entirely. Pass the barcode digits (EAN/UPC, 8–14 digits). The user can type them, or you can read them from a photo of the package — transcribe the human-readable digits printed beneath the barcode. Returns the product name, serving, and macros, which you can then pass to log_meal scaled to the amount eaten. If no product is found, fall back to web search or estimation.",
+                "Look up a packaged product's label nutrition by barcode via Open Food Facts. The figures come from the product's own label as transcribed by the Open Food Facts community, so they beat estimating — but they are not verified by this server and can be wrong, stale, or missing entirely. Pass the barcode digits (EAN/UPC, 8–14 digits). The user can type them, or you can read them from a photo of the package — transcribe the human-readable digits printed beneath the barcode. Returns the product name, serving, and macros, which you can then pass to log_meal scaled to the amount eaten. If no product is found, fall back to web search or estimation. Two gaps to close yourself before logging: a fiber or sugar figure shown as n/a is missing data rather than a zero, so estimate it and pass it anyway; and Open Food Facts carries no caffeine at all, so for a coffee, tea, cola, energy drink or other caffeinated product get caffeine_mg from the label or a web search.",
             annotations: {
                 readOnlyHint: true,
                 destructiveHint: false,
@@ -2733,7 +2798,12 @@ export function registerTools(
         "update_meal",
         {
             title: "Update Meal",
-            description: "Update fields of an existing meal entry",
+            // Only the fields passed are written (see updateMeal), which is what
+            // makes this the backfill path for a meal that went in without its
+            // fiber or sugar — and what missingNutrientNote points the model at.
+            description:
+                "Update fields of an existing meal entry. Only the fields you pass are changed, which also makes this the way to BACKFILL nutrition a meal was logged without: if a past meal has no fiber_g, sugar_g or (where it applies) caffeine_mg, estimate the value and pass just that field rather than telling the user the figure in prose. Meal ids come from get_meals_today, get_meals_by_date or search_meals.\n\n" +
+                NUTRIENT_COVERAGE,
             annotations: {
                 readOnlyHint: false,
                 destructiveHint: false,
@@ -2756,14 +2826,16 @@ export function registerTools(
                     .min(0)
                     .max(MAX_MACRO_G)
                     .optional()
-                    .describe("Dietary fiber in grams"),
+                    .describe(
+                        "Dietary fiber in grams. Every meal should carry one — pass it here for a meal logged without it, estimating from the ingredients if no label figure exists, and 0 for a food that genuinely has none (meat, fish, eggs, dairy, oil).",
+                    ),
                 sugar_g: z.coerce
                     .number()
                     .min(0)
                     .max(MAX_MACRO_G)
                     .optional()
                     .describe(
-                        "TOTAL sugars in grams, including sugar naturally present in fruit and milk — not only added sugar.",
+                        "TOTAL sugars in grams, including sugar naturally present in fruit and milk — not only added sugar. Every meal should carry one — pass it here for a meal logged without it, estimating if there is no label figure, and 0 for a food that genuinely has none.",
                     ),
                 alcohol_g: z.coerce
                     .number()
@@ -2779,7 +2851,7 @@ export function registerTools(
                     .max(MAX_CAFFEINE_MG)
                     .optional()
                     .describe(
-                        "Caffeine in MILLIGRAMS, not grams (a 240 ml brewed coffee is 95 mg, a single espresso 63 mg, black tea 47 mg, a 250 ml energy drink 80 mg). Adds no calories.",
+                        "Caffeine in MILLIGRAMS, not grams (a 240 ml brewed coffee is 95 mg, a single espresso 63 mg, black tea 47 mg, a 250 ml energy drink 80 mg). Adds no calories. Pass it only for a meal that is genuinely a caffeine source; a 0 here records 'measured, and it was none' and starts showing the user a caffeine row.",
                     ),
                 logged_at: z
                     .string()
@@ -2820,7 +2892,7 @@ export function registerTools(
                                     (meal.alcohol_g ?? 0) > 0,
                                     alcohol,
                                     "Alcohol saved with this meal",
-                                )}${note}`,
+                                )}${missingNutrientNote(meal)}${note}`,
                             },
                         ],
                         structuredContent,

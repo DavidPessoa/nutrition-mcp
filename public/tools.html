@@ -611,7 +611,12 @@
                                             <span class="param-opt"
                                                 >optional</span
                                             >
-                                            — Dietary fiber in grams
+                                            — Dietary fiber in grams. The AI is
+                                            told to fill this in on every meal,
+                                            estimating from the ingredients when
+                                            no label figure exists, because a
+                                            blank is not a zero — it leaves the
+                                            whole day out of your fiber average
                                         </li>
                                         <li>
                                             <code>sugar_g</code>
@@ -622,7 +627,8 @@
                                             figure a label prints under
                                             "Sugars", including the sugar
                                             naturally in fruit and milk, not
-                                            just added sugar
+                                            just added sugar. Filled in on every
+                                            meal on the same terms as fiber
                                         </li>
                                         <li>
                                             <code>alcohol_g</code>
@@ -647,7 +653,12 @@
                                             guideline states it (a brewed coffee
                                             is about 95 mg, an espresso 63 mg, a
                                             can of cola 34 mg). Caffeine adds no
-                                            calories
+                                            calories. Unlike fiber and sugar it
+                                            is only sent for things that
+                                            actually contain caffeine — a
+                                            recorded 0 would put a caffeine row
+                                            on your dashboard for a nutrient you
+                                            never consume
                                         </li>
                                         <li>
                                             <code>logged_at</code>
@@ -874,7 +885,9 @@
                                     Change the details of a meal you already
                                     logged — its description, any macro, fiber,
                                     sugar, alcohol or caffeine, the time, or
-                                    notes.
+                                    notes. Also how a gap gets backfilled: if a
+                                    meal went in without its fiber or sugar, the
+                                    server says so and the AI fills it in here.
                                 </p>
                                 <div class="tool-params">
                                     <span class="tool-params-label"

@@ -34,6 +34,17 @@ export interface MealVariation {
     typicalProteinG: number | null;
     typicalCarbsG: number | null;
     typicalFatG: number | null;
+    /* Carried for the same reason as the macros above, and it is what makes
+     * copying a recurring meal forward complete rather than four-fifths
+     * complete: the model is told to search before logging a repeat, so
+     * whatever this output omits is what it re-derives (or forgets) each time.
+     * medianOf already drops nulls, so a history where only some entries
+     * recorded fiber still yields the typical figure of the ones that did. */
+    typicalFiberG: number | null;
+    typicalSugarG: number | null;
+    /* Whole milligrams, matching every other caffeine figure the model is
+     * shown. Null for the usual case of a food that never carried any. */
+    typicalCaffeineMg: number | null;
 }
 
 /**
@@ -95,6 +106,13 @@ export function groupMealVariations(meals: Meal[]): MealVariation[] {
             typicalProteinG: medianOf(group, (m) => m.protein_g, round1),
             typicalCarbsG: medianOf(group, (m) => m.carbs_g, round1),
             typicalFatG: medianOf(group, (m) => m.fat_g, round1),
+            typicalFiberG: medianOf(group, (m) => m.fiber_g, round1),
+            typicalSugarG: medianOf(group, (m) => m.sugar_g, round1),
+            typicalCaffeineMg: medianOf(
+                group,
+                (m) => m.caffeine_mg,
+                Math.round,
+            ),
         });
     }
     variations.sort(
@@ -108,15 +126,25 @@ function formatVariation(v: MealVariation, index: number, tz: string): string {
     const parts: string[] = [
         `${index + 1}. ${v.label} — logged ${v.count}×, last on ${dateInTz(v.lastLoggedAt, tz)}`,
     ];
+    const macros = [
+        v.typicalProteinG !== null ? `${v.typicalProteinG}g protein` : null,
+        v.typicalCarbsG !== null ? `${v.typicalCarbsG}g carbs` : null,
+        v.typicalFatG !== null ? `${v.typicalFatG}g fat` : null,
+        v.typicalFiberG !== null ? `${v.typicalFiberG}g fiber` : null,
+        v.typicalSugarG !== null ? `${v.typicalSugarG}g sugar` : null,
+        v.typicalCaffeineMg !== null
+            ? `${v.typicalCaffeineMg} mg caffeine`
+            : null,
+    ].filter(Boolean);
     if (v.typicalCalories !== null) {
-        const macros = [
-            v.typicalProteinG !== null ? `${v.typicalProteinG}g protein` : null,
-            v.typicalCarbsG !== null ? `${v.typicalCarbsG}g carbs` : null,
-            v.typicalFatG !== null ? `${v.typicalFatG}g fat` : null,
-        ].filter(Boolean);
         parts.push(
             `typically ~${v.typicalCalories} kcal${macros.length > 0 ? ` (${macros.join(", ")})` : ""}`,
         );
+    } else if (macros.length > 0) {
+        // A group with nutrients but no calorie figure used to read "(no macros
+        // logged)", which was false and told the model to re-derive numbers it
+        // was already holding.
+        parts.push(`typically ${macros.join(", ")}, no calorie figure logged`);
     } else {
         parts.push("(no macros logged)");
     }
@@ -162,7 +190,7 @@ export function formatMealSearchResults(
             "Most recent matching entries:",
             ...meals.slice(0, recentCount).map((m) => formatRecentEntry(m, tz)),
         ].join("\n"),
-        "When logging from a photo, present these variations to the user as options before logging.",
+        "When logging from a photo, present these variations to the user as options before logging. Reuse the figures above for a repeat of the same meal — and where a variation shows no fiber or sugar, that is missing data rather than a zero, so estimate those two when you log the repeat instead of leaving them out again.",
     ];
     return sections.join("\n\n");
 }

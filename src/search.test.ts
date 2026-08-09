@@ -236,3 +236,60 @@ test("renders '(no macros logged)' when every entry lacks macros", () => {
     expect(text).toContain("(no macros logged)");
     expect(text).not.toContain("~null");
 });
+
+// --- fiber / sugar / caffeine in the variation line ---
+//
+// The model is told to search before logging a repeat, so anything this output
+// leaves out is what it re-derives or forgets every time. Showing only kcal and
+// P/C/F was itself teaching that a meal is four numbers.
+
+test("a variation carries fiber, sugar and caffeine when the history has them", () => {
+    const text = formatMealSearchResults(
+        [
+            meal({ description: "Flat white", fiber_g: 0, sugar_g: 9 }),
+            meal({ description: "Flat white", fiber_g: 0, sugar_g: 11 }),
+        ].map((m) => ({ ...m, caffeine_mg: 95 })),
+        ["flat white"],
+        "UTC",
+    );
+    expect(text).toContain("0g fiber");
+    expect(text).toContain("10g sugar");
+    expect(text).toContain("95 mg caffeine");
+});
+
+// Median over the entries that HAVE the field, so a history where fiber was
+// only recorded sometimes still surfaces the figure rather than dropping it.
+test("mixed history reports the typical value of the entries that recorded one", () => {
+    const [a, b] = groupMealVariations([
+        meal({ description: "Porridge", fiber_g: 8 }),
+        meal({ description: "Porridge", fiber_g: null }),
+        meal({ description: "Steak", sugar_g: null, fiber_g: null }),
+    ]);
+    expect(a?.typicalFiberG).toBe(8);
+    expect(b?.typicalFiberG).toBeNull();
+});
+
+// A null is absence, and the line must not claim a zero for it — that is the
+// same null-vs-zero rule the read side is built on.
+test("a nutrient nobody recorded is left out of the line entirely", () => {
+    const text = formatMealSearchResults(
+        [meal({ description: "Grilled chicken" })],
+        ["chicken"],
+        "UTC",
+    );
+    const line = text.split("\n").find((l) => l.startsWith("1. "))!;
+    expect(line).not.toContain("fiber");
+    expect(line).not.toContain("caffeine");
+    // …and the closing instruction tells the model to fill it in this time.
+    expect(text).toContain("missing data rather than a zero");
+});
+
+test("nutrients still show when the calorie figure is the missing one", () => {
+    const text = formatMealSearchResults(
+        [meal({ description: "Side salad", calories: null, fiber_g: 4 })],
+        ["salad"],
+        "UTC",
+    );
+    expect(text).toContain("4g fiber");
+    expect(text).not.toContain("(no macros logged)");
+});

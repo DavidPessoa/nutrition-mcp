@@ -16,6 +16,7 @@ import {
     loggedDayAverageNote,
     startImportPayload,
     alcoholHiddenNote,
+    missingNutrientNote,
     registerTools,
     START_IMPORT_OUTPUT_SCHEMA,
     GOALS_ITEM,
@@ -1876,6 +1877,127 @@ describe("log_meal / update_meal surface hidden alcohol", () => {
     });
 });
 
+// ---------- (3) the fiber/sugar completeness nudge ----------
+//
+// The asymmetry under test is the whole design: fiber and sugar are chased
+// because they are estimable for every food and a null costs the whole DAY in
+// every average, while caffeine is deliberately left alone because most meals
+// really do carry none and its display gate is `!= null`, so chasing it would
+// manufacture the "0 mg / 400 mg limit" row the suppression exists to avoid.
+
+describe("missingNutrientNote", () => {
+    const base = {
+        id: "m1",
+        user_id: "u1",
+        logged_at: "2026-08-07T12:00:00.000Z",
+        meal_type: "lunch" as const,
+        description: "Chicken salad",
+        calories: 400,
+        protein_g: 30,
+        carbs_g: 10,
+        fat_g: 20,
+        fiber_g: null,
+        sugar_g: null,
+        alcohol_g: null,
+        caffeine_mg: null,
+        notes: null,
+        idempotency_key: null,
+    } satisfies Meal;
+
+    test("names both missing fields and the meal id to repair", () => {
+        const note = missingNutrientNote(base);
+        expect(note).toContain("fiber_g, sugar_g");
+        expect(note).toContain("update_meal");
+        expect(note).toContain("m1");
+        // The sentence that stops the model "fixing" it by sending 0s blindly.
+        expect(note).toContain("A missing value is not a zero");
+    });
+
+    test("names only the field that is actually missing", () => {
+        const note = missingNutrientNote({ ...base, fiber_g: 6 });
+        expect(note).toContain("sugar_g");
+        expect(note).not.toContain("fiber_g");
+    });
+
+    // An explicit 0 is a measurement — the point of the nudge is to turn
+    // omissions into values, and 0 is a perfectly good value for a steak.
+    test("an explicit zero satisfies it", () => {
+        expect(missingNutrientNote({ ...base, fiber_g: 0, sugar_g: 0 })).toBe(
+            "",
+        );
+    });
+
+    // If this ever starts asking for caffeine, the read side has to change
+    // first — see limitShown in shared/macros.js and recordedGoalLine.
+    test("never asks for caffeine, however complete the rest is", () => {
+        const note = missingNutrientNote({
+            ...base,
+            fiber_g: 6,
+            sugar_g: 4,
+            caffeine_mg: null,
+        });
+        expect(note).toBe("");
+    });
+});
+
+describe("log_meal / update_meal chase missing fiber and sugar", () => {
+    test("log_meal without them says so and points at update_meal", async () => {
+        await withTools(null, async (call) => {
+            const text = textOf(
+                await call("log_meal", {
+                    description: "Chicken salad",
+                    meal_type: "lunch",
+                    calories: 400,
+                }),
+            );
+            expect(text).toContain("fiber_g, sugar_g");
+            expect(text).toContain("update_meal");
+        });
+    });
+
+    test("log_meal with both — including zeros — says nothing", async () => {
+        await withTools(null, async (call) => {
+            const text = textOf(
+                await call("log_meal", {
+                    description: "Ribeye steak",
+                    meal_type: "dinner",
+                    calories: 700,
+                    fiber_g: 0,
+                    sugar_g: 0,
+                }),
+            );
+            expect(text).not.toContain("update_meal");
+        });
+    });
+
+    test("a caffeine-free meal is never nagged about caffeine", async () => {
+        await withTools(null, async (call) => {
+            const text = textOf(
+                await call("log_meal", {
+                    description: "Ribeye steak",
+                    meal_type: "dinner",
+                    fiber_g: 0,
+                    sugar_g: 0,
+                }),
+            );
+            expect(text).not.toContain("caffeine");
+            expect(text).not.toContain("Caffeine");
+        });
+    });
+
+    // The repair loop has to converge: backfilling one field must leave a note
+    // naming only the other, not the same pair again.
+    test("update_meal re-checks the meal it just wrote", async () => {
+        await withTools(null, async (call) => {
+            const text = textOf(
+                await call("update_meal", { id: "m1", fiber_g: 6 }),
+            );
+            expect(text).toContain("sugar_g");
+            expect(text).not.toContain("fiber_g");
+        });
+    });
+});
+
 // ---------- caffeine, end to end through the real tools ----------
 
 describe("log_meal and update_meal round-trip caffeine_mg", () => {
@@ -2232,6 +2354,64 @@ describe("set_alcohol_tracking", () => {
         expect(setWidgets?.description).toContain("reconnects");
         await client.close();
         await server.close();
+    });
+});
+
+// The completeness rule is only as good as its reach: it has to be on the two
+// tools that write nutrition, and it must not contradict itself between the
+// tool-level paragraph and the per-field text (a model reading a specific
+// field's description will follow that one).
+describe("the nutrient-completeness rule reaches the write tools", () => {
+    async function toolsOf() {
+        const server = new McpServer(
+            { name: "t", version: "0.0.0" },
+            { capabilities: { tools: {}, resources: {} } },
+        );
+        registerTools(server, "u1", true, null);
+        const [ct, st] = InMemoryTransport.createLinkedPair();
+        const client = new Client({ name: "c", version: "0.0.0" });
+        await Promise.all([server.connect(st), client.connect(ct)]);
+        const { tools } = await client.listTools();
+        await client.close();
+        await server.close();
+        return tools;
+    }
+
+    test("log_meal and update_meal both carry it", async () => {
+        const tools = await toolsOf();
+        for (const name of ["log_meal", "update_meal"]) {
+            const desc = tools.find((t) => t.name === name)?.description ?? "";
+            expect(desc, name).toContain("send them on EVERY meal");
+            expect(desc, name).toContain("a missing value is not a zero");
+        }
+    });
+
+    test("fiber and sugar are described as mandatory, with a fallback", async () => {
+        const tools = await toolsOf();
+        const props = tools.find((t) => t.name === "log_meal")?.inputSchema
+            .properties as Record<string, { description?: string }>;
+        for (const key of ["fiber_g", "sugar_g"]) {
+            const d = props[key]?.description ?? "";
+            expect(d, key).toContain("every meal");
+            // The last-resort anchors: without them "estimate it" is an
+            // instruction with nothing behind it.
+            expect(d, key).toContain("per 100 g");
+            expect(d, key).toContain("do not omit the field");
+        }
+    });
+
+    // The one field that must keep saying the opposite.
+    test("caffeine still says omit rather than zero, on both tools", async () => {
+        const tools = await toolsOf();
+        for (const name of ["log_meal", "update_meal"]) {
+            const props = tools.find((t) => t.name === name)?.inputSchema
+                .properties as Record<string, { description?: string }>;
+            const d = props.caffeine_mg?.description ?? "";
+            expect(d, name).toContain("measured, and it was none");
+            expect(d.toLowerCase(), name).not.toContain(
+                "send it on every meal",
+            );
+        }
     });
 });
 
