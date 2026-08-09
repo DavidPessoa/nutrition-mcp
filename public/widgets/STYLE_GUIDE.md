@@ -694,6 +694,19 @@ The open tile also gets `aria-expanded`, and the disclosure region is
 another swaps the list. The height change is picked up by the bridge's
 `ResizeObserver`, which re-reports so the host grows the iframe.
 
+### Say what a tap does — `.mhint`
+
+A tappable tile and a static limit cell are the same shape. On a pointer device the
+cursor and the hover tint separate them; **a phone has neither**, and that is where
+this widget mostly lives. So an interactive strip carries one dim line under its
+grids — `👆 Tap a metric for the meals behind it` — at caption size, next to the
+tiles it describes rather than at the end of the strip.
+
+`macroToggle` hides it (`hidden`, restored on close) while a breakdown is open: the
+instruction has been followed, the answer is on screen, and leaving it there is a
+row of noise above the thing the user asked for. A strip with no meals emits no hint
+at all, because nothing on it discloses anything — `macros.test.ts` pins both halves.
+
 ### Contrast: `--text-dim` has ~0.5 of headroom over AA and no more
 
 It is 5.07:1 on `--panel` in light and 5.93:1 in dark, so anything that dims it

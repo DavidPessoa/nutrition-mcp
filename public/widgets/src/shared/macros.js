@@ -490,6 +490,16 @@ function macroPanel(vals, goal, wording, meals, opts) {
               .join("")}
         </div>`
         : "";
+    // What a tap does, said once. Hover and a cursor are the whole affordance
+    // on a pointer device and NEITHER exists on a phone, which is where this
+    // widget mostly lives — without a line saying so, the breakdown is a
+    // feature nobody discovers. It sits under the grids rather than at the end
+    // of the strip so it is next to the tiles it describes, and macroToggle
+    // hides it once a breakdown is open: by then the answer is on screen and
+    // the instruction is just a row of noise above it.
+    const hint = interactive
+        ? `<div class="mhint" data-macro-hint>Tap a metric for the meals behind it</div>`
+        : "";
     // The breakdown renders into this region on tap; hidden until then.
     const detail = interactive
         ? `<div class="macro-detail psec" hidden aria-live="polite"></div>`
@@ -504,6 +514,7 @@ function macroPanel(vals, goal, wording, meals, opts) {
                 .join("")}
             </div>
             ${limitRow}
+            ${hint}
           </div>
         </div>
         ${waters.map((m) => macroWater(m, ctx)).join("")}
@@ -583,10 +594,14 @@ function macroToggle(cell) {
         c.setAttribute("aria-expanded", on ? "true" : "false");
     });
 
+    // The instruction has been followed; the answer replaces it.
+    const hint = panel.querySelector("[data-macro-hint]");
+
     if (alreadyOpen) {
         detail.hidden = true;
         detail.dataset.open = "";
         detail.innerHTML = "";
+        if (hint) hint.hidden = false;
         return;
     }
     const m = MACROS.find((mm) => mm.key === key);
@@ -594,6 +609,7 @@ function macroToggle(cell) {
     detail.innerHTML = macroDetailBody(m, __macroCtx);
     detail.dataset.open = key;
     detail.hidden = false;
+    if (hint) hint.hidden = true;
 }
 
 // Delegated once per document. No-ops on non-interactive strips (no

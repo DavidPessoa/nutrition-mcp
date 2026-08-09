@@ -195,6 +195,17 @@ test("an interactive tile names its value and goal state, then the action", () =
     ]);
 });
 
+// Hover and a cursor are the whole affordance on a pointer device, and a
+// phone has neither — the tappable tiles are the same shape as the static
+// limit cells beside them. Without a line saying what a tap does, the
+// breakdown is a feature nobody discovers.
+test("a strip that discloses something says so; one that does not stays quiet", () => {
+    expect(macrosApi.macroPanel(VALS, GOALS, undefined, MEALS)).toContain(
+        "Tap a metric for the meals behind it",
+    );
+    expect(macrosApi.macroPanel(VALS, GOALS)).not.toContain("data-macro-hint");
+});
+
 // The strip trends builds. Fiber and sugar used to be reachable only by
 // tapping carbs, which made that one tile a button even with no meals behind
 // it; they now have cells of their own in the limits row, so a strip built

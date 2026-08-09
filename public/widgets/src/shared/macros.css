@@ -243,6 +243,26 @@
 }
 
 /* ---- Tapping a metric --------------------------------------------------- */
+/* The only affordance a touch host gets: there is no hover and no cursor
+   there, and the tiles are the same shape as the static limit cells beside
+   them. One dim line, at the size of a caption rather than of content, under
+   the tiles it describes. */
+.mhint {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 9.5px;
+    color: var(--text-dim);
+    padding: 0 3px;
+}
+.mhint::before {
+    content: "👆";
+    font-size: 10.5px;
+    line-height: 1;
+}
+.mhint[hidden] {
+    display: none;
+}
 .mtile.interactive,
 .cal.interactive {
     cursor: pointer;
@@ -469,7 +489,8 @@
     }
     .mkey,
     .mnum .msub,
-    .mcap {
+    .mcap,
+    .mhint {
         font-size: 10px;
     }
     .mnum {
