@@ -3,16 +3,21 @@
   Weight-trends widget (MCP Apps).
 
   Assembled from shared partials at server startup (see src/widgets.ts); the
-  @include markers below inline the shared design tokens, base layout, segmented
-  control, trend card, and host bridge. The result is fully self-contained —
-  inline CSS + JS, zero network requests — because the MCP Apps sandbox blocks
-  external hosts.
+  @include markers below inline the shared design tokens, compact widget shell,
+  segmented control, chart rules, and host bridge. The result is fully
+  self-contained — inline CSS + JS, zero network requests — because the MCP Apps
+  sandbox blocks external hosts.
 
-  Shown after get_weight_trends. The tool sends up to 30 days of per-day weight
-  (same-day weigh-ins averaged), and the 7 / 14 / 30-day toggle filters it
-  CLIENT-SIDE and re-renders — no host round-trip. Unlike the calorie chart, the
-  weight axis is scaled to the data range (NOT zero-based) so small changes stay
-  visible, with a dashed target line.
+  Shown after get_weight_trends. The whole widget is ONE panel: a header line
+  carrying the 7 / 14 / 30-day toggle, then the latest reading beside the
+  weight chart, then a hairline footer with the weigh-in count, the date span
+  and the target. There is NO macro strip here — this widget is about a single
+  series, so it includes neither macros.css nor macros.js.
+
+  The tool sends up to 30 days of per-day weight (same-day weigh-ins averaged),
+  and the toggle filters it CLIENT-SIDE and re-renders — no host round-trip.
+  Unlike the calorie chart, the weight axis is scaled to the data range (NOT
+  zero-based) so small changes stay visible, with a dashed target line.
 
   Data arrives as the `structuredContent` of the get_weight_trends tool result;
   the shared bridge (shared/bridge.js) reads it across host conventions and calls
@@ -32,69 +37,84 @@
 
             /*@include shared/trend.css@*/
 
-            /* Weight-specific trend rules that differ from / extend the shared
-               partial. The dashed target line is a touch stronger (opacity .55
-               vs .5), and .cempty is a weight-only empty state for a range with
-               no weigh-ins. */
-            .trend .goalline {
-                stroke: var(--text-dim);
-                stroke-dasharray: 3 3;
-                opacity: 0.55;
-            }
-            .trend .cempty {
-                padding: 26px 0 22px;
-                text-align: center;
-                color: var(--text-dim);
-                font-size: 13px;
-            }
-
-            /* Stat cards */
-            .stats {
-                display: grid;
-                grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            /* Weight-only layout. The chart does not sit in a `.chart` block:
+               it shares one row with the latest reading, which is the figure
+               the chart is context for. */
+            .wmain {
+                display: flex;
+                align-items: flex-end;
                 gap: 12px;
             }
-            .stat {
-                background: var(--panel);
-                border: 1px solid var(--panel-border);
-                border-radius: var(--radius);
-                box-shadow: var(--shadow);
-                padding: 14px 16px;
-                display: flex;
-                flex-direction: column;
-                gap: 2px;
+            .wnow {
+                flex: none;
             }
-            .stat .slabel {
-                display: flex;
-                align-items: center;
-                gap: 6px;
-                font-size: 11px;
+            .wlabel {
+                font-size: 9.5px;
                 font-weight: 600;
                 text-transform: uppercase;
-                letter-spacing: 0.04em;
+                letter-spacing: 0.05em;
                 color: var(--text-dim);
             }
-            .stat .sval {
-                font-size: 22px;
+            .wval {
+                font-size: 20px;
                 font-weight: 800;
                 letter-spacing: -0.03em;
+                line-height: 1.2;
                 font-variant-numeric: tabular-nums;
             }
-            .stat .sval .sunit {
-                font-size: 13px;
+            .wval .wunit {
+                font-size: 12px;
                 font-weight: 600;
+                letter-spacing: 0;
                 color: var(--text-dim);
                 margin-left: 2px;
             }
-            .stat .scap {
-                font-size: 11.5px;
+            .wdelta {
+                font-size: 10.5px;
+                font-weight: 700;
+                font-variant-numeric: tabular-nums;
+            }
+            .wchart {
+                flex: 1;
+                min-width: 0;
+                height: auto;
+                display: block;
+            }
+
+            /* Footer: how much data this is, and what it is aimed at. */
+            /* Wraps as two whole phrases, never mid-value: without the wrap
+               and the nowrap on each half, a 360px phone breaks "13 Jun → 11
+               Jul" after the arrow and "2.0 kg to lose" after "to". */
+            .wfoot {
+                display: flex;
+                flex-wrap: wrap;
+                justify-content: space-between;
+                gap: 2px 10px;
+                font-size: 11px;
                 color: var(--text-dim);
                 font-variant-numeric: tabular-nums;
+            }
+            .wfoot > span {
+                white-space: nowrap;
+            }
+            .wfoot b {
+                font-weight: 700;
+                color: var(--text);
+            }
+
+            /* A range the user selected that happens to hold no weigh-ins —
+               distinct from the widget-wide empty state, since the toggle is
+               still there to widen. */
+            .cempty {
+                padding: 18px 0 14px;
+                text-align: center;
+                color: var(--text-dim);
+                font-size: 12.5px;
             }
         </style>
     </head>
     <body>
-        <div class="wrap" id="root"></div>
+        <div class="wrap tight" id="root"></div>
 
         <script>
             "use strict";
@@ -102,11 +122,35 @@
             /*@include shared/bridge.js@*/
 
             const RANGES = [7, 14, 30];
+            const MONTHS = [
+                "Jan",
+                "Feb",
+                "Mar",
+                "Apr",
+                "May",
+                "Jun",
+                "Jul",
+                "Aug",
+                "Sep",
+                "Oct",
+                "Nov",
+                "Dec",
+            ];
 
             function shiftDate(date, delta) {
                 const d = new Date(date + "T00:00:00Z");
                 d.setUTCDate(d.getUTCDate() + delta);
                 return d.toISOString().slice(0, 10);
+            }
+
+            // "2026-07-11" → "11 Jul". Parsed by parts, not by Date: the string
+            // is already a local calendar day and re-reading it through a
+            // timezone is how it slips by one.
+            function shortDay(iso) {
+                const p = String(iso).split("-");
+                const m = Number(p[1]);
+                if (!m || m < 1 || m > 12) return String(iso);
+                return `${Number(p[2])} ${MONTHS[m - 1]}`;
             }
 
             // ---- Sample data so the file renders on its own (browser preview) ----
@@ -131,11 +175,6 @@
             }
             const SAMPLE = buildSample();
 
-            function fmt(n, decimals) {
-                if (n == null || isNaN(n)) return "0";
-                const r = decimals ? n.toFixed(decimals) : Math.round(n);
-                return Number(r).toLocaleString();
-            }
             function esc(s) {
                 return String(s).replace(
                     /[&<>"]/g,
@@ -148,20 +187,32 @@
                         })[c],
                 );
             }
-            function signed(n, decimals) {
+            // Every weight on screen carries exactly one decimal — 77.0, not
+            // 77. This widget has no whole-number figures at all, so it uses
+            // this instead of the usual fmt(): rounding away a trailing zero
+            // would make the headline read at a different precision than the
+            // −2.9 beneath it.
+            function w1(n) {
+                if (n == null || isNaN(n)) return "0.0";
+                return Number(n).toLocaleString(undefined, {
+                    minimumFractionDigits: 1,
+                    maximumFractionDigits: 1,
+                });
+            }
+            function signed(n) {
                 const s = n > 0 ? "+" : n < 0 ? "−" : "";
-                return `${s}${fmt(Math.abs(n), decimals)}`;
+                return `${s}${w1(Math.abs(n))}`;
             }
 
             // Weight-over-time line chart. Y is scaled to the data range (plus
             // the target) — NOT zero-based — so small changes stay visible.
             function weightChart(days, target, unit) {
-                const W = 480,
-                    H = 104,
-                    padL = 8,
-                    padR = 8,
-                    padT = 12,
-                    padB = 8;
+                const W = 300,
+                    H = 62,
+                    padL = 5,
+                    padR = 5,
+                    padT = 7,
+                    padB = 5;
                 const n = days.length;
                 const weights = days.map((d) => d.weight);
                 let lo = Math.min(...weights);
@@ -217,91 +268,79 @@
                     )
                     .join("");
 
-                const latest = weights[n - 1];
-                const meta = `latest ${fmt(latest, 1)} ${esc(unit)}${target != null ? ` · target ${fmt(target, 1)} ${esc(unit)}` : ""}`;
+                const label = `Weight from ${shortDay(days[0].date)} to ${shortDay(days[n - 1].date)}, latest ${w1(weights[n - 1])} ${unit}`;
 
                 return `
-          <div class="trend">
-            <div class="thead">
-              <span class="ttitle">Weight</span>
-              <span class="tmeta">${meta}</span>
-            </div>
-            <svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Weight over the selected range">
-              <defs>
-                <linearGradient id="wfill" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stop-color="var(--accent)" stop-opacity="0.20"/>
-                  <stop offset="100%" stop-color="var(--accent)" stop-opacity="0.02"/>
-                </linearGradient>
-              </defs>
-              ${targetLine}
-              ${area ? `<path d="${area}" fill="url(#wfill)"/>` : ""}
-              ${line ? `<path d="${line}" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>` : ""}
-              ${dots}
-            </svg>
-            <div class="tdates">
-              <span>${esc(days[0].date.slice(5))}</span>
-              <span>${esc(days[n - 1].date.slice(5))}</span>
-            </div>
-          </div>`;
+          <svg class="wchart" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(label)}">
+            ${targetLine}
+            ${area ? `<path d="${area}" fill="var(--accent)" opacity="0.16"/>` : ""}
+            ${line ? `<path d="${line}" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>` : ""}
+            ${dots}
+          </svg>`;
             }
 
-            function statCards(slice, target, unit) {
+            // The left-hand block of the chart row: the number the whole widget
+            // is about, and how far it has moved over the selected window.
+            function latestBlock(slice, target, unit) {
                 const n = slice.length;
                 const first = slice[0].weight;
                 const last = slice[n - 1].weight;
-                const change = Math.round((last - first) * 10) / 10;
 
-                // Change is "good" (accent) when it shrinks the gap to target.
-                let changeColor = "";
-                if (target != null && n >= 2) {
-                    const closer =
-                        Math.abs(last - target) < Math.abs(first - target);
-                    changeColor = closer ? "var(--accent)" : "var(--over)";
-                }
-                const changeVal =
-                    n >= 2
-                        ? `<div class="sval" style="${changeColor ? `color:${changeColor}` : ""}">${signed(change, 1)}<span class="sunit">${esc(unit)}</span></div>`
-                        : `<div class="sval">—</div>`;
-                const changeCap =
-                    n >= 2
-                        ? `since ${esc(slice[0].date.slice(5))}`
-                        : "need 2+ weigh-ins";
-
-                let targetCard = "";
-                if (target != null) {
-                    const delta = Math.round((last - target) * 10) / 10;
-                    const cap =
-                        Math.abs(delta) < 0.05
-                            ? "at target"
-                            : `${fmt(Math.abs(delta), 1)} ${esc(unit)} ${delta > 0 ? "to lose" : "to gain"}`;
-                    targetCard = `
-            <div class="stat">
-              <div class="slabel">Target</div>
-              <div class="sval">${fmt(target, 1)}<span class="sunit">${esc(unit)}</span></div>
-              <div class="scap">${cap}</div>
-            </div>`;
+                let delta = "";
+                if (n >= 2) {
+                    const change = Math.round((last - first) * 10) / 10;
+                    // A change is "good" (accent) when it shrinks the gap to
+                    // the target; with no target there is no direction to
+                    // judge it against, so it stays neutral.
+                    let color = "var(--text-dim)";
+                    if (target != null) {
+                        const closer =
+                            Math.abs(last - target) < Math.abs(first - target);
+                        color = closer ? "var(--accent)" : "var(--over)";
+                    }
+                    // Dated from the first weigh-in IN the window, not from
+                    // the window's own length: two readings a day apart
+                    // inside a 30-day range are a one-day change, and
+                    // "−1.0 kg in 30 d" claims a month-long trend that was
+                    // never measured.
+                    delta = `<div class="wdelta" style="color:${color}">${signed(change)} ${esc(unit)} since ${shortDay(slice[0].date)}</div>`;
                 } else {
-                    targetCard = `
-            <div class="stat">
-              <div class="slabel">Target</div>
-              <div class="sval">—</div>
-              <div class="scap">no target set</div>
-            </div>`;
+                    delta = `<div class="wdelta" style="color:var(--text-dim)">need 2+ weigh-ins</div>`;
                 }
 
                 return `
-          <div class="stats">
-            <div class="stat">
-              <div class="slabel"><span style="width:8px;height:8px;border-radius:50%;background:var(--accent);display:inline-block"></span>Latest</div>
-              <div class="sval">${fmt(last, 1)}<span class="sunit">${esc(unit)}</span></div>
-              <div class="scap">on ${esc(slice[n - 1].date)}</div>
-            </div>
-            <div class="stat">
-              <div class="slabel">Change</div>
-              ${changeVal}
-              <div class="scap">${changeCap}</div>
-            </div>
-            ${targetCard}
+          <div class="wnow">
+            <div class="wlabel">Latest</div>
+            <div class="wval">${w1(last)}<span class="wunit">${esc(unit)}</span></div>
+            ${delta}
+          </div>`;
+            }
+
+            function footer(slice, target, unit) {
+                const n = slice.length;
+                // A single day is its own span — "11 Jul → 11 Jul" reads like
+                // a bug.
+                const from = shortDay(slice[0].date);
+                const to = shortDay(slice[n - 1].date);
+                const span = `${n} weigh-in${n === 1 ? "" : "s"} · ${from === to ? from : `${from} → ${to}`}`;
+
+                let right;
+                if (target != null) {
+                    const delta =
+                        Math.round((slice[n - 1].weight - target) * 10) / 10;
+                    const gap =
+                        Math.abs(delta) < 0.05
+                            ? "at target"
+                            : `${w1(Math.abs(delta))} ${esc(unit)} to ${delta > 0 ? "lose" : "gain"}`;
+                    right = `<b>Target ${w1(target)} ${esc(unit)}</b> · ${gap}`;
+                } else {
+                    right = "No target set";
+                }
+
+                return `
+          <div class="psec wfoot">
+            <span>${span}</span>
+            <span>${right}</span>
           </div>`;
             }
 
@@ -347,33 +386,27 @@
 
                 const seg = RANGES.map(
                     (r) =>
-                        `<button class="seg-btn${r === range ? " active" : ""}" data-n="${r}" role="tab" aria-selected="${r === range}">${r} days</button>`,
+                        `<button class="seg-btn${r === range ? " active" : ""}" data-n="${r}" aria-label="Last ${r} days" aria-pressed="${r === range}">${r}</button>`,
                 ).join("");
 
-                const sub = n
-                    ? `${esc(slice[0].date)} → ${esc(slice[n - 1].date)} · ${n} weigh-in${n === 1 ? "" : "s"}`
-                    : `last ${range} days`;
-
-                let body;
-                if (n === 0) {
-                    body = `
-            <div class="trend">
-              <div class="thead"><span class="ttitle">Weight</span></div>
-              <div class="cempty">No weigh-ins in the last ${range} days. Try a wider range.</div>
-            </div>`;
-                } else {
-                    body = `
-          ${weightChart(slice, target, unit)}
-          ${statCards(slice, target, unit)}`;
-                }
+                const body =
+                    n === 0
+                        ? `<div class="cempty">No weigh-ins in the last ${range} days. Try a wider range.</div>`
+                        : `
+          <div class="wmain">
+            ${latestBlock(slice, target, unit)}
+            ${weightChart(slice, target, unit)}
+          </div>
+          ${footer(slice, target, unit)}`;
 
                 root.innerHTML = `
-          <header class="head">
-            <h1>Weight Trends</h1>
-            <span class="range">${sub}</span>
-          </header>
-          <div class="seg" role="tablist" aria-label="Trend window">${seg}</div>
-          ${body}`;
+          <div class="panel">
+            <div class="phead mid">
+              <div class="ptitle">Weight</div>
+              <div class="seg seg-sm" role="group" aria-label="Trend window">${seg}</div>
+            </div>
+            ${body}
+          </div>`;
             }
 
             // Delegated on #root, which survives paint()'s innerHTML rewrites.

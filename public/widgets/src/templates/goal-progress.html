@@ -7,6 +7,12 @@
   bridge. The result is fully self-contained — inline CSS + JS, zero network
   requests — because the MCP Apps sandbox blocks external hosts.
 
+  One card (`.panel`): a header line naming the day and what was logged, the
+  shared macro strip (calories, the three macro bars, the limits row and the
+  water line), and one compact weight row under a hairline. The weight row is
+  the only markup this widget owns — everything above it comes from
+  shared/macros.js.
+
   Data arrives as the `structuredContent` of the get_goal_progress tool result;
   the shared bridge (shared/bridge.js) reads it across host conventions and
   calls render(). Standalone preview uses the SAMPLE below.
@@ -25,84 +31,21 @@
 
             /*@include shared/macros.css@*/
 
-            /* Weight card — a standing metric (latest overall vs target), so it
-               gets its own row rather than a per-day ring. */
-            .weight {
-                background: var(--panel);
-                border: 1px solid var(--panel-border);
-                border-radius: var(--radius);
-                box-shadow: var(--shadow);
-                padding: 16px 18px 18px;
-                margin-bottom: 20px;
-            }
-            .weight .wtop {
-                display: flex;
-                align-items: center;
-                justify-content: space-between;
-                gap: 16px;
-                flex-wrap: wrap;
-            }
-            .weight .wlead {
-                display: flex;
-                flex-direction: column;
-                gap: 2px;
-            }
-            .weight .wlabel {
-                display: flex;
-                align-items: center;
-                gap: 6px;
-                font-size: 11.5px;
-                font-weight: 600;
-                text-transform: uppercase;
-                letter-spacing: 0.04em;
-                color: var(--text-dim);
-            }
-            .weight .wcur {
-                font-size: 26px;
-                font-weight: 800;
-                letter-spacing: -0.03em;
-                font-variant-numeric: tabular-nums;
-            }
-            .weight .wcur .wunit {
-                font-size: 14px;
-                font-weight: 600;
-                color: var(--text-dim);
-                margin-left: 3px;
-            }
-            .weight .wmeta {
-                font-size: 12px;
-                color: var(--text-dim);
-                font-variant-numeric: tabular-nums;
-                margin-top: 12px;
-            }
-            .weight .chip {
-                font-size: 12.5px;
-                font-weight: 700;
-                padding: 6px 12px;
-                border-radius: 999px;
-                background: var(--track);
-                color: var(--text);
-                font-variant-numeric: tabular-nums;
-                white-space: nowrap;
-            }
-            .weight .chip.ok {
-                background: color-mix(in srgb, var(--accent) 18%, transparent);
-                color: var(--accent);
-            }
-
-            /* Horizontal weight graph: a number line with a current marker and
-               a target marker; the gap between them is highlighted. Marker
-               positions (left %) are set inline from the data. */
-            .weight .wgraph {
-                margin-top: 18px;
-            }
-            .weight .wtrack {
+            /* Weight — a standing metric (latest overall vs target), not a
+               per-day total, so it sits below the strip rather than in it. The
+               row reuses the strip's own idiom (.wrow / .wlab / .dot / .wnum /
+               .wsub from macros.css); only the number line itself is local: a
+               track with the span between the two readings highlighted, a
+               hollow target marker and a filled current one. Marker positions
+               (left %) are set inline from the data. */
+            .wtrack {
                 position: relative;
-                height: 8px;
+                flex: 1;
+                height: 5px;
                 border-radius: 999px;
                 background: var(--track);
             }
-            .weight .wseg {
+            .wseg {
                 position: absolute;
                 top: 0;
                 height: 100%;
@@ -110,57 +53,36 @@
                 background: var(--accent);
                 opacity: 0.4;
             }
-            .weight .wmark {
+            .wmark {
                 position: absolute;
                 top: 50%;
-                width: 14px;
-                height: 14px;
+                width: 11px;
+                height: 11px;
                 border-radius: 50%;
                 transform: translate(-50%, -50%);
             }
-            .weight .wmark.tgt {
+            .wmark.tgt {
                 background: var(--panel);
                 border: 2px solid var(--text-dim);
                 z-index: 1;
             }
-            .weight .wmark.cur {
+            .wmark.cur {
                 background: var(--accent);
                 box-shadow: 0 0 0 3px
                     color-mix(in srgb, var(--accent) 22%, transparent);
                 z-index: 2;
             }
-            .weight .wcaps {
-                position: relative;
-                height: 15px;
-                margin-top: 9px;
-                font-size: 11px;
+            /* The states with nothing to plot — no reading yet, or a reading
+               with no target — are one line of text in the same section, never
+               a card of their own. */
+            .wnote {
+                font-size: 11.5px;
                 color: var(--text-dim);
-                font-variant-numeric: tabular-nums;
-            }
-            .weight .wcap {
-                position: absolute;
-                transform: translateX(-50%);
-                white-space: nowrap;
-            }
-            .weight .wcap.curcap {
-                color: var(--accent);
-                font-weight: 700;
-            }
-            .weight .wempty {
-                font-size: 13px;
-                color: var(--text-dim);
-                margin-top: 12px;
-            }
-
-            .note {
-                font-size: 12px;
-                color: var(--text-dim);
-                margin: -8px 2px 14px;
             }
         </style>
     </head>
     <body>
-        <div class="wrap" id="root"></div>
+        <div class="wrap tight" id="root"></div>
 
         <script>
             "use strict";
@@ -172,6 +94,10 @@
                 date: "2026-07-10",
                 meal_count: 5,
                 water_entries: 6,
+                // The alcohol opt-in, which every payload with an alcohol
+                // figure carries. Without it here the preview glosses grams as
+                // US drinks by fallback and the UK path is never seen.
+                drink_unit: "us",
                 goals: {
                     calories: 2200,
                     protein_g: 160,
@@ -190,14 +116,14 @@
                     carbs_g: 231,
                     fat_g: 74,
                     fiber_g: 24.6,
-                    // Over its ceiling, so the sub-row flags it with --over.
+                    // Over its ceiling, so the limits row flags it with --over.
                     sugar_g: 61.3,
                     // Alcohol tracking ON in this sample; null would mean the
-                    // user has it off and the stat line disappears.
+                    // user has it off and the limit cell disappears.
                     alcohol_g: 27.7,
-                    // Over its ceiling too, so the stat line flags it. null
-                    // here (nothing recorded today) would drop the line rather
-                    // than claim a 0 mg day against the 400 mg limit.
+                    // Over its ceiling too, so its cell flags it. null here
+                    // (nothing recorded today) would drop the cell rather than
+                    // claim a 0 mg day against the 400 mg limit.
                     caffeine_mg: 470,
                     water_ml: 2100,
                 },
@@ -299,118 +225,113 @@
 
             /*@include shared/macros.js@*/
 
-            // Weight is a standing metric (latest overall vs target), not a
-            // per-date total, so it gets its own card: the current value, a
-            // direction chip, and a horizontal number-line graph plotting the
-            // current and target weights with the gap between them highlighted.
-            function weightCard(w) {
+            const MONTHS = [
+                "Jan",
+                "Feb",
+                "Mar",
+                "Apr",
+                "May",
+                "Jun",
+                "Jul",
+                "Aug",
+                "Sep",
+                "Oct",
+                "Nov",
+                "Dec",
+            ];
+
+            // "2026-07-10" → "10 Jul", for the header line where the year is
+            // noise. Split on the string rather than through Date: the payload
+            // is a calendar date already resolved in the user's timezone, and
+            // new Date("2026-07-10") is UTC midnight, which renders as the 9th
+            // for anyone west of Greenwich. Anything not date-shaped is passed
+            // through untouched.
+            function shortDate(iso) {
+                const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(iso || ""));
+                if (!m) return String(iso || "");
+                return `${Number(m[3])} ${MONTHS[Number(m[2]) - 1]}`;
+            }
+
+            // The weight section: one compact row on the strip's own idiom
+            // (label · track · figure), or one line of text when there is
+            // nothing to plot. Never a card — it is the last section of the
+            // widget's single panel.
+            function weightRow(w) {
                 const cur = w?.current;
                 const tgt = w?.target;
                 const unit = esc(w?.unit || "kg");
                 const hasCur = cur != null;
                 const hasTgt = tgt != null;
-                const label = `<div class="wlabel"><span class="dot" style="width:8px;height:8px;border-radius:50%;background:var(--accent)"></span>Body weight</div>`;
 
-                // Nothing to plot without a current weight — explain which piece
-                // is missing rather than dropping the card silently.
+                // Nothing to plot without a current weight — say which piece is
+                // missing and which tool supplies it, rather than dropping the
+                // section silently.
                 if (!hasCur) {
                     const msg = hasTgt
                         ? `No weight logged yet. Log one with log_weight to track progress toward your ${fmt(tgt, 1)} ${unit} target.`
                         : `No weight logged yet. Log one with log_weight to track progress.`;
-                    return `
-          <div class="section-title">Weight</div>
-          <div class="weight">
-            <div class="wtop">${label}</div>
-            <div class="wempty">${msg}</div>
-          </div>`;
+                    return `<div class="wnote psec">${msg}</div>`;
                 }
 
-                const curHtml = `${fmt(cur, 1)}<span class="wunit">${unit}</span>`;
-                const meta = w.logged_on
+                // Have a reading but no target: there is no line to plot it on,
+                // so show the reading and prompt for the goal.
+                if (!hasTgt) {
+                    // The reading is the LATEST one overall, not necessarily
+                    // this day's — with no track to hang a tooltip on, the
+                    // date has to be in the sentence or it is lost.
+                    const when = w.logged_on
+                        ? ` (${esc(shortDate(w.logged_on))})`
+                        : "";
+                    return `<div class="wnote psec">Weight ${fmt(cur, 1)} ${unit}${when} — no goal set. Set one with set_nutrition_goals to see progress here.</div>`;
+                }
+
+                const atTarget = Math.abs(cur - tgt) < 0.05;
+                const delta = Math.round((cur - tgt) * 10) / 10;
+                const dir = delta > 0 ? "to lose" : "to gain";
+                const state = atTarget
+                    ? "at target"
+                    : `${fmt(Math.abs(delta), 1)} ${unit} ${dir}`;
+                // The row shows the two readings; the distance between them and
+                // the date behind the current one ride along as the graphic's
+                // accessible name and the row's tooltip. "·" separates them
+                // visually, but a screen reader either skips it or announces
+                // "middle dot", so the spoken name uses commas.
+                const metaTxt = w.logged_on
                     ? `last logged ${esc(w.logged_on)}`
                     : "";
+                const title = metaTxt ? `${state} · ${metaTxt}` : state;
+                const aria = `Weight ${fmt(cur, 1)} ${unit}, target ${fmt(tgt, 1)} ${unit}, ${state}${metaTxt ? `, ${metaTxt}` : ""}`;
 
-                // Have a weight but no target: show it, but the graph needs a
-                // goal, so prompt to set one.
-                if (!hasTgt) {
-                    return `
-          <div class="section-title">Weight</div>
-          <div class="weight">
-            <div class="wtop">
-              <div class="wlead">
-                ${label}
-                <div class="wcur">${curHtml}</div>
-              </div>
-            </div>
-            <div class="wempty">No weight goal set. Set one with set_nutrition_goals to see progress here.</div>
-            ${meta ? `<div class="wmeta">${meta}</div>` : ""}
-          </div>`;
-                }
-
-                // Both present: the number-line graph.
-                const atTarget = Math.abs(cur - tgt) < 0.05;
-
-                let chip;
-                if (atTarget) {
-                    chip = `<div class="chip ok">at target</div>`;
-                } else {
-                    const delta = Math.round((cur - tgt) * 10) / 10;
-                    const dir = delta > 0 ? "to lose" : "to gain";
-                    chip = `<div class="chip">${fmt(Math.abs(delta), 1)} ${unit} ${dir}</div>`;
-                }
-
-                let graph;
-                if (atTarget) {
-                    graph = `
-          <div class="wgraph">
-            <div class="wtrack">
-              <div class="wmark tgt" style="left:50%"></div>
-              <div class="wmark cur" style="left:50%"></div>
-            </div>
-            <div class="wcaps">
-              <span class="wcap curcap" style="left:50%">${fmt(cur, 1)} ${unit} · at target</span>
-            </div>
-          </div>`;
-                } else {
-                    // Pad the scale beyond the two points so the markers sit
-                    // inboard (~22%/78%) and their centred captions don't clip
-                    // at the card edges.
+                let pc = 50;
+                let pt = 50;
+                if (!atTarget) {
+                    // Pad the scale beyond the two points so the markers land
+                    // inboard (~22% / 78%): an 11px marker centred on 0% or
+                    // 100% would hang off the end of its own track.
                     const lo = Math.min(cur, tgt);
                     const hi = Math.max(cur, tgt);
                     const pad = (hi - lo) * 0.4;
                     const smin = lo - pad;
                     const span = hi - lo + pad * 2;
                     const pos = (v) => ((v - smin) / span) * 100;
-                    const pc = pos(cur);
-                    const pt = pos(tgt);
-                    const segL = Math.min(pc, pt);
-                    const segW = Math.abs(pc - pt);
-                    graph = `
-          <div class="wgraph">
-            <div class="wtrack">
-              <div class="wseg" style="left:${segL.toFixed(1)}%;width:${segW.toFixed(1)}%"></div>
-              <div class="wmark tgt" style="left:${pt.toFixed(1)}%" role="img" aria-label="target ${fmt(tgt, 1)} ${unit}"></div>
-              <div class="wmark cur" style="left:${pc.toFixed(1)}%" role="img" aria-label="current ${fmt(cur, 1)} ${unit}"></div>
-            </div>
-            <div class="wcaps">
-              <span class="wcap curcap" style="left:${pc.toFixed(1)}%">${fmt(cur, 1)} now</span>
-              <span class="wcap" style="left:${pt.toFixed(1)}%">${fmt(tgt, 1)} goal</span>
-            </div>
-          </div>`;
+                    pc = pos(cur);
+                    pt = pos(tgt);
                 }
+                const segL = Math.min(pc, pt);
+                const segW = Math.abs(pc - pt);
+                const num = atTarget
+                    ? `${fmt(cur, 1)}<span class="wsub"> ${unit} · at target</span>`
+                    : `${fmt(cur, 1)}<span class="wsub"> → ${fmt(tgt, 1)} ${unit}</span>`;
 
                 return `
-          <div class="section-title">Weight</div>
-          <div class="weight">
-            <div class="wtop">
-              <div class="wlead">
-                ${label}
-                <div class="wcur">${curHtml}</div>
-              </div>
-              ${chip}
+          <div class="wrow psec" title="${title}">
+            <span class="wlab"><span class="dot" style="background:var(--accent)"></span>Weight</span>
+            <div class="wtrack" role="img" aria-label="${aria}">
+              <div class="wseg" style="left:${segL.toFixed(1)}%;width:${segW.toFixed(1)}%"></div>
+              <div class="wmark tgt" style="left:${pt.toFixed(1)}%"></div>
+              <div class="wmark cur" style="left:${pc.toFixed(1)}%"></div>
             </div>
-            ${graph}
-            ${meta ? `<div class="wmeta">${meta}</div>` : ""}
+            <span class="wnum">${num}</span>
           </div>`;
             }
 
@@ -436,42 +357,45 @@
 
                 if (nothingLogged) {
                     root.innerHTML = `
-            <header class="head">
-              <h1>Goal Progress</h1>
-              <span class="range">${esc(data.date || "")}</span>
-            </header>
             <div class="empty">
               <div class="big">🎯</div>
-              <div>Nothing logged yet for ${esc(data.date || "this day")}.</div>
+              <div>Nothing logged yet for ${esc(shortDate(data.date) || "this day")}.</div>
             </div>`;
                     return;
                 }
 
-                const entries = `${meals} meal${meals === 1 ? "" : "s"} · ${water} water entr${water === 1 ? "y" : "ies"}`;
                 const panel = macroPanel(
                     totals,
                     data.goals,
                     undefined,
                     data.meals,
-                    // Not in the tool's output schema today (it carries
-                    // canonical grams); honoured the moment it is, and "us"
-                    // until then — the server's own default.
+                    // Nothing sits between the header line and the strip, so no
+                    // leading hairline; the label above the calorie figure is
+                    // the default "Calories today", which is exactly what this
+                    // widget shows.
                     { drinkUnit: data.drink_unit },
                 );
-                const dayEmpty =
+
+                // The day itself and what was logged on it — the context the
+                // strip's numbers are read against.
+                const meta = `${esc(shortDate(data.date))} · ${meals} meal${meals === 1 ? "" : "s"} · ${water} water${water === 1 ? "" : "s"}`;
+                // A day with a weight reading but no meals or water still shows
+                // the strip (all zeros against the goals), so say why.
+                const sub =
                     meals === 0 && water === 0
-                        ? `<div class="note">Nothing logged yet for ${esc(data.date || "this day")}.</div>`
+                        ? `<div class="psub">Nothing logged yet for ${esc(shortDate(data.date) || "this day")}.</div>`
                         : "";
 
                 root.innerHTML = `
-          <header class="head">
-            <h1>Goal Progress</h1>
-            <span class="range">${esc(data.date || "")} · ${entries}</span>
-          </header>
-          <div class="section-title">Today vs goal</div>
-          ${dayEmpty}
-          ${panel}
-          ${weightCard(w)}`;
+          <div class="panel">
+            <div class="phead">
+              <div class="ptitle">Goal progress</div>
+              ${sub}
+              <div class="pmeta">${meta}</div>
+            </div>
+            ${panel}
+            ${weightRow(w)}
+          </div>`;
             }
 
             // ---- Rendering intake ----------------------------------------------

@@ -1,10 +1,11 @@
-// Macro panel builder — shared by every widget that shows intake vs goal.
+// Macro strip builder — shared by every widget that shows intake vs goal.
 //
-// Renders calories as a full-width hero ring, protein/carbs/fat as three smaller
-// rings in one card, water as a full-width progress bar, fiber/sugar as
-// sub-components revealed inside the carbs disclosure, and alcohol/caffeine as
-// plain stat lines. Pairs with shared/macros.css (layout) and shared/ring.css
-// (the gauge).
+// Renders ONE compact block: the calorie ring beside its figure, three
+// protein/carbs/fat bars, a "limits" row of the metrics you stay under
+// (sugar, alcohol, caffeine) plus fiber, and the water line. It is not a card
+// of its own — a widget drops it inside its single `.panel` under whatever top
+// matter only that widget has (a chart, a range toggle, a weight line). Pairs
+// with shared/macros.css (layout) and shared/ring.css (the gauge).
 //
 // Requires fmt(n, decimals) and esc(s) to already be defined in the widget scope.
 //
@@ -18,21 +19,30 @@
 // a FLOOR: { under: "left" | "under", over: "over" } (default "left" / "over").
 // A ceiling ignores it — see macroBits.
 //
-// EVERY entry below must declare a `role`, because the panel is laid out BY
+// EVERY entry below must declare a `role`, because the strip is laid out BY
 // ROLE and never by a hardcoded key list. A new entry therefore appears exactly
 // where its role says it should — and an entry with no role (or an unknown one)
-// renders nowhere at all rather than silently sprouting a sixth ring:
+// renders nowhere at all rather than silently sprouting a fourth macro bar:
 //
-//   hero  full-width calorie ring
-//   ring  one cell of the protein/carbs/fat row
-//   bar   full-width horizontal progress bar (water)
-//   sub   a sub-component of `parent`, shown inside the parent's disclosure
-//   stat  a plain value line under the panel — no ring, no bar (alcohol,
-//         caffeine)
+//   cal    the calorie gauge and its figure
+//   macro  one of the three protein/carbs/fat bars
+//   limit  one cell of the row under them — the metrics judged by a ceiling
+//          you stay under, plus fiber, which shares the idiom because it is
+//          read the same way ("21.8, of 30 g") even though it is a floor
+//   bar    the full-width water line
 //
 // `direction` marks a target you stay UNDER rather than reach (mirrors
 // GoalDirection in src/mcp.ts): exceeding a ceiling is flagged with --over,
 // exceeding a floor is not.
+//
+// `signal` says what a 0 in the payload means, and so what earns a limit cell.
+// "null" — the payload distinguishes never-recorded (null) from a recorded 0,
+// so the null is the entire gate and a real 0 always shows. Only alcohol_g and
+// caffeine_mg carry that signal (see totalsPayloadOf in src/mcp.ts).
+// "data"  — TOTALS_ITEM types the metric as a plain number, so a day that
+// recorded none of it is indistinguishable from a 0. The cell is earned by a
+// value above zero or by a goal of the user's own, which is the same rule the
+// carbs disclosure used when fiber and sugar lived inside it.
 const MACROS = [
     {
         key: "calories",
@@ -40,7 +50,7 @@ const MACROS = [
         unit: "kcal",
         color: "var(--calories)",
         decimals: 0,
-        role: "hero",
+        role: "cal",
     },
     {
         key: "protein_g",
@@ -48,7 +58,7 @@ const MACROS = [
         unit: "g",
         color: "var(--protein)",
         decimals: 0,
-        role: "ring",
+        role: "macro",
     },
     {
         key: "carbs_g",
@@ -56,7 +66,7 @@ const MACROS = [
         unit: "g",
         color: "var(--carbs)",
         decimals: 0,
-        role: "ring",
+        role: "macro",
     },
     {
         key: "fat_g",
@@ -64,26 +74,19 @@ const MACROS = [
         unit: "g",
         color: "var(--fat)",
         decimals: 0,
-        role: "ring",
+        role: "macro",
     },
-    {
-        key: "fiber_g",
-        label: "Fiber",
-        unit: "g",
-        color: "var(--fiber)",
-        decimals: 1,
-        role: "sub",
-        parent: "carbs_g",
-    },
+    // Order within the row is the order they are read: the two breaches people
+    // act on first, then caffeine, then the one floor.
     {
         key: "sugar_g",
         label: "Sugar",
         unit: "g",
         color: "var(--sugar)",
         decimals: 1,
-        role: "sub",
-        parent: "carbs_g",
+        role: "limit",
         direction: "ceiling",
+        signal: "data",
     },
     {
         key: "alcohol_g",
@@ -91,10 +94,12 @@ const MACROS = [
         unit: "g",
         color: "var(--alcohol)",
         decimals: 1,
-        role: "stat",
+        role: "limit",
         direction: "ceiling",
-        // Grams of ethanol mean nothing to most people, so the line leads with
-        // a drink count — see macroStat. No other stat has a second unit.
+        signal: "null",
+        // Grams of ethanol mean nothing to most people, so the caption leads
+        // with a drink count — see macroLimit. No other metric has a second
+        // unit.
         gloss: "drinks",
     },
     {
@@ -105,11 +110,21 @@ const MACROS = [
         // Whole milligrams. Every label and guideline is quoted that way (EFSA:
         // 400 mg/day), a tenth of a milligram is below anything anyone can act
         // on, and matching the model-facing text keeps "95 mg" one number in
-        // both places. NOT a `sub` of carbs and NOT a ring: caffeine carries
-        // zero kcal, so it must never become a segment of an energy split.
+        // both places. NOT a macro bar: caffeine carries zero kcal, so it must
+        // never become a segment of an energy split.
         decimals: 0,
-        role: "stat",
+        role: "limit",
         direction: "ceiling",
+        signal: "null",
+    },
+    {
+        key: "fiber_g",
+        label: "Fiber",
+        unit: "g",
+        color: "var(--fiber)",
+        decimals: 1,
+        role: "limit",
+        signal: "data",
     },
     {
         key: "water_ml",
@@ -128,7 +143,7 @@ const MACROS = [
 // are null (not 0) on a day that recorded neither, so none of them belongs in
 // the test.
 const TOP_LEVEL_MACRO_KEYS = MACROS.filter(
-    (m) => m.role === "hero" || m.role === "ring" || m.role === "bar",
+    (m) => m.role === "cal" || m.role === "macro" || m.role === "bar",
 ).map((m) => m.key);
 
 function dayHasData(day) {
@@ -143,9 +158,10 @@ function dayHasData(day) {
 const DRINK_GRAMS = { us: 14, uk: 7.893 };
 const DRINK_LABEL = { us: "US drinks", uk: "UK units" };
 
-// value vs goal → filled fraction, centre % caption, and the caption line. The
-// ring keeps its macro colour even past 100% so the gauges stay distinct; only
-// the % caption / value turns red to flag going over goal.
+// value vs goal → filled fraction, the target caption, the remaining-amount
+// caption, and the ring's centre. Bars and rings keep their metric colour even
+// past 100% so the series stay distinct; only the figure turns red to flag
+// going over a ceiling.
 function macroBits(m, vals, goal, wording) {
     const ceiling = m.direction === "ceiling";
     // A ceiling reads as distance from a limit, never as budget remaining:
@@ -176,13 +192,14 @@ function macroBits(m, vals, goal, wording) {
     const frac = pct == null ? 0 : Math.max(0, Math.min(pct, 100)) / 100;
     const pctColor = over ? "var(--over)" : m.color;
 
-    let goalLine, center2;
+    let goalLine, targetStr, deltaStr, center2;
     if (pct == null) {
-        goalLine = "no goal set";
+        targetStr = "no goal set";
+        deltaStr = "";
+        goalLine = targetStr;
         center2 = `<div class="ru">${m.unit}</div>`;
     } else {
         const delta = target - val;
-        let deltaStr;
         if (delta < 0) {
             deltaStr = `${fmt(-delta, m.decimals)} ${m.unit} ${overWord}`;
         } else if (delta === 0 && ceiling) {
@@ -192,194 +209,223 @@ function macroBits(m, vals, goal, wording) {
         } else {
             deltaStr = `${fmt(delta, m.decimals)} ${m.unit} ${underWord}`;
         }
-        goalLine = `${ceiling ? "limit" : "of"} ${fmt(target, m.decimals)} ${m.unit} · ${deltaStr}`;
+        targetStr = `${ceiling ? "limit" : "of"} ${fmt(target, m.decimals)} ${m.unit}`;
+        goalLine = `${targetStr} · ${deltaStr}`;
         center2 = `<div class="rp" style="color:${pctColor}">${Math.round(pct)}%</div>`;
     }
-    return { val, target, pct, over, frac, goalLine, center2 };
+    return {
+        val,
+        target,
+        pct,
+        over,
+        frac,
+        goalLine,
+        targetStr,
+        deltaStr,
+        center2,
+    };
 }
 
-// The conic-gradient ring gauge markup (size comes from the CSS context). Its
-// aria-label is what a STATIC tile exposes; inside an interactive tile the
-// button role makes every child presentational, so the value reaches a screen
-// reader through the tile's own name instead — see tileLabel.
+// The conic-gradient ring gauge markup (size and band come from the CSS
+// context). Its aria-label is what a STATIC gauge exposes; inside an
+// interactive tile the button role makes every child presentational, so the
+// value reaches a screen reader through the tile's own name instead — see
+// tileLabel.
+//
+// At compact size the centre carries the percentage ALONE: the value it would
+// otherwise repeat sits beside the ring at three times the size. With no goal
+// there is no percentage, so the value moves back in.
 function ringMarkup(m, b) {
     const cap =
         b.pct != null && b.frac > 0.005 ? `<div class="ring-cap"></div>` : "";
+    const center =
+        b.pct != null
+            ? b.center2
+            : `<div class="rv">${fmt(b.val, m.decimals)}</div>${b.center2}`;
     return `
       <div class="ring" style="--c:${m.color};--p:${b.frac.toFixed(4)}" role="img" aria-label="${esc(m.label)} ${fmt(b.val, m.decimals)} ${m.unit}">
         <div class="ring-track"></div>
         <div class="ring-arc"></div>
         ${cap}
-        <div class="ring-center">
-          <div class="rv">${fmt(b.val, m.decimals)}</div>
-          ${b.center2}
-        </div>
+        <div class="ring-center">${center}</div>
       </div>`;
 }
 
-function macroLabelGoal(m, b) {
-    return `
-      <div class="mlabel"><span class="dot" style="background:${m.color}"></span>${m.label}</div>
-      <div class="mgoal">${esc(b.goalLine)}</div>`;
-}
-
-// The sub-components of one macro that are worth showing: fiber and sugar under
-// carbs. Same rule the water bar uses — an untracked metric is noise rather
-// than a zero, so a sub only appears once it has data or a goal of its own.
-//
-// `null` is not "no data yet, treat as zero" — it is the covered-days signal
-// (see trendsDayPayloadOf / avgOf): a range with zero covered days for this
-// nutrient has nothing to average, so the sub is dropped entirely even when a
-// goal is set, matching computeTrends/formatStatLine suppressing the whole
-// section rather than printing "0g of 30g target".
-function subMacrosOf(m, ctx) {
-    return MACROS.filter(
-        (s) =>
-            s.role === "sub" &&
-            s.parent === m.key &&
-            ctx.vals[s.key] != null &&
-            ((ctx.vals[s.key] ?? 0) > 0 ||
-                (ctx.goal ? (ctx.goal[s.key] ?? null) != null : false)),
-    );
-}
-
-// Is there anything behind this tile to disclose? Either the meals that
-// contributed to it, or its own sub-components (carbs → fiber + sugar). A
-// panel built without meals is therefore still interactive on carbs alone,
-// which is how averaged views like trends surface fiber and sugar.
-function macroHasDetail(m, ctx) {
-    return !!ctx.meals || subMacrosOf(m, ctx).length > 0;
-}
-
-// What tapping this tile reveals. No macro name in it — tileLabel below always
-// puts one in front — so the spoken name never says "Carbs" three times.
-function detailLabel(m, ctx) {
-    const subs = subMacrosOf(m, ctx).map((s) => s.label.toLowerCase());
-    if (subs.length && ctx.meals) {
-        return `Show ${subs.join(" and ")}, and the meals that contributed.`;
-    }
-    if (subs.length) return `Show ${subs.join(" and ")}.`;
-    return `Show the meals that contributed.`;
+// Is there anything behind this tile to disclose? Only the meals that
+// contributed to it — fiber and sugar used to hide inside the carbs
+// disclosure and now have cells of their own in the limits row, so a strip
+// built without meals is entirely static.
+function macroHasDetail(ctx) {
+    return !!ctx.meals;
 }
 
 // The accessible name of an interactive tile — VALUE FIRST, action second.
 //
 // `role="button"` makes a tile's children presentational: the ring's own
-// aria-label, the macro name and the goal caption all drop out of the
+// aria-label, the metric name and the goal caption all drop out of the
 // accessibility tree, so a screen reader hears the action and no numbers at
 // all, while the static tile beside it reads "Protein 120 g / PROTEIN / of
 // 160 g · 40 g left". Folding the value and goal state into the name restores
 // exactly what the static tile exposes, in one announcement.
 //
 // The alternative — moving role="button" to an inner element so the values stay
-// exposed — was rejected: the whole tile is the tap target (a 78px ring is the
-// thing a finger aims at), so the button would either be smaller than what
+// exposed — was rejected: the whole tile is the tap target (a 44px column is
+// the thing a finger aims at), so the button would either be smaller than what
 // responds to a tap or would nest a second target inside the first.
-function tileLabel(m, b, ctx) {
+function tileLabel(m, b) {
     // "·" separates value from goal visually; screen readers either skip it or
     // announce "middle dot", so the spoken name uses a comma.
     const state = b.goalLine.replace(" · ", ", ");
-    return `${m.label} ${fmt(b.val, m.decimals)} ${m.unit}, ${state}. ${detailLabel(m, ctx)}`;
+    return `${m.label} ${fmt(b.val, m.decimals)} ${m.unit}, ${state}. Show the meals that contributed.`;
 }
 
 // When a tile has something to disclose it is also a button that toggles its
 // breakdown — see macroToggle below.
-function interactiveAttrs(m, b, ctx, interactive) {
+function interactiveAttrs(m, b, interactive) {
     return interactive
-        ? ` role="button" tabindex="0" data-macro="${m.key}" aria-expanded="false" aria-label="${esc(tileLabel(m, b, ctx))}"`
+        ? ` role="button" tabindex="0" data-macro="${m.key}" aria-expanded="false" aria-label="${esc(tileLabel(m, b))}"`
         : "";
 }
 
-// Calories — full-width hero card with the large ring.
-function macroHero(m, ctx, interactive) {
+// Calories — the gauge, the running figure against its goal, and how much is
+// left. `calLabel` names the period the figure covers, which is the one thing
+// that genuinely differs between widgets ("Calories today" vs "14-day avg ·
+// all days").
+function macroCal(m, ctx, interactive) {
     const b = macroBits(m, ctx.vals, ctx.goal, ctx.wording);
+    // Keyed off `pct`, not `target`. A FLOOR target of 0 is "no goal set" as
+    // far as macroBits is concerned (a 0 kcal goal is meaningless), and
+    // set_nutrition_goals will happily store one — so a `target != null` test
+    // renders "1,980 / 0" beside a caption that says there is no goal.
+    const goalPart =
+        b.pct != null
+            ? `<span class="cal-goal">/ ${fmt(b.target, m.decimals)}</span>`
+            : "";
+    // With no goal this slot carries "no goal set" — it is the only place the
+    // calorie block can say so, and a lone figure beside an empty ring
+    // otherwise reads as a widget that failed to load.
+    const left = `<div class="cal-left">${esc(b.deltaStr || b.targetStr)}</div>`;
     return `
-      <div class="mcard macro-hero${interactive ? " interactive" : ""}"${interactiveAttrs(m, b, ctx, interactive)}>${ringMarkup(m, b)}${macroLabelGoal(m, b)}
+      <div class="cal${interactive ? " interactive" : ""}"${interactiveAttrs(m, b, interactive)}>${ringMarkup(m, b)}
+        <div class="cal-txt">
+          <div class="cal-lab">${esc(ctx.calLabel)}</div>
+          <div class="cal-line">
+            <div class="cal-val">${fmt(b.val, m.decimals)}${goalPart}</div>
+            ${left}
+          </div>
+        </div>
       </div>`;
 }
 
-// One protein/carbs/fat cell inside the shared row card.
-function macroCell(m, ctx, interactive) {
-    const b = macroBits(m, ctx.vals, ctx.goal, ctx.wording);
+// One cell of either grid: name + figure, a thin bar, a caption. `num` and
+// `cap` are what the two rows disagree on — a macro shows "95 /175" with the
+// amount left underneath, a limit shows the bare figure with the limit itself
+// underneath, because the limit appears nowhere else.
+function macroTile(m, b, num, cap, interactive) {
+    const flag = b.over && m.direction === "ceiling";
+    // `nogoal` keeps the caption on screen at phone widths, where it is
+    // otherwise the first thing dropped — see macros.css.
+    const cls = `mtile${b.pct == null ? " nogoal" : ""}${interactive ? " interactive" : ""}`;
     return `
-        <div class="macro-cell${interactive ? " interactive" : ""}"${interactiveAttrs(m, b, ctx, interactive)}>${ringMarkup(m, b)}${macroLabelGoal(m, b)}
+        <div class="${cls}"${interactiveAttrs(m, b, interactive)}>
+          <div class="mtop">
+            <span class="mkey">${esc(m.label)}</span>
+            <span class="mnum"${flag ? ' style="color:var(--over)"' : ""}>${num}</span>
+          </div>
+          <div class="mbar"><div class="mfill" style="width:${(b.frac * 100).toFixed(1)}%;background:${m.color}"></div></div>
+          <div class="mcap">${esc(cap)}</div>
         </div>`;
 }
 
-// Label + value line, thin progress bar, goal caption. Full-width for water and,
-// at a smaller scale, for each carbs sub-component inside the disclosure — one
-// idiom, two sizes (see .barstat / .macro-sub in macros.css).
-function barStatInner(m, b) {
-    const fillPct = b.pct == null ? 0 : Math.max(0, Math.min(b.pct, 100));
-    // Exceeding a ceiling (sugar) is the thing to flag; exceeding a floor
-    // (fiber, water) is the goal being met, so it keeps the macro colour.
-    const flag = b.over && m.direction === "ceiling";
-    const valStyle = flag ? ' style="color:var(--over)"' : "";
-    const right =
-        b.target != null
-            ? `<div class="wval"${valStyle}>${fmt(b.val, m.decimals)}<span class="wsub">/ ${fmt(b.target, m.decimals)} ${m.unit}</span></div>`
-            : `<div class="wval">${fmt(b.val, m.decimals)}<span class="wsub">${m.unit}</span></div>`;
-    return `
-        <div class="wtop">
-          <div class="mlabel"><span class="dot" style="background:${m.color}"></span>${m.label}</div>
-          ${right}
-        </div>
-        <div class="wbar"><div class="wfill" style="width:${fillPct.toFixed(1)}%;background:${m.color}"></div></div>
-        <div class="mgoal wgoal">${esc(b.goalLine)}</div>`;
-}
-
-// Water — full-width horizontal bar instead of a ring.
-function macroBar(m, ctx) {
+// Protein / carbs / fat.
+function macroBarTile(m, ctx, interactive) {
     const b = macroBits(m, ctx.vals, ctx.goal, ctx.wording);
-    return `
-      <div class="mcard macro-water barstat">${barStatInner(m, b)}
-      </div>`;
+    // The unit rides in a span the narrow layout hides: at three columns
+    // across a phone, "125/160 g" leaves the name and the figure touching,
+    // and grams are what every macro is in anyway.
+    // b.pct, not b.target — a floor goal of 0 is "no goal set" (see macroCal).
+    const num =
+        b.pct != null
+            ? `${fmt(b.val, m.decimals)}<span class="msub">/${fmt(b.target, m.decimals)}<span class="munit"> ${m.unit}</span></span>`
+            : `${fmt(b.val, m.decimals)}<span class="msub"> ${m.unit}</span>`;
+    return macroTile(m, b, num, b.deltaStr || b.targetStr, interactive);
 }
 
-// A stat macro — a plain value line, never a ring. Alcohol leads with the drink
-// count as an intuitive gloss ("2.1 US drinks · 28 g"); caffeine has no second
-// unit anyone thinks in, so it is milligrams alone ("95 mg"). Both carry the
-// limit underneath when one is set.
+// Does this limit earn a cell? See `signal` on the MACROS entries: for alcohol
+// and caffeine the payload's null is the whole gate and a recorded 0 is a real
+// reading that stays on screen; for fiber and sugar a 0 could equally mean the
+// day predates the column, so the cell is earned by a value or by a goal.
 //
-// null vs 0 is load-bearing, and for these two lines it is the ONLY suppression
-// there is. `alcohol_g: null` is how a payload in src/mcp.ts says "nothing to
-// show here" — either the user does not track alcohol at all (see
-// AlcoholDisplay), or (trends' per-day/averaged series only) this day or window
-// has zero covered days for it (see trendsDayPayloadOf). `caffeine_mg: null`
-// only ever means the second: caffeine has no opt-in flag by design, so the
-// covered-days signal is the whole gate — and what it prevents is a "0 mg of
-// 400 mg" line invented for someone who has never recorded any. A 0 on a day or
-// window that DOES cover the nutrient is a real reading and stays on screen —
-// unlike the water bar, whose 0 means "never logged any" because water has no
-// covered-days signal to tell the two apart.
-function macroStat(m, ctx) {
-    const val = ctx.vals?.[m.key];
-    if (val == null) return "";
+// What the gate prevents is a "0 mg of 400 mg" line invented for someone who
+// has never recorded any — the same suppression the model-facing text applies
+// (recordedGoalLine in src/mcp.ts).
+function limitShown(m, ctx) {
+    const v = ctx.vals?.[m.key];
+    if (v == null) return false;
+    if (m.signal === "null") return true;
+    return v > 0 || (ctx.goal ? (ctx.goal[m.key] ?? null) != null : false);
+}
+
+// A limit cell. Alcohol's caption leads with the drink count as an intuitive
+// gloss ("2.0 US drinks · limit 20 g"); caffeine has no second unit anyone
+// thinks in, so it is milligrams alone. A metric recorded as none reads that
+// way in words rather than as a 0 that looks like a measurement.
+function macroLimit(m, ctx) {
+    // The gate again, so the cell builder is safe to call on its own and can
+    // never invent a reading the strip would have suppressed.
+    if (!limitShown(m, ctx)) return "";
     const b = macroBits(m, ctx.vals, ctx.goal, ctx.wording);
-    const flag = b.over && m.direction === "ceiling";
-    const amount = `${fmt(val, m.decimals)}<span class="ssub">${m.unit}</span>`;
-    let value;
-    if (!(val > 0)) {
-        value = `${amount}<span class="ssep">·</span><span class="ssub">none logged</span>`;
-    } else if (m.gloss === "drinks") {
-        const drinks = val / DRINK_GRAMS[ctx.drinkUnit];
-        value = `${drinks.toFixed(1)}<span class="ssub">${esc(DRINK_LABEL[ctx.drinkUnit])}</span><span class="ssep">·</span>${amount}`;
-    } else {
-        value = amount;
+    // The unit is already in the caption underneath ("limit 400 mg"), and
+    // caffeine's milligrams are the one unit here that cannot be guessed — so
+    // it is spelled out beside the figure only when there is no limit to
+    // carry it.
+    const unit = b.pct == null ? `<span class="msub"> ${m.unit}</span>` : "";
+    const num =
+        b.val > 0
+            ? `${fmt(b.val, m.decimals)}${unit}`
+            : `<span class="mnone">none logged</span>`;
+    let cap = b.targetStr;
+    if (b.val > 0 && m.gloss === "drinks") {
+        const drinks = (b.val / DRINK_GRAMS[ctx.drinkUnit]).toFixed(1);
+        cap = `${drinks} ${DRINK_LABEL[ctx.drinkUnit]} · ${cap}`;
     }
+    // The limit itself is the caption; BY HOW MUCH joins it only when that is
+    // the thing to act on. Under a limit "13.1 g under" is noise in a cell
+    // this size — but a breach the figure already flags in --over deserves its
+    // size, and "at limit" is a state the colour cannot express at all
+    // (`over` is pct > 100, so exactly at a ceiling reads as comfortably
+    // under it otherwise).
+    if (b.deltaStr && (b.over || b.deltaStr === "at limit")) {
+        cap = `${cap} · ${b.deltaStr}`;
+    }
+    return macroTile(m, b, num, cap, false);
+}
+
+// Water — one line, in litres. The payload is millilitres because that is what
+// a glass is logged in, but a day's intake is spoken in litres and "2,100 /
+// 2,500 ml" is four more glyphs to read for no more meaning.
+function macroWater(m, ctx) {
+    const b = macroBits(m, ctx.vals, ctx.goal, ctx.wording);
+    // Always a tenth, not fmt()'s — fmt round-trips through Number(), so a
+    // round 2 L would print "2" beside a "2.5 L" goal.
+    const L = (ml) => (ml / 1000).toFixed(1);
+    // b.pct, not b.target — a floor goal of 0 is "no goal set" (see macroCal).
+    const num =
+        b.pct != null
+            ? `${L(b.val)}<span class="wsub">/${L(b.target)} L</span>`
+            : `${L(b.val)}<span class="wsub"> L</span>`;
     return `
-      <div class="mcard macro-stat">
-        <div class="stop">
-          <div class="mlabel"><span class="dot" style="background:${m.color}"></span>${m.label}</div>
-          <div class="sval"${flag ? ' style="color:var(--over)"' : ""}>${value}</div>
-        </div>
-        ${b.target != null ? `<div class="mgoal sgoal">${esc(b.goalLine)}</div>` : ""}
+      <div class="wrow psec">
+        <span class="wlab"><span class="dot" style="background:${m.color}"></span>${esc(m.label)}</span>
+        <div class="mbar"><div class="mfill" style="width:${(b.frac * 100).toFixed(1)}%;background:${m.color}"></div></div>
+        <span class="wnum">${num}</span>
       </div>`;
 }
 
-// Everything the panel and its disclosure need, in one object: the values, the
-// goals, the caption wording, the optional per-meal rows, and the drink unit.
-// Built once per macroPanel() call and stashed for the delegated toggle handler.
+// Everything the strip and its disclosure need, in one object: the values, the
+// goals, the caption wording, the optional per-meal rows, the drink unit, and
+// the label above the calorie figure. Built once per macroPanel() call and
+// stashed for the delegated toggle handler.
 function macroCtxOf(vals, goal, wording, meals, opts) {
     const unit = opts && opts.drinkUnit;
     return {
@@ -394,83 +440,94 @@ function macroCtxOf(vals, goal, wording, meals, opts) {
         // unrecognised unit: "us" is what src/mcp.ts uses for an
         // alcohol-tracking user with no saved preference.
         drinkUnit: DRINK_GRAMS[unit] ? unit : "us",
+        calLabel: (opts && opts.calLabel) || "Calories today",
+        // Set by a widget that puts something of its own — a chart, a range
+        // toggle's chart — between the header line and the strip, so the strip
+        // opens with the same hairline that separates its own sections.
+        divided: !!(opts && opts.divided),
     };
 }
 
-// Full macro panel: calories hero + protein/carbs/fat row + water bar + the
-// alcohol and caffeine stat lines, laid out by role (never by a hardcoded key
-// list).
+// The column count for a grid, as the two custom properties macros.css reads.
+// Four limits do not fit across a phone, so they become a 2×2; three or fewer
+// keep one row at both widths. The row therefore handles one to four cells
+// with no special case — alcohol simply is or is not among them.
+function gridCols(n) {
+    return `--lc:${n === 4 ? 2 : n};--lcw:${n}`;
+}
+
+// Full macro strip: the calorie row, the three macro bars, the limits row and
+// the water line, laid out by role (never by a hardcoded key list).
 //
 // `meals` is optional: when a non-empty array of per-meal breakdown rows is
 // passed (each { description, meal_type, date, calories, protein_g, carbs_g,
-// fat_g, ... }), the tiles become tappable and reveal the meals that contributed
-// to that macro (see macroToggle). Carbs is tappable even without meals, since
-// it also discloses fiber and sugar.
+// fat_g, ... }), the calorie row and the macro bars become tappable and reveal
+// the meals that contributed to that metric (see macroToggle).
 //
-// `opts` is optional: { drinkUnit: "us" | "uk" } for the alcohol line.
+// `opts` is optional: { drinkUnit: "us" | "uk", calLabel: string,
+// divided: boolean }.
 function macroPanel(vals, goal, wording, meals, opts) {
     const ctx = macroCtxOf(vals, goal, wording, meals, opts);
     // Stash it so the delegated toggle handler can build the breakdown on
-    // demand. One panel per widget, so a single slot is enough.
+    // demand. One strip per widget, so a single slot is enough.
     __macroCtx = ctx;
 
-    const hero = MACROS.find((m) => m.role === "hero");
-    const trio = MACROS.filter((m) => m.role === "ring");
-    const bars = MACROS.filter(
+    const cal = MACROS.find((m) => m.role === "cal");
+    const trio = MACROS.filter((m) => m.role === "macro");
+    const limits = MACROS.filter(
+        (m) => m.role === "limit" && limitShown(m, ctx),
+    );
+    const waters = MACROS.filter(
         // Only show a bar for a metric that was actually tracked — an empty bar
         // for an untouched metric is noise.
         (m) => m.role === "bar" && (ctx.vals[m.key] ?? 0) > 0,
     );
-    const stats = MACROS.filter((m) => m.role === "stat");
 
-    const heroOn = macroHasDetail(hero, ctx);
-    const cells = trio.map((m) => macroCell(m, ctx, macroHasDetail(m, ctx)));
-    const interactive = heroOn || trio.some((m) => macroHasDetail(m, ctx));
-
+    const interactive = macroHasDetail(ctx);
+    const limitRow = limits.length
+        ? `<div class="mgrid lim n${limits.length} psec" style="${gridCols(limits.length)}">${limits
+              .map((m) => macroLimit(m, ctx))
+              .join("")}
+        </div>`
+        : "";
+    // What a tap does, said once. Hover and a cursor are the whole affordance
+    // on a pointer device and NEITHER exists on a phone, which is where this
+    // widget mostly lives — without a line saying so, the breakdown is a
+    // feature nobody discovers. It sits under the grids rather than at the end
+    // of the strip so it is next to the tiles it describes, and macroToggle
+    // hides it once a breakdown is open: by then the answer is on screen and
+    // the instruction is just a row of noise above it.
     const hint = interactive
-        ? `<div class="macro-hint">${
-              ctx.meals
-                  ? "Tap a metric to see which meals contributed."
-                  : "Tap carbs to see fiber and sugar."
-          }</div>`
+        ? `<div class="mhint" data-macro-hint>Tap a metric for the meals behind it</div>`
         : "";
     // The breakdown renders into this region on tap; hidden until then.
     const detail = interactive
-        ? `<div class="macro-detail" hidden aria-live="polite"></div>`
+        ? `<div class="macro-detail psec" hidden aria-live="polite"></div>`
         : "";
     return `
-      <div class="macro-panel"${interactive ? " data-macro-panel" : ""}>
-      ${hint}
-      ${macroHero(hero, ctx, heroOn)}
-      <div class="mcard macro-row">${cells.join("")}
-      </div>
-      ${bars.map((m) => macroBar(m, ctx)).join("")}
-      ${stats.map((m) => macroStat(m, ctx)).join("")}
-      ${detail}
+      <div class="strip${ctx.divided ? " psec" : ""}"${interactive ? " data-macro-panel" : ""}>
+        <div class="srow">
+          ${macroCal(cal, ctx, interactive)}
+          <div class="sgrids">
+            <div class="mgrid" style="${gridCols(3)}">${trio
+                .map((m) => macroBarTile(m, ctx, interactive))
+                .join("")}
+            </div>
+            ${limitRow}
+            ${hint}
+          </div>
+        </div>
+        ${waters.map((m) => macroWater(m, ctx)).join("")}
+        ${detail}
       </div>`;
 }
 
 // ---- Interactive breakdown ------------------------------------------------
-// Set by macroPanel() when the panel is interactive; read by the delegated
+// Set by macroPanel() when the strip is interactive; read by the delegated
 // handlers below.
 let __macroCtx = null;
 
-// Fiber and sugar for the same period as the panel, rendered as compact bar
-// stats inside the parent's disclosure. Sub-components of carbs, never rings of
-// their own.
-function subBlock(m, ctx) {
-    const subs = subMacrosOf(m, ctx);
-    if (!subs.length) return "";
-    const rows = subs
-        .map(
-            (s) =>
-                `<div class="macro-sub barstat">${barStatInner(s, macroBits(s, ctx.vals, ctx.goal, ctx.wording))}</div>`,
-        )
-        .join("");
-    return `<div class="md-subs"><div class="md-subtitle">Of which</div>${rows}</div>`;
-}
-
-// The list of meals that contributed a positive amount of one macro,
+// The list of meals that contributed a positive amount of one metric,
 // largest-first, capped so a long range stays readable.
 function mealList(m, meals) {
     const decimals = m.key === "calories" ? 0 : 1;
@@ -497,7 +554,8 @@ function mealList(m, meals) {
             return `
         <li class="md-row">
           <span class="md-val" style="color:${m.color}">${fmt(v, decimals)}<span class="md-unit">${esc(m.unit)}</span></span>
-          <span class="md-name">${esc(meal.description || "Untitled meal")}${sub ? `<span class="md-sub">${sub}</span>` : ""}</span>
+          <span class="md-name">${esc(meal.description || "Untitled meal")}</span>
+          ${sub ? `<span class="md-sub">${sub}</span>` : ""}
         </li>`;
         })
         .join("");
@@ -508,19 +566,14 @@ function mealList(m, meals) {
     return `<ul class="md-list">${items}${more}</ul>`;
 }
 
-// Build the breakdown for one macro: its sub-components (carbs → fiber, sugar)
-// and/or the meals behind it. One disclosure, one region, whichever parts apply.
+// Build the breakdown for one metric: the meals behind it, in the strip's own
+// card rather than on a second surface below it.
 function macroDetailBody(m, ctx) {
-    const subs = subBlock(m, ctx);
-    const head = `
+    return `
       <div class="md-head">
-        <span class="md-title"><span class="dot" style="background:${m.color}"></span>${esc(m.label)} ${subs ? "breakdown" : "by meal"}</span>
+        <span class="md-title"><span class="dot" style="background:${m.color}"></span>${esc(m.label)} by meal</span>
         <button class="md-close" data-macro-close aria-label="Close breakdown">✕</button>
-      </div>`;
-    if (!ctx.meals) return `${head}${subs}`;
-    // Both parts present → the meal list needs its own heading to stay legible.
-    const listTitle = subs ? `<div class="md-subtitle">By meal</div>` : "";
-    return `${head}${subs}${listTitle}${mealList(m, ctx.meals)}`;
+      </div>${mealList(m, ctx.meals)}`;
 }
 
 // Toggle the breakdown for the tapped tile. Tapping the open tile again (or its
@@ -541,10 +594,14 @@ function macroToggle(cell) {
         c.setAttribute("aria-expanded", on ? "true" : "false");
     });
 
+    // The instruction has been followed; the answer replaces it.
+    const hint = panel.querySelector("[data-macro-hint]");
+
     if (alreadyOpen) {
         detail.hidden = true;
         detail.dataset.open = "";
         detail.innerHTML = "";
+        if (hint) hint.hidden = false;
         return;
     }
     const m = MACROS.find((mm) => mm.key === key);
@@ -552,9 +609,10 @@ function macroToggle(cell) {
     detail.innerHTML = macroDetailBody(m, __macroCtx);
     detail.dataset.open = key;
     detail.hidden = false;
+    if (hint) hint.hidden = true;
 }
 
-// Delegated once per document. No-ops on non-interactive panels (no
+// Delegated once per document. No-ops on non-interactive strips (no
 // [data-macro] tiles), so widgets that omit meals are unaffected.
 if (typeof document !== "undefined" && !window.__macroWired) {
     window.__macroWired = true;

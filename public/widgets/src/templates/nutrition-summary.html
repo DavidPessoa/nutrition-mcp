@@ -5,7 +5,12 @@
   Assembled from shared partials at server startup (see src/widgets.ts); the
   @include markers below inline the shared design tokens, components, and host
   bridge. The result is fully self-contained — inline CSS + JS, zero network
-  requests — because the MCP Apps sandbox blocks external hosts.
+  requests — because the MCP Apps sandbox blocks external hosts. Styling follows
+  public/widgets/STYLE_GUIDE.md so it matches the other widgets.
+
+  One card (`.panel`): a header line naming the range and how much of it was
+  logged, the compact calories-per-day chart, then the shared macro strip
+  averaged over the logged days.
 
   Data arrives as the `structuredContent` of the get_nutrition_summary tool
   result; the shared bridge (shared/bridge.js) reads it across host conventions
@@ -29,7 +34,7 @@
         </style>
     </head>
     <body>
-        <div class="wrap" id="root"></div>
+        <div class="wrap tight" id="root"></div>
 
         <script>
             "use strict";
@@ -41,6 +46,7 @@
                 start_date: "2026-07-05",
                 end_date: "2026-07-07",
                 logged_days: 3,
+                drink_unit: "us",
                 days_in_range: 3,
                 goals: {
                     calories: 2200,
@@ -63,11 +69,11 @@
                     fiber_g: 26.4,
                     sugar_g: 58.2,
                     // Alcohol tracking ON in this sample. null here (the
-                    // opt-in's "off") drops the stat line entirely.
+                    // opt-in's "off") drops the limit cell entirely.
                     alcohol_g: 12.5,
                     // Averaged over the days that recorded caffeine, never over
                     // all of them. null here (nothing ever recorded) drops the
-                    // line rather than claiming a 0 mg day.
+                    // cell rather than claiming a 0 mg day.
                     caffeine_mg: 187,
                     water_ml: 2100,
                 },
@@ -274,16 +280,74 @@
 
             /*@include shared/macros.js@*/
 
+            // ---- Header dates -------------------------------------------------
+            // The header line is one nowrap run, so the range is written the way
+            // a person would say it ("5–7 Jul") rather than as two ISO strings.
+            // Parsed by hand rather than through Date: these are calendar dates
+            // in the USER's timezone, and new Date("2026-07-05") is UTC midnight,
+            // which formats as the 4th for anyone west of Greenwich.
+            const MONTHS = [
+                "Jan",
+                "Feb",
+                "Mar",
+                "Apr",
+                "May",
+                "Jun",
+                "Jul",
+                "Aug",
+                "Sep",
+                "Oct",
+                "Nov",
+                "Dec",
+            ];
+            function ymd(s) {
+                const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(s ?? ""));
+                if (!m) return null;
+                const mon = Number(m[2]);
+                if (mon < 1 || mon > 12) return null;
+                return { y: Number(m[1]), m: mon, d: Number(m[3]) };
+            }
+            function dayLabel(s, withYear) {
+                const p = ymd(s);
+                if (!p) return String(s ?? "");
+                return `${p.d} ${MONTHS[p.m - 1]}${withYear ? ` ${p.y}` : ""}`;
+            }
+            // "5–7 Jul" within a month, "28 Jun – 4 Jul" across two. The year
+            // shows when the range crosses one (where it is the whole point)
+            // and when the range is not in the current year — a summary of last
+            // autumn labelled "28 Jun – 4 Jul" names no year at all, and this
+            // tool is routinely asked for a past window.
+            function rangeLabel(start, end) {
+                const a = ymd(start),
+                    b = ymd(end);
+                if (!a || !b) return `${start} → ${end}`;
+                // The payload dates are already resolved in the user's
+                // timezone, and so is the local year here; a date-line
+                // disagreement at worst prints a year that did not need
+                // printing.
+                const thisYear = new Date().getFullYear();
+                if (a.y !== b.y)
+                    return `${dayLabel(start, true)} – ${dayLabel(end, true)}`;
+                const yr = b.y === thisYear ? "" : ` ${b.y}`;
+                if (a.m === b.m)
+                    return a.d === b.d
+                        ? `${dayLabel(end, false)}${yr}`
+                        : `${a.d}–${b.d} ${MONTHS[b.m - 1]}${yr}`;
+                return `${dayLabel(start, false)} – ${dayLabel(end, false)}${yr}`;
+            }
+
             // Calories-per-day trend: SVG area + line that scales to any range
-            // (3 days to a year). Uniform scaling — no preserveAspectRatio
-            // distortion — so it keeps its aspect ratio at any container width.
+            // (3 days to a year), drawn at the compact 480×54 scale that sits
+            // inside the panel rather than on a card of its own. Uniform scaling
+            // — no preserveAspectRatio distortion — so it keeps its aspect ratio
+            // at any container width. No <text>: every label is HTML above it.
             function trendChart(days, goal) {
                 const W = 480,
-                    H = 88,
-                    padL = 8,
-                    padR = 8,
-                    padT = 10,
-                    padB = 6;
+                    H = 54,
+                    padL = 5,
+                    padR = 5,
+                    padT = 5,
+                    padB = 4;
                 const n = days.length;
                 const vals = days.map((d) => d.calories || 0);
                 const maxV = Math.max(...vals, goal || 0, 1) * 1.15;
@@ -312,42 +376,33 @@
                     goal && goal > 0
                         ? `<line class="goalline" x1="${padL}" y1="${y(goal).toFixed(1)}" x2="${W - padR}" y2="${y(goal).toFixed(1)}"/>`
                         : "";
-                // Only draw point markers on short ranges to avoid clutter.
+                // Dots only while they still read as individual days: at 10
+                // points they are ~52 units apart, at a fortnight they crowd the
+                // line into a beaded string and at a month they are noise.
                 const dots =
-                    n <= 12
+                    n <= 10
                         ? pts
                               .map(
                                   (p) =>
-                                      `<circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="2.4" fill="var(--calories)"/>`,
+                                      `<circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="2.6" fill="var(--calories)"/>`,
                               )
                               .join("")
                         : "";
-                const md = (d) => esc(d.date.slice(5)); // MM-DD
                 const avg = Math.round(vals.reduce((a, b) => a + b, 0) / n);
 
                 return `
-          <div class="trend">
-            <div class="thead">
-              <span class="ttitle">Calories / day</span>
-              <span class="tmeta">avg ${fmt(avg, 0)}${goal && goal > 0 ? ` · goal ${fmt(goal, 0)}` : ""}</span>
+          <div class="chart">
+            <div class="chead">
+              <span class="ctitle">Calories / day</span>
+              <span class="cmeta">avg ${fmt(avg, 0)}${goal && goal > 0 ? ` · goal ${fmt(goal, 0)}` : ""}</span>
             </div>
             <svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Calories per day over the selected range">
-              <defs>
-                <linearGradient id="calfill" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stop-color="var(--calories)" stop-opacity="0.28"/>
-                  <stop offset="100%" stop-color="var(--calories)" stop-opacity="0.02"/>
-                </linearGradient>
-              </defs>
               <line class="axis" x1="${padL}" y1="${base}" x2="${W - padR}" y2="${base}"/>
               ${goalLine}
-              <path d="${area}" fill="url(#calfill)"/>
+              <path d="${area}" fill="var(--calories)" opacity="0.16"/>
               <path d="${line}" fill="none" stroke="var(--calories)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
               ${dots}
             </svg>
-            <div class="tdates">
-              <span>${md(days[0])}</span>
-              <span>${md(days[n - 1])}</span>
-            </div>
           </div>`;
             }
 
@@ -387,39 +442,46 @@
                 // actually have a log, while the trends widget's rings divide
                 // by every calendar day in the window. Same macros, different
                 // number — labelling both is the fix for issue #70.
-                const heroLabel = multi
-                    ? "Daily average (logged days)"
-                    : "Total";
-                const range = multi
-                    ? `${data.start_date} → ${data.end_date} · ${loggedDaysCaption(data)}`
-                    : days[0].date;
+                const calLabel = multi ? "Daily avg · logged days" : "Total";
+                const meta = multi
+                    ? `${rangeLabel(data.start_date, data.end_date)} · ${loggedDaysCaption(data)}`
+                    : dayLabel(days[0].date, false);
 
-                // Calories hero + protein/carbs/fat row + water bar + the
-                // alcohol and caffeine stat lines (each dropped when its value
-                // is null). Tapping carbs also reveals fiber and sugar.
-                const panel = macroPanel(
-                    data.averages,
-                    data.goals,
-                    undefined,
-                    data.meals,
-                    // Not in the tool's output schema today (it carries
-                    // canonical grams); honoured the moment it is, and "us"
-                    // until then — the server's own default.
-                    { drinkUnit: data.drink_unit },
-                );
                 const trend =
                     multi && days.length >= 2
                         ? trendChart(days, data.goals?.calories ?? null)
                         : "";
 
+                // Calorie ring + figure, the three macro bars, the limits row
+                // (sugar / alcohol / caffeine / fiber, whichever have data) and
+                // the water line. Tapping a tile reveals the meals behind it.
+                const panel = macroPanel(
+                    data.averages,
+                    data.goals,
+                    undefined,
+                    data.meals,
+                    {
+                        // "us" | "uk" for a user who tracks alcohol, null for
+                        // one who does not — and null is also the case in which
+                        // no alcohol figure reaches the strip at all.
+                        drinkUnit: data.drink_unit,
+                        calLabel,
+                        // Only the chart sits between the header line and the
+                        // strip; a single-day summary has nothing there and
+                        // needs no hairline above it.
+                        divided: !!trend,
+                    },
+                );
+
                 root.innerHTML = `
-          <header class="head">
-            <h1>Nutrition Summary</h1>
-            <span class="range">${esc(range)}</span>
-          </header>
-          ${trend}
-          <div class="section-title" style="margin-bottom:9px">${heroLabel} vs goal</div>
-          ${panel}`;
+          <div class="panel">
+            <div class="phead">
+              <div class="ptitle">Nutrition summary</div>
+              <div class="pmeta">${esc(meta)}</div>
+            </div>
+            ${trend}
+            ${panel}
+          </div>`;
             }
 
             // Pull the summary out of whatever wrapper the host used.

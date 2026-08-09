@@ -76,14 +76,24 @@ function hostPage(widget: string, params: URLSearchParams): string {
     const delay = Number(params.get("delay") ?? 0);
     const maxHeight = params.get("maxHeight");
     const failCalls = params.get("fail") === "1";
-    // The alcohol opt-in, as start_meal_import sends it: "us"/"uk" when the
-    // user tracks alcohol, null when they do not. Default null, because that is
-    // the default account state and the state the importer must never leak in.
+    // The alcohol opt-in, as every tool that touches alcohol sends it:
+    // "us"/"uk" when the user tracks alcohol, null when they do not. Default
+    // null, because that is the default account state and the state the
+    // importer must never leak in.
+    //
+    // The macro widgets need it too, and for them null means something the
+    // importer never has to model: their fixtures below DO carry alcohol
+    // figures, so passing null would say "tracking off" and hide the row
+    // outright. They take `macroDrinkUnit`, which is the flag when set and
+    // "us" otherwise — the server's own default for a tracking user with no
+    // saved preference. `?drinkUnit=uk` is therefore the only way to see the
+    // "1.6 UK units" gloss anywhere.
     const drinkUnitParam = params.get("drinkUnit");
     const drinkUnit =
         drinkUnitParam === "us" || drinkUnitParam === "uk"
             ? drinkUnitParam
             : null;
+    const macroDrinkUnit = drinkUnit ?? "us";
 
     // Per-widget canned tool results. One shared fixture does NOT work: each
     // widget's coerce() checks for its own shape, so a payload shaped for
@@ -208,6 +218,7 @@ function hostPage(widget: string, params: URLSearchParams): string {
             // public/widgets/summary-caption.test.ts; edit both dates together
             // if you want to eyeball it here.
             days_in_range: days.length,
+            drink_unit: macroDrinkUnit,
             goals,
             averages: {
                 calories: 2076,
@@ -227,6 +238,7 @@ function hostPage(widget: string, params: URLSearchParams): string {
             date: "2026-07-15",
             meal_count: 4,
             water_entries: 6,
+            drink_unit: macroDrinkUnit,
             goals,
             totals,
             has_goals: true,
@@ -254,11 +266,12 @@ function hostPage(widget: string, params: URLSearchParams): string {
             // alcohol stat line at all (null, not 0) — while the caffeine line
             // stays, which is the point: caffeine has no opt-in flag, only the
             // data-driven null.
+            drink_unit: null,
             goals: { ...goals, alcohol_g: null },
             totals: { ...totals, alcohol_g: null },
             meals: mealsNoAlcohol,
         },
-        trends: { range_days: 7, days, goals },
+        trends: { range_days: 7, days, goals, drink_unit: macroDrinkUnit },
         // start_meal_import's payload. Without it the importer would fall back
         // to its built-in defaults and the alcohol gate would never be
         // exercised here — which is exactly how the leak shipped.
