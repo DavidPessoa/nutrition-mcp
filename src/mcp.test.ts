@@ -2235,6 +2235,64 @@ describe("set_alcohol_tracking", () => {
     });
 });
 
+// The completeness rule is only as good as its reach: it has to be on the two
+// tools that write nutrition, and it must not contradict itself between the
+// tool-level paragraph and the per-field text (a model reading a specific
+// field's description will follow that one).
+describe("the nutrient-completeness rule reaches the write tools", () => {
+    async function toolsOf() {
+        const server = new McpServer(
+            { name: "t", version: "0.0.0" },
+            { capabilities: { tools: {}, resources: {} } },
+        );
+        registerTools(server, "u1", true, null);
+        const [ct, st] = InMemoryTransport.createLinkedPair();
+        const client = new Client({ name: "c", version: "0.0.0" });
+        await Promise.all([server.connect(st), client.connect(ct)]);
+        const { tools } = await client.listTools();
+        await client.close();
+        await server.close();
+        return tools;
+    }
+
+    test("log_meal and update_meal both carry it", async () => {
+        const tools = await toolsOf();
+        for (const name of ["log_meal", "update_meal"]) {
+            const desc = tools.find((t) => t.name === name)?.description ?? "";
+            expect(desc, name).toContain("send them on EVERY meal");
+            expect(desc, name).toContain("a missing value is not a zero");
+        }
+    });
+
+    test("fiber and sugar are described as mandatory, with a fallback", async () => {
+        const tools = await toolsOf();
+        const props = tools.find((t) => t.name === "log_meal")?.inputSchema
+            .properties as Record<string, { description?: string }>;
+        for (const key of ["fiber_g", "sugar_g"]) {
+            const d = props[key]?.description ?? "";
+            expect(d, key).toContain("every meal");
+            // The last-resort anchors: without them "estimate it" is an
+            // instruction with nothing behind it.
+            expect(d, key).toContain("per 100 g");
+            expect(d, key).toContain("do not omit the field");
+        }
+    });
+
+    // The one field that must keep saying the opposite.
+    test("caffeine still says omit rather than zero, on both tools", async () => {
+        const tools = await toolsOf();
+        for (const name of ["log_meal", "update_meal"]) {
+            const props = tools.find((t) => t.name === name)?.inputSchema
+                .properties as Record<string, { description?: string }>;
+            const d = props.caffeine_mg?.description ?? "";
+            expect(d, name).toContain("measured, and it was none");
+            expect(d.toLowerCase(), name).not.toContain(
+                "send it on every meal",
+            );
+        }
+    });
+});
+
 describe("get_alcohol_tracking", () => {
     test("reports enabled with the saved unit", async () => {
         db.profile = {
