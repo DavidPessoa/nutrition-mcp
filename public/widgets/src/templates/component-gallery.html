@@ -25,6 +25,8 @@
 
             /*@include shared/table.css@*/
 
+            /*@include shared/trend.css@*/
+
             /*@include shared/ring.css@*/
 
             /*@include shared/macros.css@*/
@@ -192,6 +194,15 @@
                 ],
             ];
 
+            // A limit cell is a grid item; on its own it needs a one-column
+            // grid to sit in. An empty string is the gate having suppressed
+            // the cell, which is itself a state worth seeing.
+            function limitRow(cell) {
+                return cell
+                    ? `<div class="mgrid lim" style="--lc:1;--lcw:1;margin-bottom:12px">${cell}</div>`
+                    : '<div class="hint" style="opacity:.6;margin-bottom:20px">(nothing)</div>';
+            }
+
             function render() {
                 document.getElementById("root").innerHTML = `
           <div class="gal">
@@ -258,49 +269,72 @@
             </section>
 
             <section class="card">
-              <h3>Segmented control (existing)</h3>
-              <div class="seg" style="margin-bottom:0">
+              <h3>Segmented control — full and pill scale</h3>
+              <div class="seg" style="margin-bottom:12px">
                 <button class="seg-btn active">7d</button>
                 <button class="seg-btn">14d</button>
                 <button class="seg-btn">30d</button>
               </div>
+              <div class="seg seg-sm">
+                <button class="seg-btn active">7</button>
+                <button class="seg-btn">14</button>
+                <button class="seg-btn">30</button>
+              </div>
             </section>
 
             <section class="card">
-              <h3>Macro panel — hero ring, ring row, water bar, alcohol + caffeine stat lines</h3>
-              ${macroPanel(TOTALS, GOALS, undefined, MEALS)}
+              <h3>Panel shell — the header line every widget opens with</h3>
+              <div class="panel">
+                <div class="phead">
+                  <div class="ptitle">Meal logged</div>
+                  <div class="psub">Сир кисломолочний "Сирна Традиція" (President), 300 г · lunch</div>
+                  <div class="pmeta kcal">+195 kcal</div>
+                </div>
+                <div class="chart psec">
+                  <div class="chead"><span class="ctitle">Calories / day</span><span class="cmeta">avg 2,035 · goal 2,200</span></div>
+                  <svg viewBox="0 0 480 54" role="img" aria-label="Calories per day">
+                    <line class="axis" x1="8" y1="48" x2="472" y2="48"></line>
+                    <line class="goalline" x1="8" y1="14" x2="472" y2="14"></line>
+                    <path d="M8 48 L8 16 L240 30 L472 22 L472 48 Z" fill="var(--calories)" opacity="0.16"></path>
+                    <path d="M8 16 L240 30 L472 22" fill="none" stroke="var(--calories)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"></path>
+                  </svg>
+                </div>
+              </div>
             </section>
 
             <section class="card">
-              <h3>Carbs disclosure (shown open — tap carbs above for the real thing)</h3>
-              <div class="macro-detail" style="margin-bottom:0">${macroDetailBody(
+              <h3>Macro strip — calorie ring, macro bars, limits row, water line</h3>
+              <div class="panel">${macroPanel(TOTALS, GOALS, undefined, MEALS)}</div>
+            </section>
+
+            <section class="card">
+              <h3>Carbs breakdown (shown open — tap carbs above for the real thing)</h3>
+              <div class="panel"><div class="macro-detail">${macroDetailBody(
                   CARBS,
                   macroCtxOf(TOTALS, GOALS, undefined, MEALS),
-              )}</div>
+              )}</div></div>
             </section>
 
             <section class="card">
-              <h3>Alcohol stat line — every state</h3>
+              <h3>Alcohol limit cell — every state</h3>
               ${alcoholStates
                   .map(
                       ([caption, vals, goal]) =>
-                          `<div class="hint" style="margin-bottom:6px">${caption}</div>${
-                              macroStat(ALCOHOL, macroCtxOf(vals, goal)) ||
-                              '<div class="hint" style="opacity:.6;margin-bottom:20px">(nothing)</div>'
-                          }`,
+                          `<div class="hint" style="margin-bottom:6px">${caption}</div>${limitRow(
+                              macroLimit(ALCOHOL, macroCtxOf(vals, goal)),
+                          )}`,
                   )
                   .join("")}
             </section>
 
             <section class="card">
-              <h3>Caffeine stat line — every state</h3>
+              <h3>Caffeine limit cell — every state</h3>
               ${caffeineStates
                   .map(
                       ([caption, vals, goal]) =>
-                          `<div class="hint" style="margin-bottom:6px">${caption}</div>${
-                              macroStat(CAFFEINE, macroCtxOf(vals, goal)) ||
-                              '<div class="hint" style="opacity:.6;margin-bottom:20px">(nothing)</div>'
-                          }`,
+                          `<div class="hint" style="margin-bottom:6px">${caption}</div>${limitRow(
+                              macroLimit(CAFFEINE, macroCtxOf(vals, goal)),
+                          )}`,
                   )
                   .join("")}
             </section>
