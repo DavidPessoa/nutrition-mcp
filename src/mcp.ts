@@ -46,6 +46,8 @@ import {
     validateTz,
     shiftLocalDate,
     dateInTz,
+    formatLocalDateTime,
+    weekdayInTz,
     LoggedAtError,
     resolveWriteLoggedAt,
 } from "./tz.js";
@@ -112,6 +114,11 @@ const IMPORT_MEALS_WIDGET_URI = "ui://widget/import-meals.html";
 const SERVER_INSTRUCTIONS = `Nutrition tracking: meals, water, weight, goals, and trends, per-user with timezone support.
 
 All nutrition figures are estimates and this server does not provide medical or dietary advice.
+
+Knowing what time it is — some hosts put the current date and time in your context and some do not, but this server always knows both the clock and the user's timezone. Never ask the user what time it is.
+- Logging something that just happened: omit logged_at entirely. The server stamps the entry with the current time, which is more accurate than any time you could reconstruct.
+- Resolving a relative time ("this morning", "an hour ago", "last Monday") or working out what "today" means: call get_current_time, then pass the resolved local time as logged_at.
+- Only ask the user for a time when the entry is for some other moment they have not told you.
 
 Photo-based meal logging — when the user sends a photo of food, follow these steps in order:
 1. Pick the flow. A packaged product with a visible barcode: transcribe the digits printed under the barcode and call lookup_barcode. A plate, bowl, or prepared meal: continue below.
@@ -1037,6 +1044,27 @@ function formatWeightEntry(entry: WeightEntry, unit: WeightUnit): string {
 const LOGGED_AT_FORMS =
     'Accepts a full ISO 8601 timestamp with an offset or Z ("2026-01-05T08:30:00+02:00"), an offset-less local time ("2026-01-05T08:30"), or a bare date ("2026-01-05", anchored at local noon). Offset-less values are resolved in the user\'s saved timezone, so pass the local time exactly as the user gives it and do NOT convert it to UTC yourself.';
 
+// Appended to `logged_at` on the three "log it now" tools. This used to say
+// "ask the user" — which fired on every single log from any host that keeps the
+// wall clock out of the model's context (Claude Desktop among them), turning
+// "I just ate X" into an interrogation, or worse a guessed time on the wrong
+// day (issue #102). Omitting the field is strictly better than guessing: the
+// server stamps `new Date()` and it genuinely knows the time.
+const LOGGED_AT_OMIT_IF_NOW =
+    " Do NOT ask the user what time it is. If you don't know the current date or time, omit this field entirely and the server stamps the entry with the current time. Only supply it for an entry that happened at some other moment, and call get_current_time if you need the user's local clock to work that moment out.";
+
+// The one rendering of "what time is it for this user", shared by
+// get_current_time and get_timezone so the two can never disagree. The weekday
+// is there to make "last Monday" resolvable without a second round trip, and
+// the UTC instant so a caller can check its own clock against ours. Local time
+// is the repo-standard "YYYY-MM-DD HH:mm:ss" wall clock — deliberately not an
+// offset-less ISO string, which reads as a machine value a caller might echo
+// straight back into logged_at without noticing it has gone stale.
+function formatClockLine(tz: string): string {
+    const now = new Date();
+    return `Local time now: ${weekdayInTz(now, tz)} ${formatLocalDateTime(now, tz)} (${tz}). UTC now: ${now.toISOString()}.`;
+}
+
 // Resolve a caller-supplied `logged_at` to an absolute instant before it
 // reaches the timestamptz column. Without this an offset-less string is read in
 // the database session's zone (UTC), so a Kyiv user's 21:00 lands at midnight
@@ -1287,7 +1315,7 @@ export function registerTools(
                     .describe(
                         "When this actually happened (defaults to now). " +
                             LOGGED_AT_FORMS +
-                            " If you don't know the current date or time, ask the user before calling this tool.",
+                            LOGGED_AT_OMIT_IF_NOW,
                     ),
                 notes: z.string().optional().describe("Additional notes"),
                 idempotency_key: z
@@ -2826,7 +2854,7 @@ export function registerTools(
                     .describe(
                         "When this actually happened (defaults to now). " +
                             LOGGED_AT_FORMS +
-                            " If you don't know the current date or time, ask the user before calling this tool.",
+                            LOGGED_AT_OMIT_IF_NOW,
                     ),
                 notes: z
                     .string()
@@ -3040,7 +3068,7 @@ export function registerTools(
                     .describe(
                         "When this actually happened (defaults to now). " +
                             LOGGED_AT_FORMS +
-                            " If you don't know the current date or time, ask the user before calling this tool.",
+                            LOGGED_AT_OMIT_IF_NOW,
                     ),
                 notes: z
                     .string()
@@ -4111,7 +4139,7 @@ export function registerTools(
         {
             title: "Get Timezone",
             description:
-                "Get the user's configured IANA timezone. Returns UTC if no profile has been set.",
+                "Get the user's configured IANA timezone, along with their current local date and time. Returns UTC if no profile has been set.",
             annotations: {
                 readOnlyHint: true,
                 destructiveHint: false,
@@ -4129,7 +4157,7 @@ export function registerTools(
                             content: [
                                 {
                                     type: "text",
-                                    text: "No timezone set yet (defaulting to UTC). Call set_timezone to configure one so 'today' matches the user's local calendar day.",
+                                    text: `No timezone set yet (defaulting to UTC). ${formatClockLine("UTC")} Call set_timezone to configure one so 'today' matches the user's local calendar day.`,
                                 },
                             ],
                         };
@@ -4138,7 +4166,49 @@ export function registerTools(
                         content: [
                             {
                                 type: "text",
-                                text: `Timezone: ${profile.timezone}. Local today is ${todayInTz(profile.timezone)}.`,
+                                text: `Timezone: ${profile.timezone}. ${formatClockLine(profile.timezone)}`,
+                            },
+                        ],
+                    };
+                },
+                { userId },
+            );
+        },
+    );
+
+    // The clock is the server's to give, not the user's: a host that keeps the
+    // wall time out of the model's context otherwise leaves it with no way to
+    // resolve "this morning" except asking or guessing (issue #102).
+    // get_timezone answers this too, but only a model that already suspects a
+    // timezone problem thinks to call it — the tool NAME is the discoverable
+    // part, which is why this exists as well as the fuller line above.
+    server.registerTool(
+        "get_current_time",
+        {
+            title: "Get Current Time",
+            description:
+                "Get the current date and time in the user's timezone, plus the UTC instant. Call this whenever you need to know what time it is for this user — to resolve 'today', 'this morning', 'an hour ago' or 'last Monday' into a real timestamp — instead of asking the user or guessing. Not needed to log something that is happening now: omit logged_at and the server stamps the current time itself.",
+            annotations: {
+                readOnlyHint: true,
+                destructiveHint: false,
+                idempotentHint: false,
+                openWorldHint: false,
+            },
+        },
+        async () => {
+            return withAnalytics(
+                "get_current_time",
+                async () => {
+                    const profile = await getProfile(userId);
+                    const tz = profile?.timezone ?? "UTC";
+                    const unset = profile
+                        ? ""
+                        : " No timezone is set for this account, so this is UTC and may not be the user's actual local time — offer set_timezone.";
+                    return {
+                        content: [
+                            {
+                                type: "text",
+                                text: `${formatClockLine(tz)}${unset}`,
                             },
                         ],
                     };

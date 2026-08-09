@@ -3,6 +3,7 @@ import {
     validateTz,
     dateInTz,
     formatLocalDateTime,
+    weekdayInTz,
     hourInTz,
     dowInTz,
     zonedDayStartUtc,
@@ -30,6 +31,30 @@ test("formatLocalDateTime renders wall-clock time, normalizing hour 24 to 00", (
     expect(
         formatLocalDateTime("2024-03-01T08:00:00Z", "America/Los_Angeles"),
     ).toBe("2024-03-01 00:00:00");
+});
+
+// The weekday the clock line prints is what lets a model resolve "last Monday"
+// without asking (issue #102), so it has to be the USER's weekday, not the
+// server's. One instant is two different weekdays depending on the zone.
+test("weekdayInTz names the local weekday, not the UTC one", () => {
+    // 23:30Z Friday is already Saturday in Tokyo (+9) and still Friday in LA.
+    const nearMidnight = "2024-03-01T23:30:00Z";
+    expect(weekdayInTz(nearMidnight, "UTC")).toBe("Friday");
+    expect(weekdayInTz(nearMidnight, "Asia/Tokyo")).toBe("Saturday");
+    expect(weekdayInTz(nearMidnight, "America/Los_Angeles")).toBe("Friday");
+
+    // Across the dateline the split is 25 hours wide, so it holds at midday
+    // UTC too: Kiritimati (+14) and Niue (-11) never share a weekday.
+    const midday = "2024-03-01T12:00:00Z";
+    expect(weekdayInTz(midday, "Pacific/Kiritimati")).toBe("Saturday");
+    expect(weekdayInTz(midday, "Pacific/Niue")).toBe("Friday");
+
+    // The name is the long English one, and it agrees with dowInTz's numbering.
+    expect(weekdayInTz(new Date(midday), "Pacific/Kiritimati")).toBe(
+        "Saturday",
+    );
+    expect(dowInTz(midday, "Pacific/Kiritimati")).toBe(6);
+    expect(dowInTz(midday, "Pacific/Niue")).toBe(5);
 });
 
 test("hourInTz and dowInTz reflect local time", () => {
