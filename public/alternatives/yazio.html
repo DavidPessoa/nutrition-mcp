@@ -103,7 +103,7 @@
                         "name": "Is Nutrition MCP a good Yazio alternative?",
                         "acceptedAnswer": {
                             "@type": "Answer",
-                            "text": "If you want to track calories, macros — fiber and total sugar included — water, and weight without opening a separate app or searching a food database, yes. Instead of tapping through a database, you describe what you ate in plain language, send a photo, or scan a barcode, and your AI logs it — completely free and open source."
+                            "text": "If you want to track calories, macros — fiber, total sugar, and caffeine included — water, and weight without opening a separate app or searching a food database, yes. Instead of tapping through a database, you describe what you ate in plain language, send a photo, or scan a barcode, and your AI logs it — completely free and open source."
                         }
                     },
                     {
@@ -111,7 +111,7 @@
                         "name": "Can I import my Yazio data?",
                         "acceptedAnswer": {
                             "@type": "Answer",
-                            "text": "Yes, using manual column mapping. Ask to import and an importer opens in the chat: you pick your Yazio CSV export, it's parsed in your browser rather than read by the AI, and you point its columns at date, food, meal, calories, and macros — fiber and total sugar among them — yourself. Yazio isn't one of the four exports recognised by column name, so that mapping is a one-time manual step, though headings the mapper already knows (in German, and for fiber and sugar in Spanish, French, Italian and Dutch too) fill themselves in. Semicolon-delimited European files with comma decimals, DD/MM/YYYY dates, and kilojoules are all handled, and re-importing the same file never creates duplicates. In clients without in-chat panels you can paste your export instead."
+                            "text": "Yes, using manual column mapping. Ask to import and an importer opens in the chat: you pick your Yazio CSV export, it's parsed in your browser rather than read by the AI, and you point its columns at date, food, meal, calories, and macros — fiber, total sugar and caffeine among them — yourself. Yazio isn't one of the four exports recognised by column name, so that mapping is a one-time manual step, though headings the mapper already knows (in German, and for fiber, sugar and caffeine in Spanish, French, Italian and Dutch too) fill themselves in. Semicolon-delimited European files with comma decimals, DD/MM/YYYY dates, and kilojoules are all handled, and re-importing the same file never creates duplicates. In clients without in-chat panels you can paste your export instead."
                         }
                     },
                     {
@@ -284,8 +284,8 @@
                             <p>
                                 Say &ldquo;oatmeal with banana and peanut
                                 butter&rdquo; — your AI estimates calories and
-                                macros, fiber and total sugar included, and logs
-                                it. No database search.
+                                macros, fiber, total sugar and caffeine
+                                included, and logs it. No database search.
                             </p>
                         </article>
                         <article class="card feature">
@@ -307,11 +307,11 @@
                             <h3>Weight &amp; goals</h3>
                             <p>
                                 Log body weight in kg or lb, set calorie, macro,
-                                fiber, sugar, and water goals — fiber a target
-                                to reach, sugar a limit to stay under — and
-                                track trends toward a goal weight. Alcohol
-                                tracking is there too, opt-in and off unless you
-                                turn it on.
+                                fiber, sugar, caffeine, and water goals — fiber
+                                a target to reach, sugar and caffeine limits to
+                                stay under — and track trends toward a goal
+                                weight. Alcohol tracking is there too, opt-in
+                                and off unless you turn it on.
                             </p>
                         </article>
                         <article class="card feature">
@@ -394,7 +394,8 @@
                                 <li>
                                     <i class="fa-solid fa-circle-check"></i>
                                     Describe meals in plain language; calories,
-                                    macros, fiber &amp; sugar estimated for you
+                                    macros, fiber, sugar &amp; caffeine
+                                    estimated for you
                                 </li>
                                 <li>
                                     <i class="fa-solid fa-circle-check"></i>
@@ -479,13 +480,13 @@
                             panel opens in the chat: you pick your CSV export,
                             it's parsed in your browser, and you point its
                             columns at date, food, meal, calories, protein,
-                            carbs, fat, fiber, and total sugar yourself. Four
-                            apps' exports — MyFitnessPal, Cronometer, Lose It!,
-                            and MacroFactor — are recognised by their column
-                            names; Yazio isn't one of them, so expect to set
-                            that mapping once. Everything after it is the same:
-                            a preview of what will be added, then your
-                            confirmation.
+                            carbs, fat, fiber, total sugar, and caffeine
+                            yourself. Four apps' exports — MyFitnessPal,
+                            Cronometer, Lose It!, and MacroFactor — are
+                            recognised by their column names; Yazio isn't one of
+                            them, so expect to set that mapping once. Everything
+                            after it is the same: a preview of what will be
+                            added, then your confirmation.
                         </p>
                         <p>
                             The European quirks that defeat most importers are
@@ -496,16 +497,16 @@
                             decimal point or every macro being scaled by a
                             thousand. The headings the mapper knows aren't
                             English-only either: a German export's Datum,
-                            Kalorien, Eiweiss, Kohlenhydrate, Ballaststoffe and
-                            Zucker are all recognised, and fiber and sugar are
-                            matched in Spanish, French, Italian and Dutch as
-                            well — fibra, sucres, zuccheri, suikers — so a
-                            localised file often arrives part-mapped, leaving
-                            you fewer columns to set by hand. Quoted fields,
-                            line breaks inside a cell, blank-ish values, and
-                            stray totals rows are handled too, and the AI never
-                            reads the file, so no number can be mistyped in
-                            transit.
+                            Kalorien, Eiweiss, Kohlenhydrate, Ballaststoffe,
+                            Zucker and Koffein are all recognised, and fiber,
+                            sugar and caffeine are matched in Spanish, French,
+                            Italian and Dutch as well — fibra, sucres, zuccheri,
+                            suikers, cafeína, caffeina — so a localised file
+                            often arrives part-mapped, leaving you fewer columns
+                            to set by hand. Quoted fields, line breaks inside a
+                            cell, blank-ish values, and stray totals rows are
+                            handled too, and the AI never reads the file, so no
+                            number can be mistyped in transit.
                         </p>
                         <p>
                             Dates and energy are confirmed rather than guessed.
@@ -642,14 +643,14 @@
                                 Is Nutrition MCP a good Yazio alternative?
                             </summary>
                             <p>
-                                If you want to track calories, macros — fiber
-                                and total sugar included — water, and weight
-                                without opening a separate app or searching a
-                                food database, yes. Instead of tapping through a
-                                database, you describe what you ate in plain
-                                language, send a photo, or scan a barcode, and
-                                your AI logs it — completely free and open
-                                source.
+                                If you want to track calories, macros — fiber,
+                                total sugar, and caffeine included — water, and
+                                weight without opening a separate app or
+                                searching a food database, yes. Instead of
+                                tapping through a database, you describe what
+                                you ate in plain language, send a photo, or scan
+                                a barcode, and your AI logs it — completely free
+                                and open source.
                             </p>
                         </details>
                         <details>
@@ -660,17 +661,18 @@
                                 Yazio CSV export, it's parsed in your browser
                                 rather than read by the AI, and you point its
                                 columns at date, food, meal, calories, and
-                                macros — fiber and total sugar among them —
-                                yourself. Yazio isn't one of the four exports
-                                recognised by column name, so that mapping is a
-                                one-time manual step, though headings the mapper
-                                already knows (in German, and for fiber and
-                                sugar in Spanish, French, Italian and Dutch too)
-                                fill themselves in. Semicolon-delimited European
-                                files with comma decimals, DD/MM/YYYY dates, and
-                                kilojoules are all handled, and re-importing the
-                                same file never creates duplicates. In clients
-                                without in-chat panels you can paste your export
+                                macros — fiber, total sugar and caffeine among
+                                them — yourself. Yazio isn't one of the four
+                                exports recognised by column name, so that
+                                mapping is a one-time manual step, though
+                                headings the mapper already knows (in German,
+                                and for fiber, sugar and caffeine in Spanish,
+                                French, Italian and Dutch too) fill themselves
+                                in. Semicolon-delimited European files with
+                                comma decimals, DD/MM/YYYY dates, and kilojoules
+                                are all handled, and re-importing the same file
+                                never creates duplicates. In clients without
+                                in-chat panels you can paste your export
                                 instead.
                             </p>
                         </details>
