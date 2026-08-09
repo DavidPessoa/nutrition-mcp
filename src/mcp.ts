@@ -80,6 +80,7 @@ import {
     MAX_CALORIES,
     MAX_MACRO_G,
     MAX_ALCOHOL_G,
+    MAX_CAFFEINE_MG,
     type BulkImportArgs,
 } from "./import.js";
 import { normalizeBarcode, lookupBarcode, formatFoodResult } from "./foods.js";
@@ -168,10 +169,14 @@ type AlcoholDisplay = DrinkUnit | null;
 // the same figure is accepted whichever way a meal arrives. They were briefly
 // duplicated with a test that grepped the other file to catch drift; sharing
 // one declaration removes the drift instead of detecting it.
-export { MAX_CALORIES, MAX_MACRO_G, MAX_ALCOHOL_G };
+export { MAX_CALORIES, MAX_MACRO_G, MAX_ALCOHOL_G, MAX_CAFFEINE_MG };
 // nutrition_goals stores every gram target as numeric(6,2), so anything from
 // 10000 up is a Postgres "numeric field overflow" rather than a saved goal.
 export const MAX_GOAL_G = 9_999.99;
+// daily_caffeine_mg is the one goal column that is numeric(7,2) — milligram
+// figures run three orders larger than the gram targets, so it gets its own
+// ceiling for the same overflow reason.
+export const MAX_GOAL_MG = 99_999.99;
 
 interface DailyTotals {
     calories: number;
@@ -181,6 +186,11 @@ interface DailyTotals {
     fiber_g: number;
     sugar_g: number;
     alcohol_g: number;
+    // Milligrams, unlike every gram-valued field above it — the unit rides in
+    // the name at every layer because caffeine is the one nutrient here whose
+    // unit differs from its siblings. It carries no energy, so it never enters
+    // a kcal derivation.
+    caffeine_mg: number;
     water_ml: number;
 }
 
@@ -193,6 +203,7 @@ function emptyTotals(): DailyTotals {
         fiber_g: 0,
         sugar_g: 0,
         alcohol_g: 0,
+        caffeine_mg: 0,
         water_ml: 0,
     };
 }
@@ -212,21 +223,28 @@ export function sumMeals(meals: Meal[]): DailyTotals {
         totals.fiber_g += m.fiber_g ?? 0;
         totals.sugar_g += m.sugar_g ?? 0;
         totals.alcohol_g += m.alcohol_g ?? 0;
+        totals.caffeine_mg += m.caffeine_mg ?? 0;
     }
     return totals;
 }
 
-// Which of the three post-launch nutrients a day's meals actually carry. Every
-// meal logged before this feature existed has NULL fiber/sugar/alcohol, and so
-// does every row imported from an export whose file had no such column; `?? 0`
-// cannot tell that apart from a genuine zero. A thin adapter over dayCarries in
-// insights.ts — the rule itself lives there, once, so trends and the summary
-// cannot drift apart (measured drift: 30 g/day of fiber shown as "30d avg: 5g"
-// against a "Target: 30g").
+// Which of the post-launch nutrients a day's meals actually carry. Every meal
+// logged before each of them shipped has NULL fiber/sugar/alcohol/caffeine, and
+// so does every row imported from an export whose file had no such column;
+// `?? 0` cannot tell that apart from a genuine zero. A thin adapter over
+// dayCarries in insights.ts — the rule itself lives there, once, so trends and
+// the summary cannot drift apart (measured drift: 30 g/day of fiber shown as
+// "30d avg: 5g" against a "Target: 30g").
+//
+// Caffeine is the sharpest case of the four: most meals legitimately never
+// carry a value, so a day that recorded none is the norm rather than a relic of
+// pre-feature history, and it is this flag — not any profile setting — that
+// keeps a fabricated "0 mg" off the screen.
 export interface NutrientPresence {
     fiber_g: boolean;
     sugar_g: boolean;
     alcohol_g: boolean;
+    caffeine_mg: boolean;
 }
 
 export function nutrientPresence(meals: Meal[]): NutrientPresence {
@@ -234,6 +252,7 @@ export function nutrientPresence(meals: Meal[]): NutrientPresence {
         fiber_g: dayCarries(meals, "fiber_g"),
         sugar_g: dayCarries(meals, "sugar_g"),
         alcohol_g: dayCarries(meals, "alcohol_g"),
+        caffeine_mg: dayCarries(meals, "caffeine_mg"),
     };
 }
 
@@ -242,10 +261,10 @@ export function nutrientPresence(meals: Meal[]): NutrientPresence {
 // THE RULE, and it is insights.ts's rule rather than a second copy of it:
 // calories, protein, carbs, fat and water divide by EVERY logged day, exactly
 // as they always have (users have history built on those figures), while fiber,
-// sugar and alcohol go through coveredDailyAverage — a day carrying no value
-// for a nutrient is excluded from both its numerator and its denominator. A
-// nutrient nobody recorded reports 0 over 0 days, which callers must render as
-// "not recorded" rather than as a genuine zero.
+// sugar, alcohol and caffeine go through coveredDailyAverage — a day carrying
+// no value for a nutrient is excluded from both its numerator and its
+// denominator. A nutrient nobody recorded reports 0 over 0 days, which callers
+// must render as "not recorded" rather than as a genuine zero.
 //
 // LOGGED days, deliberately — and that is where this parts company with
 // get_trends, which divides the same nutrients by every CALENDAR day in the
@@ -260,7 +279,12 @@ export function rangeAverages(
     perDay: Array<{ meals: Meal[]; totals: DailyTotals }>,
 ): {
     averages: DailyTotals;
-    recordedDays: { fiber_g: number; sugar_g: number; alcohol_g: number };
+    recordedDays: {
+        fiber_g: number;
+        sugar_g: number;
+        alcohol_g: number;
+        caffeine_mg: number;
+    };
 } {
     const sum = emptyTotals();
     for (const { totals } of perDay) {
@@ -274,6 +298,7 @@ export function rangeAverages(
     const fiber = coveredDailyAverage(mealsByDay, "fiber_g");
     const sugar = coveredDailyAverage(mealsByDay, "sugar_g");
     const alcohol = coveredDailyAverage(mealsByDay, "alcohol_g");
+    const caffeine = coveredDailyAverage(mealsByDay, "caffeine_mg");
     const n = perDay.length || 1;
     return {
         averages: {
@@ -284,12 +309,14 @@ export function rangeAverages(
             fiber_g: fiber.avg ?? 0,
             sugar_g: sugar.avg ?? 0,
             alcohol_g: alcohol.avg ?? 0,
+            caffeine_mg: caffeine.avg ?? 0,
             water_ml: Math.round(sum.water_ml / n),
         },
         recordedDays: {
             fiber_g: fiber.days,
             sugar_g: sugar.days,
             alcohol_g: alcohol.days,
+            caffeine_mg: caffeine.days,
         },
     };
 }
@@ -310,10 +337,14 @@ export function loggedDayAverageNote(
 
 // insights.ts is deliberately free of Supabase, so it cannot know about the
 // per-user opt-in: it renders an alcohol line whenever the data contains any
-// (see hasAlcohol there). Zeroing the series is how the flag reaches it — both
-// computeTrends and computeWeeklyDigest suppress alcohol on an all-zero series,
-// and neither derives anything else from it. Cheap: the buckets are per-request
-// and at most 365 shallow copies.
+// (see hasAnyPositive there). Zeroing the series is how the flag reaches it —
+// both computeTrends and computeWeeklyDigest suppress alcohol on an all-zero
+// series, and neither derives anything else from it. Cheap: the buckets are
+// per-request and at most 365 shallow copies.
+//
+// Alcohol only. The spread copies caffeine_mg through untouched, which is the
+// intent: caffeine has no opt-in flag to reach insights.ts with, and there
+// hasAnyPositive alone decides whether its line is drawn.
 export function gateAlcohol(
     buckets: DailyBucket[],
     alcohol: AlcoholDisplay,
@@ -346,6 +377,10 @@ export const MEAL_BREAKDOWN_ITEM = z.object({
     // payload says "this user does not track alcohol", which a 0 could not
     // distinguish from a genuinely alcohol-free day.
     alcohol_g: z.number().nullable(),
+    // Nullable for the neighbouring reason with no flag behind it: this meal
+    // simply has no caffeine figure. Most meals never will, so a 0 here would
+    // claim the user measured a caffeine-free lunch. Milligrams.
+    caffeine_mg: z.number().nullable(),
 });
 
 export function mealBreakdown(
@@ -364,6 +399,8 @@ export function mealBreakdown(
         fiber_g: Math.round((m.fiber_g ?? 0) * 10) / 10,
         sugar_g: Math.round((m.sugar_g ?? 0) * 10) / 10,
         alcohol_g: alcohol ? Math.round((m.alcohol_g ?? 0) * 10) / 10 : null,
+        caffeine_mg:
+            m.caffeine_mg == null ? null : Math.round(m.caffeine_mg * 10) / 10,
     }));
 }
 
@@ -379,6 +416,9 @@ export const GOALS_ITEM = z.object({
     fiber_g: z.number().nullable(),
     sugar_g: z.number().nullable(),
     alcohol_g: z.number().nullable(),
+    // The stored daily_caffeine_mg, in milligrams. A ceiling like sugar and
+    // alcohol, and 0 is a real one ("none at all") rather than "unset".
+    caffeine_mg: z.number().nullable(),
     water_ml: z.number().nullable(),
 });
 
@@ -390,6 +430,13 @@ export const TOTALS_ITEM = z.object({
     fiber_g: z.number(),
     sugar_g: z.number(),
     alcohol_g: z.number().nullable(),
+    // Nullable where fiber_g and sugar_g are not, and for a reason no other
+    // total has: those two are shown as 0 on a day that never recorded them
+    // (defensible — the day did happen), but a caffeine 0 against a limit is
+    // the fabricated "0 mg vs goal" this feature is not allowed to invent. Null
+    // means nothing on this day recorded caffeine; the widget then draws no
+    // stat line at all. See totalsPayloadOf's caffeineRecorded argument.
+    caffeine_mg: z.number().nullable(),
     water_ml: z.number(),
 });
 
@@ -430,6 +477,9 @@ const MEAL_PROGRESS_OUTPUT_SCHEMA = {
         fiber_g: z.number().nullable(),
         sugar_g: z.number().nullable(),
         alcohol_g: z.number().nullable(),
+        // Milligrams, and null whenever this meal carried no caffeine figure —
+        // which is most meals, and is not the same as a measured zero.
+        caffeine_mg: z.number().nullable(),
     }),
     has_goals: z.boolean(),
     goals: GOALS_ITEM.nullable(),
@@ -455,11 +505,26 @@ export function goalsPayloadOf(
         fiber_g: goals.daily_fiber_g ?? null,
         sugar_g: goals.daily_sugar_g ?? null,
         alcohol_g: alcohol ? (goals.daily_alcohol_g ?? null) : null,
+        // No gate: caffeine has no alcohol_tracking_enabled equivalent, so the
+        // stored limit is always handed over and the widget decides on the data
+        // (a stat line appears only once some value is recorded).
+        caffeine_mg: goals.daily_caffeine_mg ?? null,
         water_ml: goals.daily_water_ml ?? null,
     };
 }
 
-export function totalsPayloadOf(totals: DailyTotals, alcohol: AlcoholDisplay) {
+/** `caffeineRecorded` is dayCarries("caffeine_mg") for whatever meals produced
+ *  these totals — or, for an average, whether ANY day in the window recorded
+ *  caffeine. False emits null instead of the summed 0, because for caffeine
+ *  those two mean genuinely different things and only one of them is true. It
+ *  is a required argument rather than a defaulted one so that every call site
+ *  has to answer the question; a caller that forgets it gets null, which is the
+ *  safe answer (a hidden stat line) rather than an invented zero. */
+export function totalsPayloadOf(
+    totals: DailyTotals,
+    alcohol: AlcoholDisplay,
+    caffeineRecorded: boolean,
+) {
     return {
         calories: Math.round(totals.calories),
         protein_g: Math.round(totals.protein_g * 10) / 10,
@@ -468,6 +533,9 @@ export function totalsPayloadOf(totals: DailyTotals, alcohol: AlcoholDisplay) {
         fiber_g: Math.round(totals.fiber_g * 10) / 10,
         sugar_g: Math.round(totals.sugar_g * 10) / 10,
         alcohol_g: alcohol ? Math.round(totals.alcohol_g * 10) / 10 : null,
+        caffeine_mg: caffeineRecorded
+            ? Math.round(totals.caffeine_mg * 10) / 10
+            : null,
         water_ml: totals.water_ml,
     };
 }
@@ -480,7 +548,9 @@ export function totalsPayloadOf(totals: DailyTotals, alcohol: AlcoholDisplay) {
 // of the covered ones, drifting from the text output's `coveredSeries` rule
 // (src/insights.ts). Null here is that missing-vs-zero signal, mirroring
 // dayCarries/coveredDailyAverage; alcohol_g can already be null for tracking
-// being off, which takes precedence over the per-day coverage null.
+// being off, which takes precedence over the per-day coverage null. caffeine_mg
+// needs no override below — TOTALS_ITEM already declares it nullable, so
+// totalsPayloadOf applies the same rule for it one level down.
 export function trendsDayPayloadOf(
     bucket: DailyBucket,
     alcohol: AlcoholDisplay,
@@ -494,9 +564,11 @@ export function trendsDayPayloadOf(
             fiber_g: bucket.fiber_g,
             sugar_g: bucket.sugar_g,
             alcohol_g: bucket.alcohol_g,
+            caffeine_mg: bucket.caffeine_mg,
             water_ml: bucket.waterMl,
         },
         alcohol,
+        dayCarries(bucket.meals, "caffeine_mg"),
     );
     return {
         date: bucket.date,
@@ -564,6 +636,12 @@ const IMPORT_ROW_SCHEMA = z.object({
         .optional()
         .describe(
             "Grams of pure ethanol (NOT the volume of the drink and NOT its ABV). If the export gives a drink volume and strength instead, compute it: grams = millilitres x (ABV% / 100) x 0.789. Omit when the source has no alcohol column.",
+        ),
+    caffeine_mg: z.coerce
+        .number()
+        .optional()
+        .describe(
+            "Caffeine in MILLIGRAMS, not grams. Every export, label and guideline states caffeine in mg (a brewed coffee is about 95 mg, i.e. 0.095 g), so map an mg column straight across — and multiply by 1000 first if the source header says grams, or the whole history imports a thousand times too small. Omit when the source has no caffeine column.",
         ),
     notes: z
         .string()
@@ -675,9 +753,10 @@ async function buildMealProgress(
     ]);
     const totals = sumMeals(meals);
     totals.water_ml = sumWater(waterEntries);
+    const present = nutrientPresence(meals);
 
     const progressSection = goals
-        ? `\n\nDaily progress (${mealDate}):\n${formatProgress(totals, goals, alcohol, nutrientPresence(meals))}`
+        ? `\n\nDaily progress (${mealDate}):\n${formatProgress(totals, goals, alcohol, present)}`
         : "\n\nNo nutrition goals set — use the set_nutrition_goals tool to track progress against daily targets.";
 
     const structuredContent = {
@@ -694,10 +773,13 @@ async function buildMealProgress(
             fiber_g: meal.fiber_g ?? null,
             sugar_g: meal.sugar_g ?? null,
             alcohol_g: alcohol ? (meal.alcohol_g ?? null) : null,
+            // Ungated, unlike alcohol_g directly above it: what was stored is
+            // what is shown.
+            caffeine_mg: meal.caffeine_mg ?? null,
         },
         has_goals: goals != null,
         goals: goalsPayloadOf(goals, alcohol),
-        totals: totalsPayloadOf(totals, alcohol),
+        totals: totalsPayloadOf(totals, alcohol, present.caffeine_mg),
         // Single day → label rows by meal type in the widget, not by date.
         meals: mealBreakdown(meals, null, alcohol),
     };
@@ -707,9 +789,9 @@ async function buildMealProgress(
 
 // Which way a target points. A floor is something to reach (calories, protein,
 // carbs, fat, water, fiber); a ceiling is something to stay under (sugar,
-// alcohol). The distinction is not cosmetic: with the floor wording a 40 g sugar
-// target and 0 g eaten reads "40g to go", which congratulates the user for
-// having sugar left to consume.
+// alcohol, caffeine). The distinction is not cosmetic: with the floor wording a
+// 40 g sugar target and 0 g eaten reads "40g to go", which congratulates the
+// user for having sugar left to consume.
 type GoalDirection = "floor" | "ceiling";
 
 // Whether a stored target is a target at all. Zero splits by direction: a
@@ -773,11 +855,12 @@ export function formatGoalLine(
     return `${label}: ${shown} / ${target}${unit} (${pct}%, ${deltaStr})`;
 }
 
-// A nutrient nobody recorded is not a zero. Fiber and sugar arrived long after
-// most of the history in this database, so "0g" on a day whose meals predate
-// them is a fabricated figure — say nothing instead (the same instinct as
-// hasAlcohol() in insights.ts). The exception is a day with an active target,
-// where a vanished line would read as tracking having broken.
+// A nutrient nobody recorded is not a zero. Fiber, sugar and caffeine each
+// arrived long after most of the history in this database, so "0g" on a day
+// whose meals predate them is a fabricated figure — say nothing instead (the
+// same instinct as hasAnyPositive() in insights.ts). The exception is a day
+// with an active target, where a vanished line would read as tracking having
+// broken; "not recorded" still refuses to invent the number.
 function recordedGoalLine(
     label: string,
     unit: string,
@@ -797,13 +880,24 @@ const ALL_RECORDED: NutrientPresence = {
     fiber_g: true,
     sugar_g: true,
     alcohol_g: true,
+    caffeine_mg: true,
 };
 
-// `present` says which of the three post-launch nutrients these meals actually
-// carry, so a pre-feature day prints nothing for fiber rather than a made-up
-// "0g". Only fiber and sugar consult it: alcohol has its own explicit opt-in,
-// and for a user who turned it ON a zero is the meaningful reading — that is
-// exactly the "0 g against a 0 g limit" a recovery user set the limit to see.
+// Caffeine is the one figure here rendered without decimals. A tenth of a
+// milligram is below the precision of any label, database or export, and
+// "95.5 mg" claims a measurement nobody made; the structured payloads keep the
+// sibling `* 10 / 10` rounding, but the model-facing text is whole milligrams.
+function formatMg(mg: number): string {
+    return `${Math.round(mg)} mg`;
+}
+
+// `present` says which of the post-launch nutrients these meals actually carry,
+// so a pre-feature day prints nothing for fiber rather than a made-up "0g".
+// Fiber, sugar and caffeine consult it; alcohol does not, because it has its
+// own explicit opt-in, and for a user who turned it ON a zero is the meaningful
+// reading — that is exactly the "0 g against a 0 g limit" a recovery user set
+// the limit to see. Caffeine leans on `present` hardest: it is the only gate it
+// has, since there is deliberately no caffeine_tracking_enabled.
 export function formatProgress(
     totals: DailyTotals,
     goals: NutritionGoals | null,
@@ -862,6 +956,19 @@ export function formatProgress(
             ),
         );
     }
+    // No opt-in to consult — `present.caffeine_mg` is the whole gate. Rounded to
+    // whole milligrams before the line is built (see formatMg) so both the
+    // with-target and the standalone wording stay decimal-free.
+    lines.push(
+        recordedGoalLine(
+            "Caffeine",
+            " mg",
+            Math.round(totals.caffeine_mg),
+            goals?.daily_caffeine_mg ?? null,
+            present.caffeine_mg,
+            "ceiling",
+        ),
+    );
     lines.push(
         formatGoalLine(
             "Water",
@@ -905,6 +1012,13 @@ export function formatGoals(
             `- Alcohol (max): ${ceiling(goals.daily_alcohol_g, (n) => formatAlcohol(n, alcohol))}`,
         );
     }
+    // Always listed, unlike alcohol: the goal echo is where the model learns a
+    // caffeine limit can be set at all, and there is no opt-in to hide it
+    // behind. Data-driven suppression applies to recorded VALUES, not to the
+    // list of targets the user could set.
+    parts.push(
+        `- Caffeine (max): ${ceiling(goals.daily_caffeine_mg, formatMg)}`,
+    );
     parts.push(`- Water: ${floor(goals.daily_water_ml, (n) => `${n} ml`)}`);
     parts.push(
         `- Target weight: ${goals.target_weight_g != null ? formatWeight(goals.target_weight_g, weightUnit) : "not set"}`,
@@ -1013,6 +1127,12 @@ export function formatMeal(meal: Meal, alcohol: AlcoholDisplay = null): string {
         alcohol && meal.alcohol_g != null
             ? `Alcohol: ${formatAlcohol(meal.alcohol_g, alcohol)}`
             : null,
+        // Not opt-in: a stored value is always echoed. The `!= null` is the
+        // only suppression, and it is per-meal — a sandwich shows no caffeine
+        // line, a measured 0 mg energy-free drink shows "Caffeine: 0 mg".
+        meal.caffeine_mg != null
+            ? `Caffeine: ${formatMg(meal.caffeine_mg)}`
+            : null,
         meal.notes ? `Notes: ${meal.notes}` : null,
     ];
     return parts.filter(Boolean).join("\n");
@@ -1091,7 +1211,7 @@ export function registerTools(
         {
             title: "Log Meal",
             description:
-                "Log a meal entry with nutritional information. If the user doesn't specify the quantity or portion size, ask how much they ate before estimating calories and macros. When the user gives a barcode — typed, or read from a photo of the package (transcribe the digits printed under the barcode) — call lookup_barcode first to get the product's label data, then scale it to the amount eaten. Fall back to web search or estimation only when no product is found. Use web search for branded products when no barcode is available. When logging from a photo of a plated or prepared meal (no package/barcode): first identify each dish, then establish whether it is a restaurant/takeout meal or homemade before anything else. If it is from a restaurant, ask which restaurant and where, then search the web for its menu — chains publish per-item nutrition worth using directly, independent places usually publish ingredient lists that reveal the butter, cream, and oil the photo hides; if you cannot find the menu or cannot tell which dish it is, say so and put your assumption to the user as a question rather than presenting a guess as menu data. Either way, estimate portions in household measures the user can eyeball (a glass of, a handful of, a tablespoon of — NOT grams; for restaurant servings ask how much of it they actually ate), call search_meals to see how similar meals were logged before and to surface ingredients that may be invisible in the photo, then interview the user across multiple turns — one question per message, covering which variation each dish is, how much they ate, and photo-invisible ingredients (oil, sugar, sauce, what a drink was made with) — until nothing is left open. Do NOT call this tool after a single question-and-answer round; a lone confirmation is not enough. Only call it once every open question is resolved and the user has approved a full summary of the meal (or has told you to stop asking and just log it). Write the confirmed household-measure portions into the description itself (e.g. 'Oatmeal (1 glass raw oats, 2 glasses milk) with banana') so future searches are self-describing, and for a restaurant meal name the venue and city too (e.g. 'Pad thai with chicken (1 plate, finished) at Thai Basil, Podil, Kyiv').",
+                "Log a meal entry with nutritional information. If the user doesn't specify the quantity or portion size, ask how much they ate before estimating calories and macros. When the user gives a barcode — typed, or read from a photo of the package (transcribe the digits printed under the barcode) — call lookup_barcode first to get the product's label data, then scale it to the amount eaten. Fall back to web search or estimation only when no product is found. Use web search for branded products when no barcode is available. When logging from a photo of a plated or prepared meal (no package/barcode): first identify each dish, then establish whether it is a restaurant/takeout meal or homemade before anything else. If it is from a restaurant, ask which restaurant and where, then search the web for its menu — chains publish per-item nutrition worth using directly, independent places usually publish ingredient lists that reveal the butter, cream, and oil the photo hides; if you cannot find the menu or cannot tell which dish it is, say so and put your assumption to the user as a question rather than presenting a guess as menu data. Either way, estimate portions in household measures the user can eyeball (a glass of, a handful of, a tablespoon of — NOT grams; for restaurant servings ask how much of it they actually ate), call search_meals to see how similar meals were logged before and to surface ingredients that may be invisible in the photo, then interview the user across multiple turns — one question per message, covering which variation each dish is, how much they ate, and photo-invisible ingredients (oil, sugar, sauce, what a drink was made with) — until nothing is left open. Do NOT call this tool after a single question-and-answer round; a lone confirmation is not enough. Only call it once every open question is resolved and the user has approved a full summary of the meal (or has told you to stop asking and just log it). Write the confirmed household-measure portions into the description itself (e.g. 'Oatmeal (1 glass raw oats, 2 glasses milk) with banana') so future searches are self-describing, and for a restaurant meal name the venue and city too (e.g. 'Pad thai with chicken (1 plate, finished) at Thai Basil, Podil, Kyiv'). When the entry is coffee, tea, cola, an energy drink or anything else caffeinated, fill in caffeine_mg (in MILLIGRAMS) as well — putting '180 mg caffeine' in the notes instead leaves it out of every total, goal and chart.",
             annotations: {
                 readOnlyHint: false,
                 destructiveHint: false,
@@ -1152,6 +1272,14 @@ export function registerTools(
                     .optional()
                     .describe(
                         "Grams of pure ethanol — NOT the volume of the drink and NOT its ABV. Do not estimate this: compute it from the volume and strength, which the user can read off the bottle or the menu. grams = millilitres x (ABV% / 100) x 0.789. Worked examples: a 330 ml 5% beer = 330 x 0.05 x 0.789 = 13 g; a 150 ml glass of 13% wine = 15.4 g; a 44 ml (1.5 oz) shot of 40% spirit = 13.9 g. For US measures, 1 fl oz = 29.6 ml. Ask for the pour size and the ABV rather than guessing, and omit the field entirely for a non-alcoholic meal.",
+                    ),
+                caffeine_mg: z.coerce
+                    .number()
+                    .min(0)
+                    .max(MAX_CAFFEINE_MG)
+                    .optional()
+                    .describe(
+                        "Caffeine in MILLIGRAMS (mg) — this field is the one that is not in grams, and a value under 1 almost certainly means grams were sent by mistake. Typical amounts: a 240 ml brewed coffee 95 mg, a single espresso 63 mg, instant coffee 62 mg, black tea 47 mg, green tea 28 mg, a 355 ml cola 34 mg, a 250 ml energy drink 80 mg, decaf 2 mg. Scale them to what was actually drunk (a double espresso is 126 mg), and for a branded drink prefer the figure on the label or the chain's published nutrition. Caffeine adds no calories, so it never changes the kcal figure. Omit the field for a meal with no caffeine rather than sending 0 — a 0 records 'measured, and it was none'.",
                     ),
                 logged_at: z
                     .string()
@@ -1949,16 +2077,19 @@ export function registerTools(
                 drink_unit: DRINK_UNIT_FIELD,
                 goals: GOALS_ITEM.nullable(),
                 averages: TOTALS_ITEM,
-                // How many of `logged_days` actually record each of the three
+                // How many of `logged_days` actually record each of the
                 // post-launch nutrients — the denominator behind `averages` for
                 // them, so a consumer can say "5 of 30 days" instead of passing
                 // a partial average off as a full one. 0 means the window has no
                 // data for it at all and its average is not a figure. Alcohol is
-                // null when tracking is off, like every other alcohol field.
+                // null when tracking is off, like every other alcohol field;
+                // caffeine has no such flag, so its count is always a number
+                // (0 being how a consumer sees "never recorded").
                 recorded_days: z.object({
                     fiber_g: z.number(),
                     sugar_g: z.number(),
                     alcohol_g: z.number().nullable(),
+                    caffeine_mg: z.number(),
                 }),
                 days: z.array(
                     TOTALS_ITEM.extend({
@@ -2011,11 +2142,15 @@ export function registerTools(
                                 averages: totalsPayloadOf(
                                     emptyTotals(),
                                     alcohol,
+                                    // Nothing logged, so nothing recorded
+                                    // caffeine: null, not a 0 mg average.
+                                    false,
                                 ),
                                 recorded_days: {
                                     fiber_g: 0,
                                     sugar_g: 0,
                                     alcohol_g: alcohol ? 0 : null,
+                                    caffeine_mg: 0,
                                 },
                                 days: [],
                                 meals: [],
@@ -2068,7 +2203,11 @@ export function registerTools(
                         days.push({
                             date,
                             meal_count: dateMeals.length,
-                            ...totalsPayloadOf(totals, alcohol),
+                            ...totalsPayloadOf(
+                                totals,
+                                alcohol,
+                                present.caffeine_mg,
+                            ),
                         });
                         perDay.push({ meals: dateMeals, totals });
                     }
@@ -2078,7 +2217,14 @@ export function registerTools(
                     // rangeAverages for which denominator each nutrient uses.
                     const { averages: rawAverages, recordedDays } =
                         rangeAverages(perDay);
-                    const averages = totalsPayloadOf(rawAverages, alcohol);
+                    const averages = totalsPayloadOf(
+                        rawAverages,
+                        alcohol,
+                        // A window where no day recorded caffeine has no
+                        // caffeine average to report — coveredDailyAverage
+                        // returns 0 over 0 days, which is not a figure.
+                        recordedDays.caffeine_mg > 0,
+                    );
 
                     // Don't pass a partial average off as a full one. Terse:
                     // only nutrients that were recorded on SOME but not all of
@@ -2097,6 +2243,11 @@ export function registerTools(
                         recordedDays.alcohol_g > 0 &&
                         recordedDays.alcohol_g < days.length
                             ? `alcohol ${recordedDays.alcohol_g}`
+                            : null,
+                        // Unconditional: no opt-in to check, only the data.
+                        recordedDays.caffeine_mg > 0 &&
+                        recordedDays.caffeine_mg < days.length
+                            ? `caffeine ${recordedDays.caffeine_mg}`
                             : null,
                     ].filter((s): s is string => s !== null);
                     const coverageNote = partial.length
@@ -2131,6 +2282,7 @@ export function registerTools(
                                 alcohol_g: alcohol
                                     ? recordedDays.alcohol_g
                                     : null,
+                                caffeine_mg: recordedDays.caffeine_mg,
                             },
                             days,
                             // Multi-day range → tag each meal with its date.
@@ -2149,7 +2301,7 @@ export function registerTools(
         {
             title: "Set Nutrition Goals",
             description:
-                "Set the user's daily calorie and macro targets, and optionally a target body weight. Pass only the fields you want to update — omitted fields keep their previous value. Pass null explicitly to clear a target. Calories, protein, carbs, fat, fiber and water are targets to REACH; sugar and alcohol are limits to STAY UNDER, and progress against them is worded accordingly. Targets are the user's own choice; this server does not provide medical or dietary advice.",
+                "Set the user's daily calorie and macro targets, and optionally a target body weight. Pass only the fields you want to update — omitted fields keep their previous value. Pass null explicitly to clear a target. Calories, protein, carbs, fat, fiber and water are targets to REACH; sugar, alcohol and caffeine are limits to STAY UNDER, and progress against them is worded accordingly. Every gram target is in grams and the caffeine limit is in MILLIGRAMS. For a limit, 0 is a real value meaning 'none at all' rather than 'unset'. Targets are the user's own choice; this server does not provide medical or dietary advice.",
             annotations: {
                 readOnlyHint: false,
                 destructiveHint: false,
@@ -2214,6 +2366,15 @@ export function registerTools(
                     .optional()
                     .describe(
                         "Daily alcohol limit in grams of pure ethanol, treated as a maximum to stay under. One US standard drink is 14 g, one UK unit is 7.9 g. Null to clear.",
+                    ),
+                daily_caffeine_mg: z.coerce
+                    .number()
+                    .min(0)
+                    .max(MAX_GOAL_MG)
+                    .nullable()
+                    .optional()
+                    .describe(
+                        "Daily caffeine limit in MILLIGRAMS, treated as a maximum to stay under. Reference points to offer when the user has no figure in mind: the EFSA and FDA ceiling for healthy adults is 400 mg/day and 200 mg in pregnancy, and a 240 ml brewed coffee is about 95 mg — so 400 mg is roughly four cups. 0 is a real limit meaning none at all, not 'unset'. Null to clear.",
                     ),
                 daily_water_ml: z.coerce
                     .number()
@@ -2293,6 +2454,10 @@ export function registerTools(
                             args.daily_alcohol_g === undefined
                                 ? (existing?.daily_alcohol_g ?? null)
                                 : args.daily_alcohol_g,
+                        daily_caffeine_mg:
+                            args.daily_caffeine_mg === undefined
+                                ? (existing?.daily_caffeine_mg ?? null)
+                                : args.daily_caffeine_mg,
                         daily_water_ml:
                             args.daily_water_ml === undefined
                                 ? (existing?.daily_water_ml ?? null)
@@ -2412,12 +2577,13 @@ export function registerTools(
                     const unit = weightPref ?? "kg";
                     const totals = sumMeals(meals);
                     totals.water_ml = sumWater(water);
+                    const present = nutrientPresence(meals);
                     const header = `Progress for ${targetDate} (${meals.length} meal${meals.length === 1 ? "" : "s"}, ${water.length} water entr${water.length === 1 ? "y" : "ies"})`;
                     const body = formatProgress(
                         totals,
                         goals,
                         alcohol,
-                        nutrientPresence(meals),
+                        present,
                     );
 
                     // Weight is a standing metric (latest overall), not per-date.
@@ -2448,7 +2614,11 @@ export function registerTools(
                     // the text above: per-macro intake vs goal for the day, plus
                     // the standing weight metric converted to display units.
                     const goalsPayload = goalsPayloadOf(goals, alcohol);
-                    const totalsPayload = totalsPayloadOf(totals, alcohol);
+                    const totalsPayload = totalsPayloadOf(
+                        totals,
+                        alcohol,
+                        present.caffeine_mg,
+                    );
                     const weightPayload =
                         latestWeight || goals?.target_weight_g != null
                             ? {
@@ -2574,6 +2744,14 @@ export function registerTools(
                     .optional()
                     .describe(
                         "Grams of pure ethanol — NOT the drink's volume and NOT its ABV. Compute it rather than estimating: grams = millilitres x (ABV% / 100) x 0.789 (a 330 ml 5% beer = 13 g).",
+                    ),
+                caffeine_mg: z.coerce
+                    .number()
+                    .min(0)
+                    .max(MAX_CAFFEINE_MG)
+                    .optional()
+                    .describe(
+                        "Caffeine in MILLIGRAMS, not grams (a 240 ml brewed coffee is 95 mg, a single espresso 63 mg, black tea 47 mg, a 250 ml energy drink 80 mg). Adds no calories.",
                     ),
                 logged_at: z
                     .string()
