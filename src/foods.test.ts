@@ -467,6 +467,30 @@ describe("formatFoodResult", () => {
         expect(text).toContain("barcode 737628064502");
     });
 
+    // "n/a" states the gap but leaves the model to decide what to do with it,
+    // and what it did was omit the field — which records "nobody measured
+    // this" and drops the whole day from the fiber average.
+    test("an n/a fiber or sugar comes with what to do about it", () => {
+        const text = formatFoodResult({ ...base, fiber_g: null });
+        expect(text).toContain("no fiber figure");
+        expect(text).toContain("not a zero");
+        expect(text).toContain("log_meal");
+        expect(text).not.toContain("no fiber or sugar figure");
+    });
+
+    test("both missing are named in one line", () => {
+        const text = formatFoodResult({
+            ...base,
+            fiber_g: null,
+            sugar_g: null,
+        });
+        expect(text).toContain("no fiber or sugar figure");
+    });
+
+    test("nothing is appended when the label carried both", () => {
+        expect(formatFoodResult(base)).not.toContain("not a zero");
+    });
+
     test("renders n/a for missing macros and omits empty brand", () => {
         const text = formatFoodResult({
             ...base,
