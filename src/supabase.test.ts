@@ -36,18 +36,20 @@ function key(input: MealInput, userId = USER, loggedAt = LOGGED_AT): string {
 }
 
 describe("mealIdempotencyKey", () => {
-    test("fiber, sugar and alcohol are EXCLUDED from the derived key", () => {
+    test("fiber, sugar, alcohol and caffeine are EXCLUDED from the derived key", () => {
         const base = meal();
         const withNewFields = meal({
             fiber_g: 6.2,
             sugar_g: 14.5,
             alcohol_g: 3.1,
+            caffeine_mg: 95,
         });
 
-        // The whole point of the frozen array: adding one of the three new
-        // columns to it would change the key of every future write, so a user
-        // re-logging or re-importing something they already have would get a
-        // duplicate row instead of a clean no-op.
+        // The whole point of the frozen array: adding one of the four
+        // non-macro columns to it would change the key of every future write,
+        // so a user re-logging or re-importing something they already have
+        // would get a duplicate row instead of a clean no-op — and every
+        // "auto:" key already in the table would be orphaned.
         expect(key(withNewFields)).toBe(key(base));
 
         // Negative control — this test must be able to fail. A field that IS
@@ -61,9 +63,28 @@ describe("mealIdempotencyKey", () => {
         expect(key(meal({ fiber_g: 6.2 }))).toBe(base);
         expect(key(meal({ sugar_g: 14.5 }))).toBe(base);
         expect(key(meal({ alcohol_g: 3.1 }))).toBe(base);
+        expect(key(meal({ caffeine_mg: 95 }))).toBe(base);
         // Zero is not the same as absent to a hasher that stringifies parts,
         // so pin it too: it must still be excluded.
-        expect(key(meal({ fiber_g: 0, sugar_g: 0, alcohol_g: 0 }))).toBe(base);
+        expect(
+            key(
+                meal({
+                    fiber_g: 0,
+                    sugar_g: 0,
+                    alcohol_g: 0,
+                    caffeine_mg: 0,
+                }),
+            ),
+        ).toBe(base);
+    });
+
+    test("two coffees differing only in caffeine dedupe to one — the accepted cost", () => {
+        // Same trade as fiber above, restated for the mg column because it is
+        // the one whose values a user is most likely to tune after the fact
+        // (a single vs a double shot logged under the same description).
+        expect(key(meal({ caffeine_mg: 63 }))).toBe(
+            key(meal({ caffeine_mg: 126 })),
+        );
     });
 
     test("two meals differing only in fiber dedupe to one — the accepted cost", () => {
@@ -120,6 +141,7 @@ describe("mealIdempotencyKey", () => {
             fiber_g: 6.2,
             sugar_g: 14.5,
             alcohol_g: 3.1,
+            caffeine_mg: 95,
         });
         expect(key(input)).toBe(`auto:${rowContentDigest(USER, input)}`);
     });
