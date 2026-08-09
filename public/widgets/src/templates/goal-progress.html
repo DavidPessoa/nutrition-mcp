@@ -94,6 +94,10 @@
                 date: "2026-07-10",
                 meal_count: 5,
                 water_entries: 6,
+                // The alcohol opt-in, which every payload with an alcohol
+                // figure carries. Without it here the preview glosses grams as
+                // US drinks by fallback and the UK path is never seen.
+                drink_unit: "us",
                 goals: {
                     calories: 2200,
                     protein_g: 160,

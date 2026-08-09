@@ -46,6 +46,7 @@
                 start_date: "2026-07-05",
                 end_date: "2026-07-07",
                 logged_days: 3,
+                drink_unit: "us",
                 days_in_range: 3,
                 goals: {
                     calories: 2200,
@@ -460,9 +461,9 @@
                     undefined,
                     data.meals,
                     {
-                        // Not in the tool's output schema today (it carries
-                        // canonical grams); honoured the moment it is, and "us"
-                        // until then — the server's own default.
+                        // "us" | "uk" for a user who tracks alcohol, null for
+                        // one who does not — and null is also the case in which
+                        // no alcohol figure reaches the strip at all.
                         drinkUnit: data.drink_unit,
                         calLabel,
                         // Only the chart sits between the header line and the
