@@ -1216,6 +1216,31 @@ export function alcoholHiddenNote(
     return `\n\n(${subject}, but alcohol tracking is off for this account so it is not shown. Turn it on with set_alcohol_tracking.)`;
 }
 
+// Tool descriptions and SERVER_INSTRUCTIONS are advisory and are read once, at
+// the top of a session; this note lands in the model's context at the exact
+// moment it left a nutrient out, which is the only feedback in the loop. Same
+// report-only shape as alcoholHiddenNote above — it never writes anything.
+//
+// Deliberately limited to fiber_g and sugar_g. Both are estimable for every
+// food that exists, so a NULL on a meal the model just wrote is an omission and
+// not a fact, and the cost is not one imperfect number: a null excludes the
+// whole DAY from that nutrient's averages, goal lines and charts (dayCarries in
+// insights.ts), so a forgotten fiber figure deletes the day from the trend.
+//
+// Caffeine is NOT checked here, and adding it would undo the suppression the
+// rest of this file is built around: most meals genuinely carry none, its
+// display gate is `!= null` rather than `> 0` (limitShown, recordedGoalLine,
+// totalsPayloadOf), so nagging until every sandwich carries a figure produces
+// precisely the fabricated "0 mg / 400 mg limit" that null exists to prevent.
+export function missingNutrientNote(meal: Meal): string {
+    const missing = [
+        meal.fiber_g == null ? "fiber_g" : null,
+        meal.sugar_g == null ? "sugar_g" : null,
+    ].filter((f): f is string => f !== null);
+    if (missing.length === 0) return "";
+    return `\n\n(Not recorded on this meal: ${missing.join(", ")}. A missing value is not a zero — it leaves the whole day out of that nutrient's totals, averages and goal line. Estimate the value from the ingredients (0 where the food genuinely has none) and fill it in with update_meal, id ${meal.id}.)`;
+}
+
 // `alcohol` is the whole alcohol opt-in, threaded once: the drink unit to render
 // grams in, or null when this user has alcohol tracking off. It is resolved from
 // the profile in buildMcpServer (like widgetsEnabled) rather than re-read inside
@@ -1405,7 +1430,7 @@ export function registerTools(
                                     (meal.alcohol_g ?? 0) > 0,
                                     alcohol,
                                     "Alcohol saved with this meal",
-                                )}${note}`,
+                                )}${missingNutrientNote(meal)}${note}`,
                             },
                         ],
                         structuredContent,
@@ -2867,7 +2892,7 @@ export function registerTools(
                                     (meal.alcohol_g ?? 0) > 0,
                                     alcohol,
                                     "Alcohol saved with this meal",
-                                )}${note}`,
+                                )}${missingNutrientNote(meal)}${note}`,
                             },
                         ],
                         structuredContent,
