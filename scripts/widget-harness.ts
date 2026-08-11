@@ -242,8 +242,11 @@ function hostPage(widget: string, params: URLSearchParams): string {
             goals,
             totals,
             has_goals: true,
-            // Deliberately empty: with no per-meal rows only CARBS is tappable
-            // (for fiber + sugar), which is the other disclosure path.
+            // Deliberately empty, so one macro widget covers the strip's
+            // static path: with no per-meal rows behind them, no tile is a
+            // button, the "tap a metric" hint is absent and every cell reads
+            // as the plain figure it always was. The interactive path is
+            // meal-logged and nutrition-summary below, which carry meals.
             meals: [],
         },
         "meal-logged": {
