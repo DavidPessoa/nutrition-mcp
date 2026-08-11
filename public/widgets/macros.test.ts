@@ -27,7 +27,7 @@ const macrosApi = await (async () => {
     const factory = new Function(
         "fmt",
         "esc",
-        `${src}\nreturn { macroBits, MACROS, macroPanel, macroLimit, macroCtxOf, dayHasData };`,
+        `${src}\nreturn { macroBits, MACROS, macroPanel, macroLimit, macroCtxOf, dayHasData, mealList };`,
     );
     return factory(fmt, esc) as {
         macroBits: (
@@ -44,7 +44,7 @@ const macrosApi = await (async () => {
             meals?: unknown[],
             opts?: { drinkUnit?: string },
         ) => string;
-        macroLimit: (m: Macro, ctx: unknown) => string;
+        macroLimit: (m: Macro, ctx: unknown, interactive?: boolean) => string;
         macroCtxOf: (
             vals: Vals,
             goal?: Vals | null,
@@ -53,6 +53,7 @@ const macrosApi = await (async () => {
             opts?: { drinkUnit?: string },
         ) => unknown;
         dayHasData: (day: Vals) => boolean;
+        mealList: (m: Macro, meals: unknown[]) => string;
     };
 })();
 
@@ -161,8 +162,35 @@ const GOALS = {
     caffeine_mg: 400,
     water_ml: 2500,
 };
+// Two meals carrying every metric the strip shows — except alcohol, which both
+// record as a real 0. That is not padding: it makes this fixture cover both
+// halves of the per-tile gate at once, since a tile is a button only when some
+// meal actually contributed to it.
 const MEALS = [
-    { description: "Porridge", calories: 400, protein_g: 12, carbs_g: 60 },
+    {
+        description: "Porridge",
+        meal_type: "breakfast",
+        calories: 400,
+        protein_g: 12,
+        carbs_g: 60,
+        fat_g: 8,
+        fiber_g: 9.4,
+        sugar_g: 12.2,
+        alcohol_g: 0,
+        caffeine_mg: null,
+    },
+    {
+        description: "Flat white",
+        meal_type: "snack",
+        calories: 120,
+        protein_g: 6,
+        carbs_g: 9,
+        fat_g: 6,
+        fiber_g: 0,
+        sugar_g: 8.1,
+        alcohol_g: 0,
+        caffeine_mg: 185,
+    },
 ];
 
 // Every tile that is a button, by macro key → its accessible name.
@@ -185,14 +213,83 @@ test("an interactive tile names its value and goal state, then the action", () =
     expect(labels.carbs_g).toBe(
         "Carbs 205 g, of 220 g, 15 g left. Show the meals that contributed.",
     );
-    // The calorie row and the three macro bars, and nothing else — a limit
-    // cell discloses nothing, so it is never a button.
+    // A limit cell is a button on the same terms as a macro bar — every metric
+    // on the strip is in MEAL_BREAKDOWN_ITEM, so "tap a metric" means any of
+    // them. Its name carries the ceiling and the distance to it.
+    expect(labels.sugar_g).toBe(
+        "Sugar 58.2 g, limit 45 g, 13.2 g over. Show the meals that contributed.",
+    );
+    expect(labels.caffeine_mg).toBe(
+        "Caffeine 185 mg, limit 400 mg, 215 mg under. Show the meals that contributed.",
+    );
+    // Alcohol is the exception, and not by type: both meals recorded a real 0,
+    // so there is nothing behind that cell and it stays the static cell it
+    // always was rather than a button onto an empty list.
     expect(Object.keys(labels).sort()).toEqual([
+        "caffeine_mg",
         "calories",
         "carbs_g",
         "fat_g",
+        "fiber_g",
         "protein_g",
+        "sugar_g",
     ]);
+});
+
+// The gate is per tile, not per strip: the same panel can hold a button and a
+// static cell of the same kind, decided only by whether a meal contributed.
+test("a limit cell is a button only when meals are behind it", () => {
+    const withAlcohol = [
+        { ...MEALS[0], description: "Pinot", alcohol_g: 12.5 },
+    ];
+    expect(
+        tileLabels(macrosApi.macroPanel(VALS, GOALS, undefined, withAlcohol))
+            .alcohol_g,
+    ).toBe(
+        "Alcohol 12.5 g, limit 20 g, 7.5 g under. Show the meals that contributed.",
+    );
+    // …and a metric no meal touched is not tappable even though its cell is on
+    // screen: a recorded 0 earns alcohol and caffeine a cell (that is the whole
+    // point of their null signal), but never a button onto nothing.
+    const zeroed = { ...VALS, alcohol_g: 0, caffeine_mg: 0 };
+    const html = macrosApi.macroPanel(zeroed, GOALS, undefined, [
+        { ...MEALS[0], alcohol_g: 0, caffeine_mg: 0 },
+    ]);
+    expect(html).toContain("none logged");
+    expect(tileLabels(html).alcohol_g).toBeUndefined();
+    expect(tileLabels(html).caffeine_mg).toBeUndefined();
+});
+
+// A single meal contributes a fraction of the day, so the breakdown needs a
+// finer figure than the strip above it — but only where the unit has one. Both
+// halves matter: without the tenth a 12.2 g and an 8.1 g meal sort into an
+// order the list does not explain, and with it caffeine reads "185.0 mg".
+test("the breakdown gives grams a tenth and keeps whole units whole", () => {
+    const list = (key: string, meals: unknown[] = MEALS) =>
+        macrosApi.mealList(macroOf(key), meals);
+    const val = (key: string, v: number) =>
+        list(key, [{ description: "One meal", [key]: v }]);
+    // Grams to a tenth, whatever the strip above rounds them to: the macro
+    // bars show whole grams, the limits row a tenth, and the breakdown under
+    // both is at meal scale.
+    expect(val("protein_g", 42.4)).toContain(
+        '42.4<span class="md-unit">g</span>',
+    );
+    expect(val("sugar_g", 12.24)).toContain(
+        '12.2<span class="md-unit">g</span>',
+    );
+    // Whole units stay whole — kcal, and the milligrams the payload happens to
+    // round to a tenth.
+    expect(val("caffeine_mg", 185.4)).toContain(
+        '185<span class="md-unit">mg</span>',
+    );
+    expect(val("calories", 400)).toContain(
+        '400<span class="md-unit">kcal</span>',
+    );
+    // Sorted largest-first, and a meal that contributed none of the metric is
+    // left out entirely rather than listed as a 0.
+    expect(list("caffeine_mg")).toContain("Flat white");
+    expect(list("caffeine_mg")).not.toContain("Porridge");
 });
 
 // Hover and a cursor are the whole affordance on a pointer device, and a
@@ -242,11 +339,18 @@ test("every interactive tile carries its formatted value, and none is spoken as 
         );
         expect(Object.keys(labels).length).toBeGreaterThan(0);
         for (const [key, label] of Object.entries(labels)) {
-            const m = macroOf(key) as Macro & { label: string; unit: string };
-            // Hero and ring tiles — the only interactive ones — are whole
-            // numbers, so the value reads exactly as it does on screen.
+            const m = macroOf(key) as Macro & {
+                label: string;
+                unit: string;
+                decimals: number;
+            };
+            // At the tile's own precision, so the spoken value reads exactly
+            // as the one on screen — a tenth for the limits row, whole for
+            // calories, the macro bars and caffeine's milligrams.
             expect(
-                label.startsWith(`${m.label} ${fmt(vals[key]!, 0)} ${m.unit},`),
+                label.startsWith(
+                    `${m.label} ${fmt(vals[key]!, m.decimals)} ${m.unit},`,
+                ),
             ).toBe(true);
             // "·" is decoration a screen reader either skips or calls
             // "middle dot"; the spoken name separates with a comma.
@@ -447,7 +551,9 @@ test("caffeine is milligrams alone — the drink gloss is alcohol's only", () =>
 
 // Caffeine carries zero kcal, so it is a limit cell and nothing else: never a
 // macro bar, never a segment of an energy split, and never evidence that a day
-// was logged.
+// was logged. Being tappable does not change that — the limits row discloses
+// its meals exactly like the bars above it while staying a different kind of
+// thing.
 test("caffeine is a limit, not a macro", () => {
     const m = macroOf("caffeine_mg") as Macro & {
         role: string;
@@ -455,9 +561,10 @@ test("caffeine is a limit, not a macro", () => {
     };
     expect(m.role).toBe("limit");
     expect(m.parent).toBeUndefined();
-    expect(macrosApi.macroPanel(VALS, GOALS, undefined, MEALS)).not.toContain(
-        'data-macro="caffeine_mg"',
-    );
+    const html = macrosApi.macroPanel(VALS, GOALS, undefined, MEALS);
+    // limitKeys drops the first three names, which are the macro bars — so
+    // finding Caffeine here is proof it is not one of them.
+    expect(limitKeys(html)).toContain("Caffeine");
     expect(macrosApi.dayHasData({ caffeine_mg: 185 })).toBe(false);
 });
 

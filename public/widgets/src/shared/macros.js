@@ -251,12 +251,24 @@ function ringMarkup(m, b) {
       </div>`;
 }
 
-// Is there anything behind this tile to disclose? Only the meals that
-// contributed to it — fiber and sugar used to hide inside the carbs
-// disclosure and now have cells of their own in the limits row, so a strip
-// built without meals is entirely static.
-function macroHasDetail(ctx) {
-    return !!ctx.meals;
+// Is there anything behind THIS tile to disclose? Two conditions, and both
+// matter:
+//
+//   1. the widget passed per-meal rows at all (trends does not, so its strip is
+//      entirely static), and
+//   2. at least one of those meals contributed a positive amount of this
+//      metric.
+//
+// The second is what keeps a tile from being a button that opens an empty list.
+// Every metric on the strip is in MEAL_BREAKDOWN_ITEM (src/mcp.ts) — the limits
+// row included — so the test is the same one for all of them: a limit cell is
+// tappable exactly when meals are behind it, and an alcohol cell reading "none
+// logged" stays the static cell it always was. Water is never interactive by
+// the same rule and needs no special case: water is logged separately and no
+// meal row carries `water_ml`.
+function macroHasDetail(m, ctx) {
+    if (!ctx.meals) return false;
+    return ctx.meals.some((meal) => (Number(meal?.[m.key]) || 0) > 0);
 }
 
 // The accessible name of an interactive tile — VALUE FIRST, action second.
@@ -370,7 +382,7 @@ function limitShown(m, ctx) {
 // gloss ("2.0 US drinks · limit 20 g"); caffeine has no second unit anyone
 // thinks in, so it is milligrams alone. A metric recorded as none reads that
 // way in words rather than as a 0 that looks like a measurement.
-function macroLimit(m, ctx) {
+function macroLimit(m, ctx, interactive) {
     // The gate again, so the cell builder is safe to call on its own and can
     // never invent a reading the strip would have suppressed.
     if (!limitShown(m, ctx)) return "";
@@ -398,7 +410,7 @@ function macroLimit(m, ctx) {
     if (b.deltaStr && (b.over || b.deltaStr === "at limit")) {
         cap = `${cap} · ${b.deltaStr}`;
     }
-    return macroTile(m, b, num, cap, false);
+    return macroTile(m, b, num, cap, interactive);
 }
 
 // Water — one line, in litres. The payload is millilitres because that is what
@@ -461,8 +473,9 @@ function gridCols(n) {
 //
 // `meals` is optional: when a non-empty array of per-meal breakdown rows is
 // passed (each { description, meal_type, date, calories, protein_g, carbs_g,
-// fat_g, ... }), the calorie row and the macro bars become tappable and reveal
-// the meals that contributed to that metric (see macroToggle).
+// fat_g, fiber_g, sugar_g, alcohol_g, caffeine_mg }), every tile some meal
+// contributed to becomes tappable and reveals those meals (see macroToggle) —
+// the limits row included, not just calories and the three bars.
 //
 // `opts` is optional: { drinkUnit: "us" | "uk", calLabel: string,
 // divided: boolean }.
@@ -483,10 +496,15 @@ function macroPanel(vals, goal, wording, meals, opts) {
         (m) => m.role === "bar" && (ctx.vals[m.key] ?? 0) > 0,
     );
 
-    const interactive = macroHasDetail(ctx);
+    // Per tile, not per strip: every metric on the strip has per-meal figures
+    // behind it, but only the ones some meal actually contributed to are worth
+    // opening. The strip itself is interactive if any of its tiles is — that is
+    // what earns the hint line and the region the breakdown renders into.
+    const tap = (m) => macroHasDetail(m, ctx);
+    const interactive = [cal, ...trio, ...limits].some(tap);
     const limitRow = limits.length
         ? `<div class="mgrid lim n${limits.length} psec" style="${gridCols(limits.length)}">${limits
-              .map((m) => macroLimit(m, ctx))
+              .map((m) => macroLimit(m, ctx, tap(m)))
               .join("")}
         </div>`
         : "";
@@ -507,10 +525,10 @@ function macroPanel(vals, goal, wording, meals, opts) {
     return `
       <div class="strip${ctx.divided ? " psec" : ""}"${interactive ? " data-macro-panel" : ""}>
         <div class="srow">
-          ${macroCal(cal, ctx, interactive)}
+          ${macroCal(cal, ctx, tap(cal))}
           <div class="sgrids">
             <div class="mgrid" style="${gridCols(3)}">${trio
-                .map((m) => macroBarTile(m, ctx, interactive))
+                .map((m) => macroBarTile(m, ctx, tap(m)))
                 .join("")}
             </div>
             ${limitRow}
@@ -530,7 +548,13 @@ let __macroCtx = null;
 // The list of meals that contributed a positive amount of one metric,
 // largest-first, capped so a long range stays readable.
 function mealList(m, meals) {
-    const decimals = m.key === "calories" ? 0 : 1;
+    // A single meal's contribution is a fraction of the day's, so grams get a
+    // tenth here even where the strip rounds them whole — a 3.4 g and a 3.1 g
+    // meal must not both read "3" in a list sorted by that very figure.
+    // Whole-unit metrics keep their unit: kcal and mg of caffeine are quoted
+    // whole at every scale (see the MACROS entries), and a tenth of a
+    // milligram is below anything anyone can act on.
+    const decimals = m.decimals === 0 && m.unit === "g" ? 1 : m.decimals;
     const rows = meals
         .map((meal) => ({ meal, v: Number(meal?.[m.key] ?? 0) || 0 }))
         .filter((r) => r.v > 0)

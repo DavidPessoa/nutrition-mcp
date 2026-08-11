@@ -475,8 +475,9 @@ one function:
 // wording: { under: "left" | "under", over: "over" } — default "left" / "over".
 //          trends uses { under: "under" } ("421 kcal under"). FLOORS only;
 //          a ceiling always reads "under" / "over" / "at limit".
-// meals:   optional per-meal breakdown rows → the calorie row and the three
-//          macro bars become tappable. Omit them and the strip is fully static.
+// meals:   optional per-meal breakdown rows → every tile some meal actually
+//          contributed to becomes tappable, the limits row included. Omit them
+//          and the strip is fully static.
 // opts:    optional {
 //            drinkUnit: "us" | "uk",     // alcohol's caption gloss; default "us"
 //            calLabel: string,           // label above the calorie figure;
@@ -681,10 +682,17 @@ screen readers either skip it or say "middle dot"). Do not shorten that name bac
 the action alone — a static tile reads out its numbers, and the interactive one
 beside it must not read out fewer.
 
-This applies to exactly four tiles: **the calorie row and the three macro bars**. A
-limit cell discloses nothing, so it is never a button (`macroLimit` passes
-`interactive = false`), and `macros.test.ts` asserts the set of buttons is
-`calories, protein_g, carbs_g, fat_g` and nothing else. The alternative — moving
+This applies to **every tile with meals behind it** — the calorie row, the three
+macro bars and the limits row alike. The gate is per tile and data-driven, not per
+kind: `macroHasDetail(m, ctx)` asks whether any meal contributed a positive amount
+of that metric, so a sugar or caffeine cell is a button on the same terms a protein
+bar is, while an alcohol cell reading "none logged" stays static rather than opening
+an empty list. Water is never a button and needs no special case — water is logged
+separately, so no meal row carries `water_ml`. `macros.test.ts` pins both halves.
+Every metric on the strip is in `MEAL_BREAKDOWN_ITEM` (`src/mcp.ts`), which is what
+makes the uniform rule possible; the breakdown gives grams a tenth even where the
+tile above rounds them whole, and keeps kcal and caffeine's milligrams whole. The
+alternative — moving
 `role="button"` to an inner element so the values stay exposed — was rejected: the
 whole tile is the tap target, so the button would either be smaller than what
 responds to a tap or would nest a second target inside the first.
