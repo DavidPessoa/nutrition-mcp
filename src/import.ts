@@ -22,7 +22,12 @@
 
 import { z } from "zod";
 import type { MealInput, MealInsertResult } from "./supabase.js";
-import { LOGGED_AT_FIX, loggedAtFailureReason, parseLoggedAt } from "./tz.js";
+import {
+    LOGGED_AT_FIX,
+    loggedAtFailureReason,
+    parseLoggedAt,
+    validateTz,
+} from "./tz.js";
 import { decodeEscapeSequences } from "./normalize.js";
 import { toStoredInteger } from "./units.js";
 
@@ -85,6 +90,16 @@ export interface ImportRow {
     source_line: number;
     description?: string;
     logged_at?: string;
+    /** IANA timezone (e.g. "Europe/Kyiv") this row's `logged_at` should be
+     *  read in when it carries no offset. This server's own export writes it
+     *  in the `timezone` column so a re-import — restoring a meal deleted
+     *  since the export was taken — resolves the wall clock in the zone it
+     *  was actually recorded in, not whatever the account's timezone happens
+     *  to be now. Blank, absent, or not a recognized IANA identifier falls
+     *  back to `deps.tz`; an unrecognized non-blank value is a per-row error
+     *  rather than a silent fallback, since a wrong zone the caller thought
+     *  they set is worse than an obvious one. */
+    timezone?: string;
     meal_type?: string;
     calories?: number;
     protein_g?: number;
@@ -133,6 +148,11 @@ export interface ResolvedRow {
     /** Internal: drives the unset-timezone warning. Not part of the tool's
      *  output schema — the aggregate warning is what a caller acts on. */
     logged_at_used_profile_tz: boolean;
+    /** Internal: true when this row supplied its own valid `timezone` and
+     *  that — not deps.tz — is what placed logged_at. Scopes the
+     *  unset-timezone warning to rows that actually depended on the account
+     *  default, so a row carrying its own zone never triggers it. */
+    logged_at_used_row_timezone: boolean;
 }
 
 export type RowValidation =
@@ -586,13 +606,31 @@ export function validateRow(
         });
     }
 
-    const ts = resolveLoggedAt(row.logged_at, deps.tz, deps.nowMs);
+    const rowTz = row.timezone?.trim();
+    let effectiveTz = deps.tz;
+    let usedRowTimezone = false;
+    if (rowTz) {
+        if (!validateTz(rowTz)) {
+            return fail({
+                code: "invalid_timezone",
+                field: "timezone",
+                message: `timezone ${JSON.stringify(rowTz)} is not a recognized IANA identifier`,
+                suggested_fix:
+                    'Use a value like "Europe/Kyiv", or remove the column so this row falls back to the account\'s timezone.',
+                retryable: true,
+            });
+        }
+        effectiveTz = rowTz;
+        usedRowTimezone = true;
+    }
+
+    const ts = resolveLoggedAt(row.logged_at, effectiveTz, deps.nowMs);
     if (!ts.ok) return fail(ts.error);
 
     let mealTypeInferred = false;
     let mealType = normalizeMealType(row.meal_type);
     if (mealType === null) {
-        mealType = inferMealType(ts.value.iso, deps.tz);
+        mealType = inferMealType(ts.value.iso, effectiveTz);
         mealTypeInferred = true;
     }
 
@@ -717,6 +755,8 @@ export function validateRow(
             description_synthesized: descriptionSynthesized,
             logged_at_from_bare_date: ts.value.fromBareDate,
             logged_at_used_profile_tz: ts.value.usedProfileTimezone,
+            logged_at_used_row_timezone:
+                usedRowTimezone && ts.value.usedProfileTimezone,
         },
     };
 }
@@ -1126,7 +1166,9 @@ export async function runImport(
     // either edge of the day change date: a 01:00 row imported as UTC reads as
     // the previous day in Los Angeles, a 23:30 row as the next day in Tokyo.
     const tzDependent = okRows.filter(
-        (v) => v.resolved.logged_at_used_profile_tz,
+        (v) =>
+            v.resolved.logged_at_used_profile_tz &&
+            !v.resolved.logged_at_used_row_timezone,
     ).length;
     if (!deps.tzConfigured && tzDependent > 0) {
         warnings.push(

@@ -1028,6 +1028,91 @@ test("a configured timezone never triggers the warning", async () => {
     );
 });
 
+// ---------- per-row timezone override (#97) ----------
+
+test("a row's own timezone resolves logged_at instead of deps.tz", () => {
+    // deps.tz is Kyiv (see TZ); a row explicitly naming UTC should resolve there.
+    const v = validateRow(
+        row({
+            source_line: 2,
+            logged_at: "2026-01-15T01:00",
+            timezone: "UTC",
+        }),
+        0,
+        { tz: TZ, nowMs: NOW },
+        undefined,
+    );
+    expect(v.ok).toBe(true);
+    if (v.ok)
+        expect(v.resolved.input.logged_at).toBe("2026-01-15T01:00:00.000Z");
+});
+
+test("validateRow rejects an unrecognized timezone with a retryable per-row error", () => {
+    const v = validateRow(
+        row({ source_line: 2, timezone: "Mars/Olympus_Mons" }),
+        0,
+        { tz: TZ, nowMs: NOW },
+        undefined,
+    );
+    expect(v.ok).toBe(false);
+    if (!v.ok) {
+        expect(v.error.code).toBe("invalid_timezone");
+        expect(v.error.field).toBe("timezone");
+        expect(v.error.retryable).toBe(true);
+    }
+});
+
+test("a blank timezone cell falls back to deps.tz rather than erroring", () => {
+    const v = validateRow(
+        row({ source_line: 2, logged_at: "2026-01-15", timezone: "   " }),
+        0,
+        { tz: TZ, nowMs: NOW },
+        undefined,
+    );
+    expect(v.ok).toBe(true);
+});
+
+test("re-importing a row with its own timezone lands on the day it actually happened, not the account's current zone", async () => {
+    // The exact #97 failure scenario: a Kyiv 23:30 meal, exported with
+    // timezone=Europe/Kyiv, re-imported while the account's timezone is UTC
+    // (unset, or changed since export). Without honoring the row's own
+    // timezone this instant reads three hours later and lands on the
+    // following Kyiv day.
+    const { deps, inserted } = makeStore();
+    deps.tz = "UTC";
+    const result = await runImport(
+        args([
+            row({
+                source_line: 2,
+                logged_at: "2026-07-19T23:30:00",
+                timezone: "Europe/Kyiv",
+            }),
+        ]),
+        deps,
+    );
+    expect(result.summary.created).toBe(1);
+    expect(inserted[0]!.logged_at).toBe("2026-07-19T20:30:00.000Z");
+    expect(dateInTz(inserted[0]!.logged_at!, "Europe/Kyiv")).toBe("2026-07-19");
+});
+
+test("a row using its own timezone does not trigger the unset-account-timezone warning, but a sibling row without one still does", async () => {
+    const { deps } = makeStore({ tzConfigured: false });
+    const result = await runImport(
+        args([
+            row({
+                source_line: 2,
+                logged_at: "2026-01-15T01:00",
+                timezone: "Europe/Kyiv",
+            }),
+            row({ source_line: 3, logged_at: "2026-01-15T01:00" }),
+        ]),
+        deps,
+    );
+    const warning = result.warnings.find((w) => /timezone is not set/.test(w));
+    expect(warning).toBeDefined();
+    expect(warning).toContain("1 row(s)");
+});
+
 // ---------- output schema conformance ----------
 
 test("serialized output validates against the declared outputSchema on every path", async () => {
