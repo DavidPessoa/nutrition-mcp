@@ -259,6 +259,10 @@
                 // harmlessly, because the server ignores anything that is not
                 // one of this user's meal ids.
                 { key: "source_id", label: "Meal id (from our export)" },
+                // Same reasoning as source_id: only meaningful when the file
+                // is this app's own export, offered like any other field so
+                // it can be re-pointed or unset.
+                { key: "timezone", label: "Timezone (from our export)" },
             ];
             // Header aliases for the exports surveyed. Matched with
             // normalizeHeader from csv.ts, so "Fat (g)" and "fat_g" both hit.
@@ -375,6 +379,9 @@
                 // alias is another chance to bind this to a column that is not
                 // an id at all. Our own export writes exactly "id".
                 source_id: ["id"],
+                // Deliberately narrow, same reasoning as source_id above:
+                // our own export writes exactly "timezone".
+                timezone: ["timezone"],
             };
 
             // Columns that hold ADDED sugar rather than total sugar. The server
@@ -735,6 +742,11 @@
                         // it names one of this user's meals; the widget must
                         // not, because it cannot see their history.
                         source_id: cell(r, m.source_id),
+                        // Also passed through untouched: the server decides
+                        // whether to use it, falling back to the account's
+                        // timezone when it is absent or not a recognized
+                        // IANA identifier.
+                        timezone: cell(r, m.timezone),
                     });
                 }
                 S.rows = rows;
