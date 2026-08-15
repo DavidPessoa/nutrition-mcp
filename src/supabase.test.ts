@@ -1,6 +1,7 @@
 import { test, expect, describe } from "bun:test";
 import {
     mealIdempotencyKey,
+    updatedMealIdempotencyKey,
     widgetsEnabledFromProfile,
     alcoholTrackingEnabledFromProfile,
     preferredDrinkUnitFromProfile,
@@ -8,6 +9,7 @@ import {
     fetchAllPages,
     timezoneLevels,
     TZ_LEVEL_THRESHOLDS,
+    type Meal,
     type MealInput,
     type Profile,
 } from "./supabase.js";
@@ -145,6 +147,109 @@ describe("mealIdempotencyKey", () => {
             caffeine_mg: 95,
         });
         expect(key(input)).toBe(`auto:${rowContentDigest(USER, input)}`);
+    });
+});
+
+function existingMeal(overrides: Partial<Meal> = {}): Meal {
+    return {
+        id: "33333333-3333-4333-8333-333333333333",
+        user_id: USER,
+        logged_at: LOGGED_AT,
+        meal_type: "breakfast",
+        description: "oat porridge with berries",
+        calories: 300,
+        protein_g: 12,
+        carbs_g: 45,
+        fat_g: 8,
+        fiber_g: null,
+        sugar_g: null,
+        alcohol_g: null,
+        caffeine_mg: null,
+        notes: "made with milk",
+        idempotency_key: key(meal()),
+        ...overrides,
+    };
+}
+
+describe("updatedMealIdempotencyKey", () => {
+    test("recomputes the digest when an edit changes content, for an auto: key", () => {
+        const existing = existingMeal();
+        const updated = updatedMealIdempotencyKey(USER, existing, {
+            calories: 600,
+        });
+
+        expect(updated).not.toBeNull();
+        // Differs from the pre-edit row's key...
+        expect(updated).not.toBe(existing.idempotency_key);
+        // ...and from what the ORIGINAL (pre-edit) content would still hash to
+        // — this is the #84 replay case: a replay of the original log_meal
+        // call must no longer dedupe onto the corrected row.
+        expect(updated).not.toBe(key(meal()));
+        // It matches recomputing over the merged (post-edit) content.
+        expect(updated).toBe(key(meal({ calories: 600 })));
+    });
+
+    test("a caller-supplied idempotency_key is left untouched", () => {
+        const existing = existingMeal({
+            idempotency_key: "client-supplied-key-123",
+        });
+        expect(
+            updatedMealIdempotencyKey(USER, existing, { calories: 600 }),
+        ).toBeNull();
+    });
+
+    test("a row with idempotency_key: null returns null", () => {
+        const existing = existingMeal({ idempotency_key: null });
+        expect(
+            updatedMealIdempotencyKey(USER, existing, { calories: 600 }),
+        ).toBeNull();
+    });
+
+    test("fields not passed in the update fall back to the existing row's content", () => {
+        const existing = existingMeal();
+        const updated = updatedMealIdempotencyKey(USER, existing, {
+            notes: "made with oat milk",
+        });
+
+        expect(updated).toBe(key(meal({ notes: "made with oat milk" })));
+    });
+
+    test("editing fiber_g/sugar_g/alcohol_g/caffeine_mg alone does not change the recomputed key", () => {
+        const existing = existingMeal();
+        const updated = updatedMealIdempotencyKey(USER, existing, {
+            fiber_g: 6.2,
+            sugar_g: 14.5,
+            alcohol_g: 3.1,
+            caffeine_mg: 95,
+        });
+
+        expect(updated).toBe(existing.idempotency_key);
+    });
+
+    test("editing logged_at changes the key to match the new timestamp", () => {
+        const existing = existingMeal();
+        const newLoggedAt = "2026-03-15T12:00:00.000Z";
+        const updated = updatedMealIdempotencyKey(USER, existing, {
+            logged_at: newLoggedAt,
+        });
+
+        expect(updated).toBe(key(meal(), USER, newLoggedAt));
+    });
+
+    test("an existing row's logged_at in PostgREST's +00:00 form recomputes the same key a fresh identical log_meal call would produce", () => {
+        // PostgREST renders timestamptz as "+00:00" (and drops an all-zero
+        // fractional part), never as the "Z"-suffixed, millisecond-padded
+        // form every write path hashes with. A row fetched back from the DB
+        // carries the former; verify the fallback canonicalizes it before
+        // hashing, rather than baking the DB's rendering into the key.
+        const existing = existingMeal({
+            logged_at: "2026-03-14T12:00:00+00:00",
+        });
+        const updated = updatedMealIdempotencyKey(USER, existing, {
+            calories: 600,
+        });
+
+        expect(updated).toBe(key(meal({ calories: 600 })));
     });
 });
 
