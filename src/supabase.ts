@@ -1327,6 +1327,14 @@ export interface LandingStats {
     timezones: number;
     // IANA names of every distinct timezone in use — drives the landing-page
     // world map. Aggregate-only; no per-user data.
+    //
+    // Expect this near-empty for a while after 2026-08-15: the
+    // nullable_profile_timezone migration (#99) reset every profile's
+    // timezone to NULL, and public_landing_stats() filters both this and
+    // timezone_counts to `where timezone is not null`, so a nulled profile
+    // drops out of the map entirely until its user calls set_timezone again.
+    // Not a map bug — see buildMap() in public/index.html for the visible
+    // symptom.
     timezone_list: string[];
     // IANA name -> 1..5, that timezone's share of all profiles. Sizes each dot
     // on the world map. Levels, never counts: see timezoneLevels().

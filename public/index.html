@@ -3684,6 +3684,15 @@
                     [11.5, 3.9],
                     [14.5, 4.7],
                 ];
+                // Expect this to render almost empty right now, and NOT because
+                // of a bug here: the 2026-08-15 nullable_profile_timezone
+                // migration reset every profile's timezone to NULL (see #99),
+                // and /api/stats's timezone_counts/timezone_list only count
+                // `where timezone is not null` — so tzLevels is near-empty
+                // until users call set_timezone again. That warning was itself
+                // silently unreachable for the most common log call (no
+                // logged_at) until #111 fixed it the same day, so expect this
+                // to self-heal gradually as people log meals, not instantly.
                 function buildMap(mapData, tzLevels) {
                     var svg = document.getElementById("world-svg");
                     if (!svg || !mapData) return;
