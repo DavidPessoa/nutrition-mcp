@@ -7,6 +7,8 @@ import {
     preferredDrinkUnitFromProfile,
     timezoneFromProfile,
     fetchAllPages,
+    exportArchivePath,
+    exportStoragePaths,
     timezoneLevels,
     TZ_LEVEL_THRESHOLDS,
     type Meal,
@@ -415,7 +417,41 @@ describe("timezoneFromProfile", () => {
     });
 });
 
-// ---------- fetchAllPages (issue #66: export_meals silently truncated at
+// ---------- export storage keys ----------
+
+// Deleting an account must not leave the export archive behind: it holds the
+// user's entire history, `storage.remove` reports a missing path as success,
+// and the signed URL they were handed keeps resolving for the rest of its
+// hour. So the deletion list is asserted against the path the writer actually
+// uses — the two were spelled out separately once, and renaming the archive
+// from meals.csv to the .zip silently orphaned a full copy of everyone's data.
+describe("exportStoragePaths", () => {
+    test("covers the archive the exporter writes", () => {
+        expect(exportStoragePaths("u1")).toContain(exportArchivePath("u1"));
+    });
+
+    test("keeps the pre-ZIP meals.csv so old exports are still cleaned up", () => {
+        expect(exportStoragePaths("u1")).toContain("u1/meals.csv");
+    });
+
+    test("scopes every key to the user's own folder", () => {
+        for (const path of exportStoragePaths("u1")) {
+            expect(path.startsWith("u1/")).toBe(true);
+        }
+    });
+
+    // The guard above is only worth anything if deletion actually routes
+    // through it; inlining a path there again is the regression.
+    test("deleteAllUserData removes exactly this list", async () => {
+        const src = await Bun.file("./src/supabase.ts").text();
+        const body = src.slice(
+            src.indexOf("export async function deleteAllUserData"),
+        );
+        expect(body).toContain("exportStoragePaths(userId)");
+    });
+});
+
+// ---------- fetchAllPages (issue #66: the meal export silently truncated at
 // PostgREST's default db-max-rows of 1000, since getAllMeals had no .range()
 // pagination) ----------
 

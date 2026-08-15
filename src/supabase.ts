@@ -1331,11 +1331,11 @@ export async function deleteAllUserData(userId: string): Promise<void> {
     if (profileErr)
         throw new Error(`Failed to delete profile: ${profileErr.message}`);
 
-    // Remove any meal-export file from the "exports" storage bucket. Missing
-    // paths are not an error, so this is a no-op for users who never exported.
+    // Remove any export file from the "exports" storage bucket. Missing paths
+    // are not an error, so this is a no-op for users who never exported.
     const { error: exportErr } = await sb.storage
         .from("exports")
-        .remove([`${userId}/meals.csv`]);
+        .remove(exportStoragePaths(userId));
     if (exportErr)
         throw new Error(`Failed to delete exports: ${exportErr.message}`);
 
