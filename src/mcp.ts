@@ -73,7 +73,7 @@ import {
     type WeightUnit,
 } from "./units.js";
 import { formatAlcohol, isDrinkUnit, type DrinkUnit } from "./alcohol.js";
-import { exportMeals } from "./export.js";
+import { exportAllData } from "./export.js";
 import {
     runImport,
     buildSummaryText,
@@ -653,7 +653,7 @@ const IMPORT_ROW_SCHEMA = z.object({
         .string()
         .optional()
         .describe(
-            "IANA timezone (e.g. 'Europe/Kyiv') this row's logged_at should be read in, when logged_at carries no offset. Map it from a 'timezone' column when the file is an export from THIS server (export_meals writes one) — that column names the zone the meal was actually recorded in, which may no longer match the account's current timezone. Omit for files with no such column; the row then falls back to the account's configured timezone.",
+            "IANA timezone (e.g. 'Europe/Kyiv') this row's logged_at should be read in, when logged_at carries no offset. Map it from a 'timezone' column when the file is an export from THIS server (the meals.csv in an export_all_data archive carries one) — that column names the zone the meal was actually recorded in, which may no longer match the account's current timezone. Omit for files with no such column; the row then falls back to the account's configured timezone.",
         ),
     meal_type: z
         .string()
@@ -700,7 +700,7 @@ const IMPORT_ROW_SCHEMA = z.object({
         .string()
         .optional()
         .describe(
-            "The value of the 'id' column when the file is an export from THIS server (export_meals writes it). Always pass it through: it is how a re-imported backup is recognized as the user's existing meals instead of being duplicated. Ignored for files from other apps.",
+            "The value of the 'id' column when the file is an export from THIS server (the meals.csv in an export_all_data archive carries it). Always pass it through: it is how a re-imported backup is recognized as the user's existing meals instead of being duplicated. Ignored for files from other apps.",
         ),
 });
 
@@ -4100,11 +4100,11 @@ export function registerTools(
     );
 
     server.registerTool(
-        "export_meals",
+        "export_all_data",
         {
-            title: "Export Meals",
+            title: "Export All Data",
             description:
-                "Export all of the user's logged meals as a CSV file and return a private, time-limited download link (valid 60 minutes). Timestamps use the user's timezone if set, otherwise UTC. Share the link with the user so they can download their data.",
+                "Export EVERY table this server tracks for the user — meals, water, weight, nutrition goals and profile settings — as a single ZIP archive (meals.csv, water.csv, weight.csv, goals.csv, profile.csv, plus a README.txt describing the columns and the units they are in) and return a private, time-limited download link (valid 60 minutes). Timestamps use the user's timezone if set, otherwise UTC. Only meals.csv can be read back in; water, weight, goals and profile are export-only. This is the server's only export path — use it for a full backup, an account takeout, or a request for the meal history alone, in which case tell the user their meals are meals.csv inside the archive. Share the link with the user so they can download their data.",
             annotations: {
                 readOnlyHint: false,
                 destructiveHint: false,
@@ -4114,24 +4114,38 @@ export function registerTools(
         },
         async () => {
             return withAnalytics(
-                "export_meals",
+                "export_all_data",
                 async () => {
-                    const { count, url } = await exportMeals(userId);
-                    if (count === 0) {
+                    const { counts, goals, profile, url } =
+                        await exportAllData(userId);
+                    // No link means the account had nothing at all — not even a
+                    // profile row — so there is no archive to hand over.
+                    if (!url) {
                         return {
                             content: [
                                 {
                                     type: "text",
-                                    text: "No meals to export yet.",
+                                    text: "No data to export yet.",
                                 },
                             ],
                         };
                     }
+                    // Name every file's row count, zeros included: the archive
+                    // always ships all six files, so "0 weight entries" is what
+                    // tells the user weight.csv is headers-only because they
+                    // never logged weight — not because the export lost it.
+                    const contents = [
+                        `${counts.meals} meal${counts.meals === 1 ? "" : "s"}`,
+                        `${counts.water} water ${counts.water === 1 ? "entry" : "entries"}`,
+                        `${counts.weight} weight ${counts.weight === 1 ? "entry" : "entries"}`,
+                        goals ? "nutrition goals" : "no nutrition goals set",
+                        profile ? "profile settings" : "no profile settings",
+                    ].join(", ");
                     return {
                         content: [
                             {
                                 type: "text",
-                                text: `Exported ${count} meal${count === 1 ? "" : "s"} to CSV.\nDownload (link valid for 60 minutes): ${url}`,
+                                text: `Exported all data to a ZIP archive: ${contents}.\nDownload (link valid for 60 minutes): ${url}`,
                             },
                         ],
                     };

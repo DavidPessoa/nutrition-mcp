@@ -3573,3 +3573,69 @@ describe("current-time disclosure", () => {
         }
     });
 });
+
+// The whole-account archive is the server's ONLY export path — the meals-only
+// export_meals tool it replaced is gone, and its meals.csv now lives inside the
+// ZIP. So the description has to carry two things a user would otherwise be
+// stranded by: where the meal history went, and the asymmetry that five of the
+// six files have no way back in.
+describe("export_all_data is on the tool surface", () => {
+    async function toolsOf() {
+        const server = new McpServer(
+            { name: "t", version: "0.0.0" },
+            { capabilities: { tools: {}, resources: {} } },
+        );
+        registerTools(server, "u1", true, null);
+        const [ct, st] = InMemoryTransport.createLinkedPair();
+        const client = new Client({ name: "c", version: "0.0.0" });
+        await Promise.all([server.connect(st), client.connect(ct)]);
+        const { tools } = await client.listTools();
+        await client.close();
+        await server.close();
+        return tools;
+    }
+
+    test("it is the only export tool — export_meals is gone", async () => {
+        const names = (await toolsOf()).map((t) => t.name);
+        expect(names).toContain("export_all_data");
+        // Not merely renamed away: leaving the old tool registered beside this
+        // one is the thing this decision rejected, so a re-added meals-only
+        // export should fail here rather than quietly double the surface.
+        expect(names).not.toContain("export_meals");
+    });
+
+    test("its description names every file and the import asymmetry", async () => {
+        const desc =
+            (await toolsOf()).find((t) => t.name === "export_all_data")
+                ?.description ?? "";
+        for (const file of [
+            "meals.csv",
+            "water.csv",
+            "weight.csv",
+            "goals.csv",
+            "profile.csv",
+            "README.txt",
+        ]) {
+            expect(desc, file).toContain(file);
+        }
+        expect(desc).toContain("60 minutes");
+        expect(desc).toContain("export-only");
+        // With no meals-only tool left, "export my meals" lands here. The
+        // description has to say so, or the model reads a tool named
+        // export_all_data and decides it is the wrong one.
+        expect(desc).toContain("meals.csv inside the archive");
+    });
+
+    // The archive is a write — it uploads to the exports bucket — and the
+    // signed link differs on every call, so despite reading like a query none
+    // of this is read-only or idempotent.
+    test("it is annotated as the write it is", async () => {
+        const all = (await toolsOf()).find((t) => t.name === "export_all_data");
+        expect(all?.annotations).toEqual({
+            readOnlyHint: false,
+            destructiveHint: false,
+            idempotentHint: false,
+            openWorldHint: false,
+        });
+    });
+});
