@@ -183,6 +183,58 @@ export function mealIdempotencyKey(
     ]);
 }
 
+/**
+ * The idempotency key updateMeal should persist for `fields` applied on top
+ * of `existing`, or null when the row's current key must be left alone.
+ *
+ * mealIdempotencyKey derives a content digest so retries dedupe without a
+ * client-supplied key — but updateMeal never recomputed it, so editing a
+ * meal's content left the digest describing the pre-edit content (#84): a
+ * replay of the ORIGINAL log_meal call then deduped onto the corrected row
+ * ("Meal already logged"), while re-logging the CORRECTED content created a
+ * duplicate. Recomputing over the merged (existing + changed) fields keeps
+ * the key describing what the row now says.
+ *
+ * Only when the current key is "auto:"-prefixed: a caller-supplied key
+ * encodes the caller's own request-level idempotency choice, which
+ * updateMeal must not override.
+ */
+export function updatedMealIdempotencyKey(
+    userId: string,
+    existing: Meal,
+    fields: Partial<MealInput>,
+): string | null {
+    if (!existing.idempotency_key?.startsWith("auto:")) return null;
+
+    const merged: MealInput = {
+        description: fields.description ?? existing.description,
+        meal_type:
+            (fields.meal_type as MealInput["meal_type"] | undefined) ??
+            (existing.meal_type as MealInput["meal_type"]),
+        calories:
+            fields.calories !== undefined
+                ? toStoredInteger(fields.calories)
+                : (existing.calories ?? undefined),
+        protein_g: fields.protein_g ?? existing.protein_g ?? undefined,
+        carbs_g: fields.carbs_g ?? existing.carbs_g ?? undefined,
+        fat_g: fields.fat_g ?? existing.fat_g ?? undefined,
+        notes: fields.notes ?? existing.notes ?? undefined,
+    };
+    // existing.logged_at came back through PostgREST, which renders
+    // timestamptz as "+00:00" (and drops an all-zero fractional part) —
+    // never as the "Z"-suffixed, millisecond-padded form every write path
+    // hashes (new Date().toISOString(), here and in insertMeal/importMeals).
+    // Re-serializing through Date canonicalizes it back to that shared
+    // format. Skipping this made every edit that leaves logged_at untouched
+    // — the common case — persist a key a fresh, identical log_meal call
+    // could never reproduce, silently reopening the "duplicate on re-log"
+    // half of #84.
+    const loggedAt =
+        fields.logged_at ?? new Date(existing.logged_at).toISOString();
+
+    return mealIdempotencyKey(userId, merged, loggedAt);
+}
+
 export async function insertMeal(
     userId: string,
     input: MealInput,
@@ -499,6 +551,17 @@ export async function updateMeal(
     id: string,
     fields: Partial<MealInput>,
 ): Promise<Meal> {
+    const sb = getSupabase();
+
+    const { data: existing, error: selErr } = await sb
+        .from("meals")
+        .select("*")
+        .eq("id", id)
+        .eq("user_id", userId)
+        .maybeSingle();
+    if (selErr) throw new Error(`Failed to update meal: ${selErr.message}`);
+    if (!existing) throw new Error("Failed to update meal: meal not found");
+
     const update: Record<string, unknown> = {};
     if (fields.description !== undefined)
         update.description = decodeEscapeSequences(fields.description);
@@ -521,7 +584,10 @@ export async function updateMeal(
                 ? decodeEscapeSequences(fields.notes)
                 : fields.notes;
 
-    const { data, error } = await getSupabase()
+    const newKey = updatedMealIdempotencyKey(userId, existing as Meal, fields);
+    if (newKey !== null) update.idempotency_key = newKey;
+
+    const { data, error } = await sb
         .from("meals")
         .update(update)
         .eq("id", id)
