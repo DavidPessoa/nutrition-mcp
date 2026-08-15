@@ -120,3 +120,142 @@ test("the Cronometer page says its caffeine column crosses over", async () => {
     // The out-of-scope claim is still not made anywhere on the page.
     expect(html).not.toContain("caffeine from Open Food Facts");
 });
+
+// What `export_all_data` puts in the ZIP. Every page now makes some version of
+// an "everything" claim — the landing page's export card, its trust badge,
+// llms.txt, the tool card, and the switching-cost card on all six comparison
+// pages — and "everything" is only true relative to this list. Add a table to
+// the schema, leave the archive as it is, and each of those claims turns false
+// with nothing to catch it, which is the caffeine failure again in a different
+// costume. So the copy is pinned to the file names, not to the adjectives.
+const ARCHIVE_FILES = [
+    "meals.csv",
+    "water.csv",
+    "weight.csv",
+    "goals.csv",
+    "profile.csv",
+    "README.txt",
+];
+// The tables behind those CSVs, as the prose names them.
+const ARCHIVE_TABLES = ["meals", "water", "weight", "goals", "profile"];
+
+// The list above is a mirror, and mirrors drift. src/export.ts owns the real
+// archive, so whenever it names its members, the two must agree exactly — a
+// seventh file added there, or one dropped, fails here before the pages can go
+// quietly stale. (It is matched against the source text rather than imported:
+// src/export.ts reaches for Supabase credentials at call time, and a copy
+// guard should not need them.)
+test("the pinned archive list matches what src/export.ts actually writes", async () => {
+    const exportSrc = await Bun.file("./src/export.ts").text();
+    const named = [
+        ...new Set(
+            [...exportSrc.matchAll(/["'`]([A-Za-z0-9_.-]+\.(?:csv|txt))["'`]/g)]
+                .map((m) => m[1]!)
+                // Only bare file names are archive members; anything with a
+                // path in front of it is a storage key, not a ZIP entry.
+                .filter((name) => !name.includes("/")),
+        ),
+    ].sort();
+    // A scrape that finds nothing is the failure mode this guard is most
+    // likely to die of — rename a constant, change how the names are written,
+    // and an empty set would quietly agree with everything. Demand a non-empty
+    // match, so a broken regex fails loudly instead of passing vacuously.
+    expect(
+        named.length,
+        "scraped no archive file names out of src/export.ts — this guard's regex has gone stale, not the copy",
+    ).toBeGreaterThan(0);
+    expect(
+        named,
+        "src/export.ts and this test's ARCHIVE_FILES disagree — whatever the archive gained or lost has to reach the public copy too",
+    ).toEqual([...ARCHIVE_FILES].sort());
+});
+
+test("the landing page's export card names every table in the archive", () => {
+    const cards = [
+        ...index.matchAll(/<h3>([^<]+)<\/h3>\s*<p>([\s\S]*?)<\/p>/g),
+    ];
+    const card = new Map(
+        cards.map((m) => [normalize(m[1]!), normalize(m[2]!)]),
+    ).get("Export & own your data");
+    expect(card).toBeTruthy();
+    for (const table of ARCHIVE_TABLES) {
+        expect(card, `export card omits ${table}`).toContain(table);
+    }
+    // And the half of the claim that is easy to over-promise: the ZIP comes
+    // out, but only meals go back in.
+    expect(card).toContain("only part that can be imported back in");
+});
+
+test("tools.html documents export_all_data and what is in the ZIP", async () => {
+    const tools = await Bun.file("./public/tools.html").text();
+    // Prettier wraps the tag when the name is long enough, so match the pair
+    // loosely rather than pinning today's line breaks.
+    expect(tools).toMatch(
+        /<code class="tool-name"\s*>\s*export_all_data\s*<\/code\s*>/,
+    );
+    expect(tools).toContain('id="export_all_data"');
+    const normalized = normalize(tools);
+    for (const file of ARCHIVE_FILES) {
+        expect(normalized, `tools.html omits ${file}`).toContain(file);
+    }
+    // The tool count in the title, the meta/OG descriptions and the count pill
+    // is the number of cards below it, and a card added without touching those
+    // five places is the classic way this page goes wrong.
+    // Counted on the normalized text: prettier wraps the opening tag once the
+    // attributes get long, so the raw file spells this two different ways.
+    const cardCount = [...normalized.matchAll(/<article class="tool-card"/g)]
+        .length;
+    for (const claim of [...normalized.matchAll(/(?:all|All) (\d+) [Tt]ools/g)])
+        expect(
+            Number(claim[1]),
+            `"${claim[0]}" disagrees with the ${cardCount} tool cards on the page`,
+        ).toBe(cardCount);
+    expect(normalized).toContain(`<b>${cardCount} tools</b>`);
+    // export_meals was removed, not kept beside the archive; a lingering card
+    // documents a tool the server will not answer to.
+    expect(normalized).not.toContain("export_meals");
+});
+
+test("llms.txt names the export tool and the archive members", async () => {
+    const llms = await Bun.file("./public/llms.txt").text();
+    expect(llms).toContain("export_all_data");
+    // The meals-only tool was removed rather than kept alongside the archive.
+    // An LLM reading a stale mention would hand the user a tool name the
+    // server no longer answers to.
+    expect(llms).not.toContain("export_meals");
+    for (const file of ARCHIVE_FILES) {
+        expect(llms, `llms.txt omits ${file}`).toContain(file);
+    }
+    // Water, weight, goals and profile leave but do not return, and an LLM
+    // reading this file is exactly who would otherwise promise a round trip.
+    expect(llms).toContain("export-only");
+});
+
+// The strongest switching-cost line on the comparison pages is that all of the
+// data comes back out, so it has to enumerate what "all" means — in the
+// generator, and in the six pages that were regenerated from it.
+test("the comparison-page card names every table it promises back", async () => {
+    for (const table of ARCHIVE_TABLES) {
+        expect(generator, `generator omits ${table}`).toContain(table);
+    }
+    expect(generator).toContain("Take everything back out whenever you want");
+
+    for (const slug of [
+        "cronometer",
+        "myfitnesspal",
+        "lose-it",
+        "macrofactor",
+        "yazio",
+        "lifesum",
+    ]) {
+        const html = normalize(
+            await Bun.file(`./public/alternatives/${slug}.html`).text(),
+        );
+        expect(
+            html,
+            `${slug}.html was not regenerated from the generator`,
+        ).toContain(
+            "one ZIP with your meals, water, weight, goals and profile",
+        );
+    }
+});

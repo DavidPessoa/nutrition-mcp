@@ -447,7 +447,7 @@ export async function fetchAllPages<T>(
 }
 
 /**
- * All of a user's meals, oldest first — used by export_meals. Pages through
+ * All of a user's meals, oldest first — used by export_all_data. Pages through
  * `.range()` (see `fetchAllPages`) rather than one unbounded select, since a
  * user can have up to MAX_MEALS_PER_USER (200,000) meals, far past the
  * PostgREST row cap. `id` is a secondary sort key so rows sharing a
@@ -966,6 +966,54 @@ export async function getWaterInRange(
     return (data as WaterEntry[]) ?? [];
 }
 
+/**
+ * How many water rows this user already has. Independent exact count, used by
+ * `getAllWater` to prove the paged fetch came back whole.
+ */
+export async function countWater(userId: string): Promise<number> {
+    const { count, error } = await getSupabase()
+        .from("water_log")
+        .select("id", { count: "exact", head: true })
+        .eq("user_id", userId);
+
+    if (error) throw new Error(`Failed to count water: ${error.message}`);
+    return count ?? 0;
+}
+
+/**
+ * All of a user's water entries, oldest first — used by export_all_data. Pages
+ * through `.range()` (see `fetchAllPages`) rather than one unbounded select,
+ * since a heavy logger blows past PostgREST's 1000-row cap. `id` is a secondary
+ * sort key so rows sharing a `logged_at` timestamp still get a stable order
+ * across page boundaries — without it, ties straddling a page edge could be
+ * skipped or duplicated. Reconciles the fetched total against `countWater` so a
+ * truncated result throws instead of silently exporting less than the user has.
+ */
+export async function getAllWater(userId: string): Promise<WaterEntry[]> {
+    const expected = await countWater(userId);
+    if (expected === 0) return [];
+
+    const entries = await fetchAllPages<WaterEntry>(async (from, to) => {
+        const { data, error } = await getSupabase()
+            .from("water_log")
+            .select("*")
+            .eq("user_id", userId)
+            .order("logged_at", { ascending: true })
+            .order("id", { ascending: true })
+            .range(from, to);
+
+        if (error) throw new Error(`Failed to get water: ${error.message}`);
+        return (data as WaterEntry[]) ?? [];
+    });
+
+    if (entries.length < expected) {
+        throw new Error(
+            `getAllWater: fetched ${entries.length} entries but countWater reported ${expected} — export would be truncated`,
+        );
+    }
+    return entries;
+}
+
 /** True when a row matched and was deleted; see deleteMeal. */
 export async function deleteWater(
     userId: string,
@@ -1105,6 +1153,55 @@ export async function getWeightInRange(
     return (data as WeightEntry[]) ?? [];
 }
 
+/**
+ * How many weight rows this user already has. Independent exact count, used by
+ * `getAllWeight` to prove the paged fetch came back whole.
+ */
+export async function countWeight(userId: string): Promise<number> {
+    const { count, error } = await getSupabase()
+        .from("weight_log")
+        .select("id", { count: "exact", head: true })
+        .eq("user_id", userId);
+
+    if (error) throw new Error(`Failed to count weight: ${error.message}`);
+    return count ?? 0;
+}
+
+/**
+ * All of a user's weight entries, oldest first — used by export_all_data. Pages
+ * through `.range()` (see `fetchAllPages`) rather than one unbounded select,
+ * since years of daily weigh-ins outrun PostgREST's 1000-row cap. `id` is a
+ * secondary sort key so rows sharing a `logged_at` timestamp still get a stable
+ * order across page boundaries — without it, ties straddling a page edge could
+ * be skipped or duplicated. Reconciles the fetched total against `countWeight`
+ * so a truncated result throws instead of silently exporting less than the user
+ * has.
+ */
+export async function getAllWeight(userId: string): Promise<WeightEntry[]> {
+    const expected = await countWeight(userId);
+    if (expected === 0) return [];
+
+    const entries = await fetchAllPages<WeightEntry>(async (from, to) => {
+        const { data, error } = await getSupabase()
+            .from("weight_log")
+            .select("*")
+            .eq("user_id", userId)
+            .order("logged_at", { ascending: true })
+            .order("id", { ascending: true })
+            .range(from, to);
+
+        if (error) throw new Error(`Failed to get weight: ${error.message}`);
+        return (data as WeightEntry[]) ?? [];
+    });
+
+    if (entries.length < expected) {
+        throw new Error(
+            `getAllWeight: fetched ${entries.length} entries but countWeight reported ${expected} — export would be truncated`,
+        );
+    }
+    return entries;
+}
+
 /** Most recent weight entry overall, or null if none logged. */
 export async function getLatestWeight(
     userId: string,
@@ -1165,6 +1262,37 @@ export async function deleteWeight(
 
 // ---------- Delete all user data ----------
 
+/**
+ * Storage key the whole-account export archive is written to — one per user,
+ * so each export overwrites the last. Lives here rather than in src/export.ts
+ * because deletion needs it too and src/export.ts already imports from this
+ * module; the other direction would be a cycle.
+ */
+export function exportArchivePath(userId: string): string {
+    return `${userId}/nutrition-mcp-export.zip`;
+}
+
+/**
+ * EVERY key an export may have left in the bucket for this user, current and
+ * historical. `deleteAllUserData` removes all of them, and that is the whole
+ * reason this list exists rather than a single inlined path: the archive holds
+ * the user's complete meal, water, weight, goals and profile history, so a key
+ * missed here survives the account that asked to be erased — and keeps
+ * resolving through the signed URL the user was already handed, for the rest
+ * of its hour. Renaming the archive without adding its old name to this list
+ * is exactly that bug, and `remove` reports a missing path as success, so
+ * nothing would surface it. Add, do not replace.
+ */
+export function exportStoragePaths(userId: string): string[] {
+    return [
+        exportArchivePath(userId),
+        // Written by the meals-only export that the archive replaced. Nothing
+        // creates it any more; it stays here to clean up files left behind by
+        // exports taken before that change.
+        `${userId}/meals.csv`,
+    ];
+}
+
 export async function deleteAllUserData(userId: string): Promise<void> {
     const sb = getSupabase();
 
@@ -1203,11 +1331,11 @@ export async function deleteAllUserData(userId: string): Promise<void> {
     if (profileErr)
         throw new Error(`Failed to delete profile: ${profileErr.message}`);
 
-    // Remove any meal-export file from the "exports" storage bucket. Missing
-    // paths are not an error, so this is a no-op for users who never exported.
+    // Remove any export file from the "exports" storage bucket. Missing paths
+    // are not an error, so this is a no-op for users who never exported.
     const { error: exportErr } = await sb.storage
         .from("exports")
-        .remove([`${userId}/meals.csv`]);
+        .remove(exportStoragePaths(userId));
     if (exportErr)
         throw new Error(`Failed to delete exports: ${exportErr.message}`);
 
