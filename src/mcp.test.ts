@@ -1083,6 +1083,47 @@ describe("start_meal_import payload", () => {
     });
 });
 
+// #99: the pure startImportPayload/runImport functions above take
+// tzConfigured as an already-computed boolean, so they can't catch a bug in
+// HOW mcp.ts computes it. These drive the real tools to cover that
+// derivation: a profile row (created by some other set_* tool) with no
+// timezone must count as unconfigured, the same as no profile at all.
+describe("start_meal_import and bulk_import_meals treat a timezone-less profile as unconfigured", () => {
+    test("start_meal_import reports tz_configured=false and warns", async () => {
+        db.profile = { ...PROFILE_BASE, timezone: null };
+        await withTools(null, async (call) => {
+            const r = await call("start_meal_import");
+            const sc = r.structuredContent as unknown as {
+                tz_configured: boolean;
+            };
+            expect(sc.tz_configured).toBe(false);
+            expect(textOf(r)).toContain("this account has no timezone set");
+        });
+    });
+
+    test("bulk_import_meals warns that the timezone is unset", async () => {
+        db.profile = { ...PROFILE_BASE, timezone: null };
+        await withTools(null, async (call) => {
+            const r = await call("bulk_import_meals", {
+                meals: [
+                    {
+                        source_line: 2,
+                        description: "Oatmeal",
+                        meal_type: "breakfast",
+                        logged_at: "2026-07-20 08:30:00",
+                    },
+                ],
+                expected_row_count: 1,
+                dry_run: true,
+            });
+            const sc = r.structuredContent as unknown as {
+                warnings: string[];
+            };
+            expect(sc.warnings.join(" ")).toContain("Your timezone is not set");
+        });
+    });
+});
+
 // formatFoodResult lives in foods.ts but its rendering is part of this pass, and
 // its gate is fed by the same alcohol opt-in threaded through mcp.ts — so its
 // gating cases are covered here rather than in the food-lookup suite.
@@ -3176,6 +3217,24 @@ describe("manual write tools resolve logged_at in the profile timezone", () => {
         });
     });
 
+    // #99: a profile row can exist — any of set_weight_unit, set_widget_display
+    // or set_alcohol_tracking creates one — without the user ever having called
+    // set_timezone. `profile !== null` alone must not read as "configured".
+    test("a profile row with no timezone still warns, even though it exists", async () => {
+        db.profile = { ...PROFILE_BASE, timezone: null };
+        await withTools(null, async (call) => {
+            const text = textOf(
+                await call("log_meal", {
+                    ...oatmeal,
+                    logged_at: "2026-07-20T08:30:00",
+                }),
+            );
+            expect(text).toContain("set_timezone");
+            expect(text).toContain("no timezone set");
+            expect(loggedAtOf(db.inserted[0])).toBe("2026-07-20T08:30:00.000Z");
+        });
+    });
+
     // The warning is about a missing setting, not about the timestamp form: a
     // value carrying its own offset never consulted the timezone, so nagging
     // about it would be noise on every single call.
@@ -3392,6 +3451,20 @@ describe("current-time disclosure", () => {
         });
     });
 
+    // #99: a profile row created by some other set_* tool, with timezone still
+    // null, must read the same as no profile at all.
+    test("get_timezone treats a profile with no timezone as unset", async () => {
+        db.profile = { ...PROFILE_BASE, timezone: null };
+        await withTools(null, async (call) => {
+            const { text, sampled } = await around("UTC", async () =>
+                textOf(await call("get_timezone")),
+            );
+            expect(text).toContain("No timezone set yet (defaulting to UTC).");
+            expectClockIn(text, "UTC", sampled);
+            expect(text).toContain("set_timezone");
+        });
+    });
+
     test("get_current_time answers in the profile's zone, and is measured", async () => {
         db.profile = { ...PROFILE_BASE, timezone: "Asia/Tokyo" };
         await withTools(null, async (call) => {
@@ -3414,6 +3487,20 @@ describe("current-time disclosure", () => {
     // model would resolve "this morning" against a clock up to 14 hours off.
     test("get_current_time flags that an unset zone means UTC, not local", async () => {
         db.profile = null;
+        await withTools(null, async (call) => {
+            const { text, sampled } = await around("UTC", async () =>
+                textOf(await call("get_current_time")),
+            );
+            expectClockIn(text, "UTC", sampled);
+            expect(text).toContain("No timezone is set for this account");
+            expect(text).toContain("set_timezone");
+        });
+    });
+
+    // #99: same as above, but via a profile row an unrelated set_* tool
+    // created — this is the case that used to go quiet forever.
+    test("get_current_time flags an unset zone even when the profile row exists", async () => {
+        db.profile = { ...PROFILE_BASE, timezone: null };
         await withTools(null, async (call) => {
             const { text, sampled } = await around("UTC", async () =>
                 textOf(await call("get_current_time")),
