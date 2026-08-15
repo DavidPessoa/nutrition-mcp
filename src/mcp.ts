@@ -30,6 +30,7 @@ import {
     widgetsEnabledFromProfile,
     alcoholTrackingEnabledFromProfile,
     preferredDrinkUnitFromProfile,
+    timezoneFromProfile,
     upsertProfile,
     getProfile,
     countMeals,
@@ -1101,12 +1102,11 @@ function formatClockLine(tz: string): string {
 // Resolve a caller-supplied `logged_at` to an absolute instant before it
 // reaches the timestamptz column. Without this an offset-less string is read in
 // the database session's zone (UTC), so a Kyiv user's 21:00 lands at midnight
-// on the NEXT day and the tool's own progress line contradicts itself. The
-// profile row is fetched rather than just the timezone because its absence is
-// the only reliable "never configured" signal, and resolving in a defaulted UTC
-// is the same silent mis-filing one level up. That signal is imperfect — the
-// other set_* tools upsert a profile whose timezone defaults to UTC — so it
-// under-warns rather than over-warns.
+// on the NEXT day and the tool's own progress line contradicts itself.
+// "Configured" is `timezoneFromProfile(profile) !== null`, not `profile !==
+// null`: the other set_* tools upsert a profile that never touches timezone,
+// so the row's mere existence is not evidence the user ever chose a zone
+// (#99).
 //
 // The unset-timezone hint has to be attached on the failure path too: read as
 // UTC, an offset-less local time from a user east of UTC can resolve to a
@@ -1118,21 +1118,18 @@ async function resolveWriteTimestamp(
 ): Promise<{ iso: string | undefined; note: string }> {
     if (raw === undefined) return { iso: undefined, note: "" };
     const profile = await getProfile(userId);
+    const tz = timezoneFromProfile(profile);
     const unsetTzNote = (value: string) =>
         `${JSON.stringify(value)} carries no UTC offset and this account has no timezone set, so it was read as UTC. Set one with set_timezone.`;
 
     let resolved;
     try {
-        resolved = resolveWriteLoggedAt(
-            raw,
-            profile?.timezone ?? "UTC",
-            Date.now(),
-        );
+        resolved = resolveWriteLoggedAt(raw, tz ?? "UTC", Date.now());
     } catch (err) {
         if (
             err instanceof LoggedAtError &&
             err.usedProfileTimezone &&
-            profile === null
+            tz === null
         ) {
             throw new Error(`${err.message} ${unsetTzNote(raw)}`);
         }
@@ -1140,7 +1137,7 @@ async function resolveWriteTimestamp(
     }
 
     const note =
-        resolved.usedProfileTimezone && profile === null
+        resolved.usedProfileTimezone && tz === null
             ? `\n\nNote: ${unsetTzNote(raw)} Then re-check this entry.`
             : "";
     return { iso: resolved.instant.toISOString(), note };
@@ -1493,16 +1490,16 @@ export function registerTools(
                 "start_meal_import",
                 async () => {
                     const profile = await getProfile(userId);
-                    const tz = profile?.timezone ?? "UTC";
+                    const tz = timezoneFromProfile(profile);
                     const structuredContent = startImportPayload({
-                        tz,
-                        tzConfigured: profile !== null,
+                        tz: tz ?? "UTC",
+                        tzConfigured: tz !== null,
                         widgetsEnabled,
                         alcohol,
                     });
                     const text = widgetsEnabled
                         ? "Importer ready — pick your export file in the panel above. Nothing is saved until you confirm the preview." +
-                          (profile === null
+                          (tz === null
                               ? " Note: this account has no timezone set, so times will be read as UTC. Offer to set it first."
                               : "")
                         : "This account has widgets turned off, so the importer cannot be shown. Ask the user to paste their export (or enable widgets with set_widget_display), then import it yourself with bulk_import_meals.";
@@ -1591,13 +1588,14 @@ export function registerTools(
                 "bulk_import_meals",
                 async () => {
                     // One profile read serves both: the timezone, and whether the
-                    // user ever configured one. profiles.timezone defaults to
-                    // 'UTC', so a missing profile row is the reliable "never set"
-                    // signal — and rows without an explicit offset are placed with
-                    // it, so the import warns rather than silently guessing.
+                    // user ever configured one via timezoneFromProfile (null
+                    // means never set — see the Profile.timezone doc comment in
+                    // supabase.ts, #99). Rows without an explicit offset are
+                    // placed with it, so the import warns rather than silently
+                    // guessing.
                     const profile = await getProfile(userId);
-                    const tz = profile?.timezone ?? "UTC";
-                    const tzConfigured = profile !== null;
+                    const tz = timezoneFromProfile(profile);
+                    const tzConfigured = tz !== null;
 
                     // Bound total growth before doing any work (see
                     // MAX_MEALS_PER_USER).
@@ -1638,7 +1636,7 @@ export function registerTools(
 
                     const result = await runImport(args as BulkImportArgs, {
                         userId,
-                        tz,
+                        tz: tz ?? "UTC",
                         tzConfigured,
                         nowMs: Date.now(),
                         insert: (input) => insertMeal(userId, input),
@@ -4197,12 +4195,12 @@ export function registerTools(
                             `Invalid timezone: ${timezone}. Use an IANA identifier like 'America/Los_Angeles' or 'Europe/London'.`,
                         );
                     }
-                    const profile = await upsertProfile(userId, { timezone });
+                    await upsertProfile(userId, { timezone });
                     return {
                         content: [
                             {
                                 type: "text",
-                                text: `Timezone set to ${profile.timezone}. Local today is ${todayInTz(profile.timezone)}.`,
+                                text: `Timezone set to ${timezone}. Local today is ${todayInTz(timezone)}.`,
                             },
                         ],
                     };
@@ -4229,8 +4227,8 @@ export function registerTools(
             return withAnalytics(
                 "get_timezone",
                 async () => {
-                    const profile = await getProfile(userId);
-                    if (!profile) {
+                    const tz = timezoneFromProfile(await getProfile(userId));
+                    if (tz === null) {
                         return {
                             content: [
                                 {
@@ -4244,7 +4242,7 @@ export function registerTools(
                         content: [
                             {
                                 type: "text",
-                                text: `Timezone: ${profile.timezone}. ${formatClockLine(profile.timezone)}`,
+                                text: `Timezone: ${tz}. ${formatClockLine(tz)}`,
                             },
                         ],
                     };
@@ -4277,16 +4275,18 @@ export function registerTools(
             return withAnalytics(
                 "get_current_time",
                 async () => {
-                    const profile = await getProfile(userId);
-                    const tz = profile?.timezone ?? "UTC";
-                    const unset = profile
-                        ? ""
-                        : " No timezone is set for this account, so this is UTC and may not be the user's actual local time — offer set_timezone.";
+                    const configuredTz = timezoneFromProfile(
+                        await getProfile(userId),
+                    );
+                    const unset =
+                        configuredTz !== null
+                            ? ""
+                            : " No timezone is set for this account, so this is UTC and may not be the user's actual local time — offer set_timezone.";
                     return {
                         content: [
                             {
                                 type: "text",
-                                text: `${formatClockLine(tz)}${unset}`,
+                                text: `${formatClockLine(configuredTz ?? "UTC")}${unset}`,
                             },
                         ],
                     };

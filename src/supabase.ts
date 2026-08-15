@@ -537,7 +537,14 @@ export async function updateMeal(
 
 export interface Profile {
     user_id: string;
-    timezone: string;
+    // null means "never set with set_timezone" — the column has no default
+    // to fall back on that would be distinguishable from a deliberate
+    // choice, so every reader must coalesce this explicitly (see
+    // timezoneFromProfile / getUserTimezone below). Do not read this
+    // directly to decide whether a timezone is "configured" outside those
+    // two: that was #99 — a row can exist (any set_* tool creates one) with
+    // this still null.
+    timezone: string | null;
     preferred_weight_unit: WeightUnit | null;
     widgets_enabled: boolean;
     alcohol_tracking_enabled: boolean;
@@ -557,9 +564,18 @@ export async function getProfile(userId: string): Promise<Profile | null> {
     return (data as Profile | null) ?? null;
 }
 
+// Returns the timezone the user actually chose with set_timezone, or null if
+// they never have — regardless of whether a profile row exists. Callers that
+// need to know whether the timezone is *configured* (as opposed to what to
+// display) must use this, not `profile !== null`.
+export function timezoneFromProfile(
+    profile: Profile | null | undefined,
+): string | null {
+    return profile?.timezone ?? null;
+}
+
 export async function getUserTimezone(userId: string): Promise<string> {
-    const profile = await getProfile(userId);
-    return profile?.timezone ?? "UTC";
+    return timezoneFromProfile(await getProfile(userId)) ?? "UTC";
 }
 
 // Returns the user's saved weight-unit preference, or null if they have never
@@ -634,7 +650,10 @@ export async function getPreferredDrinkUnit(
 }
 
 // Upsert the fields provided in `patch`, leaving other columns untouched. On
-// first insert, omitted columns fall back to their DB defaults (UTC / kg).
+// first insert, an omitted column falls back to its DB default where one
+// exists (widgets_enabled: true, alcohol_tracking_enabled: false); timezone,
+// preferred_weight_unit and preferred_drink_unit have none and land as NULL,
+// meaning "never chosen".
 export async function upsertProfile(
     userId: string,
     patch: {

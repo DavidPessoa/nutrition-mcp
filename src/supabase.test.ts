@@ -4,6 +4,7 @@ import {
     widgetsEnabledFromProfile,
     alcoholTrackingEnabledFromProfile,
     preferredDrinkUnitFromProfile,
+    timezoneFromProfile,
     fetchAllPages,
     timezoneLevels,
     TZ_LEVEL_THRESHOLDS,
@@ -281,6 +282,31 @@ describe("no-profile defaults, together", () => {
             alcohol: alcoholTrackingEnabledFromProfile(null),
             drinkUnit: preferredDrinkUnitFromProfile(null),
         }).toEqual({ widgets: true, alcohol: false, drinkUnit: null });
+    });
+});
+
+// #99: profiles.timezone is nullable specifically so "never chosen" is
+// representable. Unlike the three preferences above, a profile ROW existing
+// is not by itself evidence of a choice here — set_weight_unit,
+// set_widget_display and set_alcohol_tracking all upsert a profile without
+// ever touching timezone, so callers must key "configured" off this
+// function's return value, never off `profile !== null`.
+describe("timezoneFromProfile", () => {
+    test("returns null when there is no profile row", () => {
+        expect(timezoneFromProfile(null)).toBeNull();
+        expect(timezoneFromProfile(undefined)).toBeNull();
+    });
+
+    // The realistic path into #99: a profile row exists (created by some
+    // other set_* tool) but timezone was never explicitly set.
+    test("returns null for an existing profile whose timezone was never set", () => {
+        expect(timezoneFromProfile(profile({ timezone: null }))).toBeNull();
+    });
+
+    test("returns a saved timezone", () => {
+        expect(timezoneFromProfile(profile({ timezone: "Asia/Tokyo" }))).toBe(
+            "Asia/Tokyo",
+        );
     });
 });
 
