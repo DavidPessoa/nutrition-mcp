@@ -2918,15 +2918,6 @@
                         </p>
                     </div>
 
-                    <!-- Hidden until the world map has something to show again.
-                         The 2026-08-15 nullable_profile_timezone migration (#99)
-                         reset 310 of 311 profiles' timezone to NULL, and
-                         public_landing_stats() only counts non-null timezones
-                         (see getLandingStats() in src/supabase.ts), so this
-                         rendered as "Logged across 2 timezones worldwide" with
-                         almost no dots. Re-enable once the count has recovered
-                         as users call set_timezone again — buildMap()/setStats()
-                         below already no-op safely with #map-block absent.
                     <div class="map-block" id="map-block">
                         <p class="map-head">
                             Logged across
@@ -2945,7 +2936,6 @@
                             ></svg>
                         </div>
                     </div>
-                    -->
                 </div>
             </section>
 
