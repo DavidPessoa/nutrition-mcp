@@ -1,0 +1,36 @@
+{
+    "_note": "SYNTHETIC. THE landmine fixture: energy present only in kilojoules (268), plus a 208 entry whose unitName is kJ rather than KCAL. Reading either as calories would be a ~4x overstatement that looks entirely plausible in a food log. Both must yield calories: null.",
+    "fdcId": 9999001,
+    "description": "Kilojoule Only Test Food",
+    "dataType": "Foundation",
+    "foodNutrients": [
+        {
+            "amount": 1506,
+            "nutrient": { "number": "268", "name": "Energy", "unitName": "kJ" }
+        },
+        {
+            "amount": 1506,
+            "nutrient": { "number": "208", "name": "Energy", "unitName": "kJ" }
+        },
+        {
+            "amount": 12,
+            "nutrient": { "number": "203", "name": "Protein", "unitName": "G" }
+        },
+        {
+            "amount": 5,
+            "nutrient": {
+                "number": "204",
+                "name": "Total lipid (fat)",
+                "unitName": "G"
+            }
+        },
+        {
+            "amount": 60,
+            "nutrient": {
+                "number": "205",
+                "name": "Carbohydrate, by difference",
+                "unitName": "G"
+            }
+        }
+    ]
+}

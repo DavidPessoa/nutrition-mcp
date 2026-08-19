@@ -1,0 +1,66 @@
+{
+    "_note": "SYNTHETIC. A /v1/foods/search response in the abridged shape (flat foodNutrients: {number, name, amount, unitName}, number as an INTEGER not a string). Deliberately contains materially different foods for one query — raw vs roasted, skin-on vs skinless — so the provider is proven not to pick one.",
+    "totalHits": 4,
+    "currentPage": 1,
+    "foods": [
+        {
+            "fdcId": 171077,
+            "description": "Chicken, broilers or fryers, breast, meat only, cooked, roasted",
+            "dataType": "SR Legacy",
+            "publicationDate": "4/1/2019",
+            "foodCategory": "Poultry Products",
+            "foodNutrients": [
+                {
+                    "number": 208,
+                    "name": "Energy",
+                    "amount": 165,
+                    "unitName": "KCAL"
+                },
+                {
+                    "number": 203,
+                    "name": "Protein",
+                    "amount": 31.02,
+                    "unitName": "G"
+                }
+            ]
+        },
+        {
+            "fdcId": 171075,
+            "description": "Chicken, broilers or fryers, breast, meat and skin, cooked, roasted",
+            "dataType": "SR Legacy",
+            "foodNutrients": [
+                {
+                    "number": 208,
+                    "name": "Energy",
+                    "amount": 197,
+                    "unitName": "KCAL"
+                },
+                {
+                    "number": 203,
+                    "name": "Protein",
+                    "amount": 29.8,
+                    "unitName": "G"
+                }
+            ]
+        },
+        {
+            "fdcId": 171074,
+            "description": "Chicken, broilers or fryers, breast, meat only, raw",
+            "dataType": "SR Legacy",
+            "foodNutrients": [
+                {
+                    "number": 208,
+                    "name": "Energy",
+                    "amount": 120,
+                    "unitName": "KCAL"
+                }
+            ]
+        },
+        {
+            "fdcId": 2646170,
+            "description": "Chicken breast, roasted, from restaurant",
+            "dataType": "Survey (FNDDS)",
+            "foodNutrients": []
+        }
+    ]
+}

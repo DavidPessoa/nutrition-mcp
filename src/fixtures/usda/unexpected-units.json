@@ -1,0 +1,72 @@
+{
+    "_note": "SYNTHETIC. Amounts are fine; the units are not convertible: vitamin A in IU only (318, no 320 RAE entry), vitamin D in IU only (324), vitamin E as MG_ATE, a nutrient with no unitName at all, and a negative sodium. All must yield null.",
+    "fdcId": 9999002,
+    "description": "Unexpected Units Test Food",
+    "dataType": "Foundation",
+    "foodNutrients": [
+        {
+            "amount": 200,
+            "nutrient": {
+                "number": "208",
+                "name": "Energy",
+                "unitName": "KCAL"
+            }
+        },
+        {
+            "amount": 4,
+            "nutrient": { "number": "203", "name": "Protein", "unitName": "G" }
+        },
+        {
+            "amount": 2,
+            "nutrient": {
+                "number": "204",
+                "name": "Total lipid (fat)",
+                "unitName": "G"
+            }
+        },
+        {
+            "amount": 30,
+            "nutrient": {
+                "number": "205",
+                "name": "Carbohydrate, by difference",
+                "unitName": "G"
+            }
+        },
+        {
+            "amount": 2500,
+            "nutrient": {
+                "number": "318",
+                "name": "Vitamin A, IU",
+                "unitName": "IU"
+            }
+        },
+        {
+            "amount": 400,
+            "nutrient": {
+                "number": "324",
+                "name": "Vitamin D",
+                "unitName": "IU"
+            }
+        },
+        {
+            "amount": 1.2,
+            "nutrient": {
+                "number": "323",
+                "name": "Vitamin E (alpha-tocopherol)",
+                "unitName": "MG_ATE"
+            }
+        },
+        {
+            "amount": 33,
+            "nutrient": { "number": "301", "name": "Calcium, Ca" }
+        },
+        {
+            "amount": -5,
+            "nutrient": {
+                "number": "307",
+                "name": "Sodium, Na",
+                "unitName": "MG"
+            }
+        }
+    ]
+}

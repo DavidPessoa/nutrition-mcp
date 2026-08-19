@@ -1,0 +1,36 @@
+{
+    "_note": "SYNTHETIC. A record carrying only the four core macros and nothing else — the common Survey (FNDDS) shape. Every micronutrient must come back null, not zero.",
+    "fdcId": 2341234,
+    "description": "Beef curry",
+    "dataType": "Survey (FNDDS)",
+    "foodNutrients": [
+        {
+            "amount": 141,
+            "nutrient": {
+                "number": "208",
+                "name": "Energy",
+                "unitName": "KCAL"
+            }
+        },
+        {
+            "amount": 9.5,
+            "nutrient": { "number": "203", "name": "Protein", "unitName": "G" }
+        },
+        {
+            "amount": 6.2,
+            "nutrient": {
+                "number": "204",
+                "name": "Total lipid (fat)",
+                "unitName": "G"
+            }
+        },
+        {
+            "amount": 11.4,
+            "nutrient": {
+                "number": "205",
+                "name": "Carbohydrate, by difference",
+                "unitName": "G"
+            }
+        }
+    ]
+}

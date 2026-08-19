@@ -1,0 +1,137 @@
+{
+    "_note": "SYNTHETIC, schema-shaped. Modeled on the /v1/food/{fdcId} 'FoodNutrient' shape from USDA's published OpenAPI spec (nutrient.{number,name,unitName} + amount). Values are per 100 g and are placeholders for a real capture — no live FDC response has been checked against this mapping yet (no API key). Replace with a real capture when validate:usda first runs; see validation/usda/README.md.",
+    "fdcId": 171077,
+    "description": "Chicken, broilers or fryers, breast, meat only, cooked, roasted",
+    "dataType": "SR Legacy",
+    "publicationDate": "4/1/2019",
+    "foodCategory": { "description": "Poultry Products" },
+    "foodPortions": [
+        {
+            "amount": 1,
+            "gramWeight": 86,
+            "portionDescription": "1 breast, bone and skin removed"
+        }
+    ],
+    "foodNutrients": [
+        {
+            "amount": 165,
+            "nutrient": {
+                "number": "208",
+                "name": "Energy",
+                "unitName": "KCAL"
+            }
+        },
+        {
+            "amount": 691,
+            "nutrient": { "number": "268", "name": "Energy", "unitName": "kJ" }
+        },
+        {
+            "amount": 31.02,
+            "nutrient": { "number": "203", "name": "Protein", "unitName": "G" }
+        },
+        {
+            "amount": 3.57,
+            "nutrient": {
+                "number": "204",
+                "name": "Total lipid (fat)",
+                "unitName": "G"
+            }
+        },
+        {
+            "amount": 0,
+            "nutrient": {
+                "number": "205",
+                "name": "Carbohydrate, by difference",
+                "unitName": "G"
+            }
+        },
+        {
+            "amount": 0,
+            "nutrient": {
+                "number": "291",
+                "name": "Fiber, total dietary",
+                "unitName": "G"
+            }
+        },
+        {
+            "amount": 1.01,
+            "nutrient": {
+                "number": "606",
+                "name": "Fatty acids, total saturated",
+                "unitName": "G"
+            }
+        },
+        {
+            "amount": 85,
+            "nutrient": {
+                "number": "601",
+                "name": "Cholesterol",
+                "unitName": "MG"
+            }
+        },
+        {
+            "amount": 74,
+            "nutrient": {
+                "number": "307",
+                "name": "Sodium, Na",
+                "unitName": "MG"
+            }
+        },
+        {
+            "amount": 256,
+            "nutrient": {
+                "number": "306",
+                "name": "Potassium, K",
+                "unitName": "MG"
+            }
+        },
+        {
+            "amount": 15,
+            "nutrient": {
+                "number": "301",
+                "name": "Calcium, Ca",
+                "unitName": "MG"
+            }
+        },
+        {
+            "amount": 1.04,
+            "nutrient": {
+                "number": "303",
+                "name": "Iron, Fe",
+                "unitName": "MG"
+            }
+        },
+        {
+            "amount": 29,
+            "nutrient": {
+                "number": "304",
+                "name": "Magnesium, Mg",
+                "unitName": "MG"
+            }
+        },
+        {
+            "amount": 6,
+            "nutrient": {
+                "number": "320",
+                "name": "Vitamin A, RAE",
+                "unitName": "UG"
+            }
+        },
+        {
+            "amount": 21,
+            "nutrient": {
+                "number": "318",
+                "name": "Vitamin A, IU",
+                "unitName": "IU"
+            }
+        },
+        {
+            "amount": 0.2,
+            "nutrient": {
+                "number": "328",
+                "name": "Vitamin D (D2 + D3)",
+                "unitName": "UG"
+            }
+        }
+    ]
+}
