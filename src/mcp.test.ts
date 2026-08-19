@@ -1470,6 +1470,11 @@ mock.module("./supabase.js", () => ({
     getUserTimezone: async () => db.profile?.timezone ?? "UTC",
     getNutritionGoals: async () => db.goals,
     getMealsByDate: async () => db.meals,
+    // update_meal reads the prior row before writing, so the resolution
+    // policy can see where a stored value came from before deciding whether
+    // an incoming one may replace it (src/resolution.ts).
+    getMealById: async (_userId: string, id: string) =>
+        db.meals.find((m) => m.id === id) ?? null,
     getWaterByDate: async () => [],
     // The range readers behind get_nutrition_summary. They ignore the dates and
     // hand back whatever the test staged: the fixtures below already sit inside
@@ -2074,8 +2079,12 @@ describe("log_meal / update_meal chase missing fiber and sugar", () => {
             const text = textOf(
                 await call("update_meal", { id: "m1", fiber_g: 6 }),
             );
-            expect(text).toContain("sugar_g");
-            expect(text).not.toContain("fiber_g");
+            // Scoped to the nudge itself: the meal body now also carries a
+            // provenance line ("Sources — model_estimate: fiber_g"), which is
+            // the write being attributed, not the repair loop asking again.
+            const note = text.slice(text.indexOf("Not recorded on this meal:"));
+            expect(note).toContain("sugar_g");
+            expect(note).not.toContain("fiber_g");
         });
     });
 });

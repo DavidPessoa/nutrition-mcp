@@ -408,6 +408,30 @@ export async function insertMeal(
     return { meal: normalizeMeal(data), deduplicated: false };
 }
 
+/**
+ * One meal by id, scoped to its owner. Returns null when the meal does not
+ * exist or belongs to someone else — the two are deliberately
+ * indistinguishable to the caller.
+ *
+ * Added for the nutrient resolution policy (src/resolution.ts): deciding
+ * whether an incoming value may overwrite a stored one requires knowing what
+ * is stored AND where it came from, and `updateMeal`'s own internal select
+ * happens after that decision has to be made.
+ */
+export async function getMealById(
+    userId: string,
+    id: string,
+): Promise<Meal | null> {
+    const { data, error } = await getSupabase()
+        .from("meals")
+        .select("*")
+        .eq("id", id)
+        .eq("user_id", userId)
+        .maybeSingle();
+    if (error) throw new Error(`Failed to get meal: ${error.message}`);
+    return data ? normalizeMeal(data as Record<string, unknown>) : null;
+}
+
 export async function getMealsByDate(
     userId: string,
     date: string,

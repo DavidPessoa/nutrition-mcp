@@ -227,7 +227,10 @@ describe("searchFoods", () => {
         });
         await searchFoods("spinach");
         const params = new URL(seen).searchParams;
-        expect(params.get("dataType")).toBe(DEFAULT_DATA_TYPES.join(","));
+        // Repeated params, NOT comma-joined: "Survey (FNDDS)" contains
+        // parentheses, and a comma-joined dataType is rejected upstream with
+        // a bare nginx 400. This assertion is the lock on that.
+        expect(params.getAll("dataType")).toEqual([...DEFAULT_DATA_TYPES]);
         expect(params.get("query")).toBe("spinach");
     });
 

@@ -361,10 +361,23 @@ function toCandidate(food: RawFdcFood): UsdaCandidate | null {
     };
 }
 
-async function fdcFetch(path: string, params: Record<string, string>) {
+// `dataType` MUST be sent as repeated parameters, never comma-joined: one of
+// the dataset names is "Survey (FNDDS)", and a comma-joined value containing
+// its parentheses is rejected by USDA's front end with a bare nginx 400 that
+// says nothing about why. Verified live.
+async function fdcFetch(
+    path: string,
+    params: Record<string, string | readonly string[]>,
+) {
     const url = new URL(`${FDC_BASE_URL}${path}`);
     url.searchParams.set("api_key", apiKey());
-    for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
+    for (const [key, value] of Object.entries(params)) {
+        if (Array.isArray(value)) {
+            for (const item of value) url.searchParams.append(key, item);
+        } else {
+            url.searchParams.set(key, value as string);
+        }
+    }
     const response = await fetch(url, {
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
         headers: { Accept: "application/json" },
@@ -393,7 +406,7 @@ export async function searchFoods(
     const payload = (await fdcFetch("/foods/search", {
         query: trimmed,
         pageSize: String(Math.min(Math.max(options.pageSize ?? 10, 1), 50)),
-        dataType: (options.dataTypes ?? DEFAULT_DATA_TYPES).join(","),
+        dataType: options.dataTypes ?? DEFAULT_DATA_TYPES,
     })) as { foods?: RawFdcFood[] };
     return (payload.foods ?? [])
         .map(toCandidate)

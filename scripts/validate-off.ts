@@ -105,7 +105,7 @@ for (const { barcode, what, expected } of CASES) {
     console.log(`  ${food.name}${food.brand ? ` (${food.brand})` : ""}`);
 
     for (const [field, want] of Object.entries(expected)) {
-        const got = (food as Record<string, unknown>)[field];
+        const got = (food as unknown as Record<string, unknown>)[field];
         const ok =
             want === null
                 ? got === null
