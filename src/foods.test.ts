@@ -444,6 +444,7 @@ describe("fetchProductFromOFF alcohol (ABV, not grams)", () => {
 
 describe("formatFoodResult", () => {
     const base: FoodResult = {
+        servingBasis: { kind: "per_100g" },
         name: "Coconut Milk",
         brand: "Thai Kitchen",
         serving: "80 ml",
@@ -454,6 +455,20 @@ describe("formatFoodResult", () => {
         fiber_g: 0.5,
         sugar_g: 1.8,
         alcohol_g: null,
+        caffeine_mg: null,
+        saturated_fat_g: null,
+        trans_fat_g: null,
+        added_sugar_g: null,
+        sodium_mg: null,
+        potassium_mg: null,
+        cholesterol_mg: null,
+        calcium_mg: null,
+        iron_mg: null,
+        magnesium_mg: null,
+        vitamin_a_mcg: null,
+        vitamin_c_mg: null,
+        vitamin_d_mcg: null,
+        provenance: null,
         source: "off:737628064502",
         source_name: "openfoodfacts",
         barcode: "737628064502",
