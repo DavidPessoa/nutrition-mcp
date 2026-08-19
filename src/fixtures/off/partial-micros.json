@@ -1,0 +1,18 @@
+{
+    "code": "0000000000017",
+    "status": 1,
+    "status_verbose": "product found",
+    "_note": "Synthetic. A product carrying exactly ONE micronutrient (sodium). Every other micronutrient key is absent entirely — the single most common real shape, and the one that must yield null (not 0) for the eleven it does not carry.",
+    "product": {
+        "product_name": "Partial Micros Test Product",
+        "brands": "Fixture Foods",
+        "nutriments": {
+            "energy-kcal_100g": 200,
+            "proteins_100g": 5,
+            "carbohydrates_100g": 30,
+            "fat_100g": 6,
+            "sodium_100g": 0.5,
+            "sodium_unit": "g"
+        }
+    }
+}

@@ -1,0 +1,23 @@
+{
+    "code": "0000000000048",
+    "status": 1,
+    "status_verbose": "product found",
+    "_note": "Synthetic. Declares a serving_size but carries NO energy-kcal_serving, so the normalizer must fall back to the per-100g basis for EVERY field — including micronutrients, which must not silently read their own _serving keys and mix bases within one product. The _serving values here are deliberately different numbers so a mixed-basis bug is visible.",
+    "product": {
+        "product_name": "Serving Fallback Test Product",
+        "brands": "Fixture Foods",
+        "serving_size": "1 slice",
+        "nutriments": {
+            "energy-kcal_100g": 250,
+            "proteins_100g": 8,
+            "carbohydrates_100g": 40,
+            "fat_100g": 4,
+            "sodium_100g": 0.4,
+            "sodium_serving": 0.1,
+            "sodium_unit": "g",
+            "calcium_100g": 0.2,
+            "calcium_serving": 0.05,
+            "calcium_unit": "g"
+        }
+    }
+}

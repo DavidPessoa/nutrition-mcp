@@ -3,8 +3,11 @@ import {
     normalizeBarcode,
     fetchProductFromOFF,
     formatFoodResult,
+    buildOFFProvenance,
+    toFoodNutrition,
     type FoodResult,
 } from "./foods.js";
+import { emptyNutrientValues } from "./providers/types.js";
 
 const realFetch = globalThis.fetch;
 
@@ -515,5 +518,226 @@ describe("formatFoodResult", () => {
         expect(text).toContain("Coconut Milk\n");
         expect(text).not.toContain("()");
         expect(text).toContain("Calories: n/a");
+    });
+});
+
+// ---------------------------------------------------------------------------
+// Micronutrient mapping (Agent 3) — fixtures only, never a live call.
+// ---------------------------------------------------------------------------
+//
+// The three product fixtures under src/fixtures/off/ are REAL Open Food Facts
+// API v2 responses, captured 2026-08-19 and trimmed to the fields this module
+// reads (see validation/open-food-facts/README.md for the capture command and
+// the hand-computed expected values). The rest are synthetic and say so in
+// their own `_note`.
+//
+// The assertion style here is deliberate: a micronutrient the source did not
+// report is asserted `toBeNull()`, NEVER `toBe(0)` and never a numeric
+// tolerance around zero — "within 0.1 of zero" would pass for an unrecorded
+// nutrient, which is the exact null-vs-zero collapse CONTRACT.md 0.1 forbids.
+
+async function offFixture(name: string): Promise<unknown> {
+    return await Bun.file(
+        `${import.meta.dir}/fixtures/off/${name}.json`,
+    ).json();
+}
+
+async function fromFixture(name: string, barcode: string) {
+    mockFetch(async () => jsonResponse(await offFixture(name)));
+    const food = await fetchProductFromOFF(barcode);
+    expect(food).not.toBeNull();
+    return food!;
+}
+
+const MICRONUTRIENT_KEYS = [
+    "saturated_fat_g",
+    "trans_fat_g",
+    "added_sugar_g",
+    "sodium_mg",
+    "potassium_mg",
+    "cholesterol_mg",
+    "calcium_mg",
+    "iron_mg",
+    "magnesium_mg",
+    "vitamin_a_mcg",
+    "vitamin_c_mg",
+    "vitamin_d_mcg",
+] as const;
+
+describe("micronutrients from real OFF fixtures", () => {
+    test("Nutella (per-100g, sub-0.1 g sodium) — the false-zero landmine", async () => {
+        const food = await fromFixture("nutella-per-100g", "3017620422003");
+
+        // 0.0428 g of sodium. Rounding to one decimal BEFORE converting
+        // yields 0.0 g -> 0 mg: a real 42.8 mg figure destroyed and, worse,
+        // replaced by a confident zero. This assertion is the regression lock
+        // on that whole class of bug.
+        expect(food.sodium_mg).toBe(42.8);
+
+        expect(food.saturated_fat_g).toBe(10.6);
+        // Added sugar is its own OFF key and is never derived from total
+        // sugars — both are present here and they differ.
+        expect(food.added_sugar_g).toBe(52.13);
+        expect(food.sugar_g).toBe(56.3);
+
+        // Everything Nutella's record does not carry stays unknown.
+        for (const key of [
+            "trans_fat_g",
+            "potassium_mg",
+            "cholesterol_mg",
+            "calcium_mg",
+            "iron_mg",
+            "magnesium_mg",
+            "vitamin_a_mcg",
+            "vitamin_c_mg",
+            "vitamin_d_mcg",
+        ] as const) {
+            expect(food[key]).toBeNull();
+        }
+
+        // OFF carries no caffeine nutriment at all.
+        expect(food.caffeine_mg).toBeNull();
+
+        expect(food.serving).toBe("100 g");
+        expect(food.servingBasis).toEqual({ kind: "per_100g" });
+    });
+
+    test("Cheerios (per-serving) — explicit zeros survive as zero", async () => {
+        const food = await fromFixture("cheerios-per-serving", "016000275287");
+
+        expect(food.servingBasis).toEqual({
+            kind: "per_serving",
+            grams: 39,
+            label: "39g",
+        });
+
+        // 0.19 g -> 190 mg, read from the _serving key, not _100g
+        // (0.487… g would be 487 mg).
+        expect(food.sodium_mg).toBe(190);
+        expect(food.saturated_fat_g).toBe(0.5);
+
+        // The source explicitly reports zero for these. Zero is DATA here and
+        // must not be nulled out any more than a missing value may become 0.
+        expect(food.trans_fat_g).toBe(0);
+        expect(food.cholesterol_mg).toBe(0);
+        expect(food.added_sugar_g).toBe(0);
+    });
+
+    test("Chocapic (per-serving) — microgram-scale vitamin D", async () => {
+        const food = await fromFixture("chocapic-per-serving", "3387390123210");
+
+        // 0.00000102 g. Through the mcg pivot this is 1.0200000000000002
+        // before the noise guard; anything but exactly 1.02 means the guard
+        // regressed.
+        expect(food.vitamin_d_mcg).toBe(1.02);
+        expect(food.calcium_mg).toBe(150);
+        expect(food.iron_mg).toBe(3.6);
+        expect(food.sodium_mg).toBe(24);
+        expect(food.added_sugar_g).toBe(5.78);
+        expect(food.servingBasis).toEqual({
+            kind: "per_serving",
+            grams: 30,
+            label: "30 g",
+        });
+    });
+});
+
+describe("micronutrient edge cases", () => {
+    test("a product carrying one micronutrient leaves the other eleven null", async () => {
+        const food = await fromFixture("partial-micros", "0000000000017");
+        expect(food.sodium_mg).toBe(500);
+        for (const key of MICRONUTRIENT_KEYS) {
+            if (key === "sodium_mg") continue;
+            expect(food[key]).toBeNull();
+        }
+    });
+
+    test("ambiguous or absent units yield null, never a guessed number", async () => {
+        const food = await fromFixture("unknown-units", "0000000000024");
+        // IU -> µg RAE has no single valid factor (see src/nutrient-units.ts).
+        expect(food.vitamin_a_mcg).toBeNull();
+        // Amount present, no _unit key at all.
+        expect(food.potassium_mg).toBeNull();
+        // "%" of some daily value is not a mass.
+        expect(food.magnesium_mg).toBeNull();
+        // "kg" is a mass but never a real per-100g nutrient unit; treated as
+        // unrecognized rather than shifted by 1e6.
+        expect(food.calcium_mg).toBeNull();
+    });
+
+    test("unusable amounts yield null; numeric strings still parse", async () => {
+        const food = await fromFixture("bad-values", "0000000000031");
+        expect(food.sodium_mg).toBeNull(); // "n/a"
+        expect(food.potassium_mg).toBeNull(); // JSON null
+        expect(food.calcium_mg).toBeNull(); // ""
+        expect(food.magnesium_mg).toBeNull(); // true
+        expect(food.iron_mg).toBe(14); // "0.014" g -> 14 mg
+    });
+
+    test("a serving_size without per-serving energy falls back to per-100g for micros too", async () => {
+        const food = await fromFixture(
+            "serving-basis-fallback",
+            "0000000000048",
+        );
+        expect(food.servingBasis).toEqual({ kind: "per_100g" });
+        // The _serving keys exist and carry different numbers; reading them
+        // here would mix two bases inside one product.
+        expect(food.sodium_mg).toBe(400);
+        expect(food.calcium_mg).toBe(200);
+    });
+
+    test("a volume-parsed serving keeps grams null rather than borrowing the volume", async () => {
+        const food = await fromFixture(
+            "serving-no-gram-weight",
+            "0000000000055",
+        );
+        expect(food.servingBasis).toEqual({
+            kind: "per_serving",
+            grams: null,
+            label: "330 ml",
+        });
+        expect(food.sodium_mg).toBe(33);
+    });
+});
+
+describe("OFF provenance", () => {
+    test("every populated nutrient gets an entry, every null one gets none", async () => {
+        const food = await fromFixture("partial-micros", "0000000000017");
+        const provenance = food.provenance!;
+        expect(provenance.sodium_mg).toEqual({
+            source: "open_food_facts",
+            source_id: "off:0000000000017",
+            confidence: "authoritative",
+        });
+        expect(provenance.calories).toBeDefined();
+        // Provenance describes where a VALUE came from; there is no value.
+        for (const key of MICRONUTRIENT_KEYS) {
+            if (key === "sodium_mg") continue;
+            expect(provenance[key]).toBeUndefined();
+        }
+        expect(provenance.caffeine_mg).toBeUndefined();
+    });
+
+    test("buildOFFProvenance returns null when nothing was populated", () => {
+        const empty = {
+            ...emptyNutrientValues(),
+            source: "off:0000000000017",
+        } as unknown as FoodResult;
+        expect(buildOFFProvenance(empty)).toBeNull();
+    });
+});
+
+describe("toFoodNutrition adapter", () => {
+    test("maps onto the cross-provider shape without renaming values", async () => {
+        const food = await fromFixture("cheerios-per-serving", "016000275287");
+        const nutrition = toFoodNutrition(food);
+        expect(nutrition.source).toBe("open_food_facts");
+        expect(nutrition.sourceId).toBe("off:016000275287");
+        expect(nutrition.serving).toEqual(food.servingBasis);
+        expect(nutrition.name).toBe(food.name);
+        expect(nutrition.brand).toBe(food.brand);
+        for (const key of MICRONUTRIENT_KEYS) {
+            expect(nutrition[key]).toBe(food[key]);
+        }
     });
 });

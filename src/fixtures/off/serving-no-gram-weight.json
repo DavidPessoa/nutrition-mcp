@@ -1,0 +1,22 @@
+{
+    "code": "0000000000055",
+    "status": 1,
+    "status_verbose": "product found",
+    "_note": "Synthetic. A genuine per-serving product whose serving was parsed as a VOLUME, not a mass ('330 ml'). The nutrient figures are valid per serving, but servingBasis.grams must stay null rather than borrow the 330 as grams.",
+    "product": {
+        "product_name": "Volume Serving Test Product",
+        "brands": "Fixture Foods",
+        "serving_size": "330 ml",
+        "serving_quantity": 330,
+        "serving_quantity_unit": "ml",
+        "nutriments": {
+            "energy-kcal_serving": 139,
+            "energy-kcal_100g": 42,
+            "proteins_serving": 0,
+            "carbohydrates_serving": 35,
+            "fat_serving": 0,
+            "sodium_serving": 0.033,
+            "sodium_unit": "g"
+        }
+    }
+}
