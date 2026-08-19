@@ -35,6 +35,13 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import * as actualSupabase from "./supabase.js";
+import * as actualUsda from "./usda.js";
+import type { UsdaCandidate } from "./usda.js";
+import { emptyNutrientValues, type FoodNutrition } from "./providers/types.js";
+import type {
+    NutrientProvenance,
+    NutrientProvenanceEntry,
+} from "./nutrients.js";
 import { DELETED_ACCOUNT_ANALYTICS_ID } from "./analytics.js";
 import { formatFoodResult, type FoodResult } from "./foods.js";
 import {
@@ -3686,6 +3693,476 @@ describe("export_all_data is on the tool surface", () => {
             destructiveHint: false,
             idempotentHint: false,
             openWorldHint: false,
+        });
+    });
+});
+
+// ---------- (4) nutrient sources, provenance and the resolution policy ----------
+
+// src/resolution.test.ts already covers the policy as a pure function. What it
+// cannot see is whether the tools OBEY it, which is a different question with a
+// different answer: both handlers build their write as
+// `{ ...args, ...toMealNutrientInput(resolved.values) }`, so a field the policy
+// refused is merely absent from the overlay and the caller's raw value survives
+// underneath it. Everything below therefore asserts on what reached the storage
+// layer (db.inserted / db.mealUpdates) and not only on the text — a text-only
+// assertion here passes while the wrong number is written.
+//
+// Two of these assertions were written as `test.failing` against a real defect
+// found while writing them: the write was built as
+// `{ ...args, ...toMealNutrientInput(resolved.values) }`, so a value the
+// resolution policy REFUSED was merely absent from the overlay and the
+// caller's original survived underneath it — the row held a model-invented
+// sodium figure while the response said "Not stored: sodium_mg". Fixed in
+// src/mcp.ts by stripping the nutrient fields from the base object
+// (withoutNutrientFields), so resolved.values is genuinely the only
+// authority. These two are the regression locks on that; they assert on what
+// reached the storage layer, because the response text was reassuring while
+// the row was wrong.
+
+/** Provenance exactly as it reached insertMeal / updateMeal. */
+function writtenProvenance(
+    row: Record<string, unknown> | undefined,
+): NutrientProvenance | null {
+    return (row?.nutrient_provenance ?? null) as NutrientProvenance | null;
+}
+
+/** The four attributions these tests expect to see stored. Written out as
+ *  literals rather than derived from confidenceOf(), so that a change to the
+ *  source-to-confidence mapping fails here instead of agreeing with itself. */
+const OFF_CALORIES: NutrientProvenanceEntry = {
+    source: "open_food_facts",
+    source_id: "off:5000112",
+    confidence: "authoritative",
+};
+const ESTIMATED: NutrientProvenanceEntry = {
+    source: "model_estimate",
+    source_id: null,
+    confidence: "estimated",
+};
+const USER_STATED: NutrientProvenanceEntry = {
+    source: "user_provided",
+    source_id: null,
+    confidence: "user_provided",
+};
+const FROM_LABEL: NutrientProvenanceEntry = {
+    source: "nutrition_label",
+    source_id: null,
+    confidence: "authoritative",
+};
+
+describe("a better-sourced value survives a worse-sourced write", () => {
+    /** Log one barcode-sourced meal and hand back its id. */
+    async function logFromBarcode(call: CallTool) {
+        await call("log_meal", {
+            description: "Protein bar",
+            meal_type: "snack",
+            calories: 250,
+            protein_g: 20,
+            nutrient_source: "open_food_facts",
+            nutrient_source_id: "off:5000112",
+        });
+        return "m1";
+    }
+
+    test("an estimate cannot relabel a barcode figure as its own", async () => {
+        await withTools(null, async (call) => {
+            const id = await logFromBarcode(call);
+            const r = await call("update_meal", { id, calories: 999 });
+            // The attribution is the half that already works: the stored
+            // provenance still credits Open Food Facts, and the model is told
+            // why its number did not take and how to override deliberately.
+            expect(writtenProvenance(db.mealUpdates[0])?.calories).toEqual(
+                OFF_CALORIES,
+            );
+            expect(textOf(r)).toContain(
+                "Kept the existing values for: calories",
+            );
+            expect(textOf(r)).toContain("nutrient_source='user_provided'");
+        });
+    });
+
+    // KNOWN BUG (src/mcp.ts, update_meal): the refused value still reaches
+    // updateMeal, so the row ends up holding 999 kcal while its provenance
+    // says the figure came from Open Food Facts. That disagreement is worse
+    // than either failure alone — the meal now looks authoritative and is not.
+    test("the refused estimate does not reach the database", async () => {
+        await withTools(null, async (call) => {
+            const id = await logFromBarcode(call);
+            await call("update_meal", { id, calories: 999 });
+            expect(db.mealUpdates[0]).not.toHaveProperty("calories");
+        });
+    });
+
+    test("a user-stated value also outranks a later estimate", async () => {
+        await withTools(null, async (call) => {
+            await call("log_meal", {
+                description: "Grandma's stew",
+                meal_type: "dinner",
+                calories: 500,
+                nutrient_source: "user_provided",
+            });
+            const r = await call("update_meal", { id: "m1", calories: 800 });
+            expect(writtenProvenance(db.mealUpdates[0])?.calories).toEqual(
+                USER_STATED,
+            );
+            expect(textOf(r)).toContain(
+                "Kept the existing values for: calories",
+            );
+        });
+    });
+
+    // The other side of the same rule, and the one that must NOT block: a
+    // stored null is "unknown", so filling it is not an overwrite. Without
+    // this, a barcode with no fiber figure would freeze fiber at null forever.
+    test("an estimate fills a macro the source had nothing for", async () => {
+        await withTools(null, async (call) => {
+            await call("log_meal", {
+                description: "Protein bar",
+                meal_type: "snack",
+                calories: 250,
+                nutrient_source: "open_food_facts",
+                nutrient_source_id: "off:5000112",
+            });
+            expect(db.meals[0]!.fiber_g).toBeNull();
+
+            const r = await call("update_meal", { id: "m1", fiber_g: 4 });
+            expect(db.mealUpdates[0]!.fiber_g).toBe(4);
+            expect(writtenProvenance(db.mealUpdates[0])?.fiber_g).toEqual(
+                ESTIMATED,
+            );
+            // Filling one field must not restate the other's attribution.
+            expect(writtenProvenance(db.mealUpdates[0])?.calories).toEqual(
+                OFF_CALORIES,
+            );
+            expect(textOf(r)).not.toContain("Kept the existing values");
+        });
+    });
+
+    // A meal logged before this epic has real values and NULL provenance. The
+    // absent field must not read as "unclaimed, so overwritable" — those
+    // numbers came from the user's own log.
+    test("a pre-epic meal is not overwritten by a fresh estimate", async () => {
+        await withTools(null, async (call) => {
+            db.meals = [meal({ calories: 700, nutrient_provenance: null })];
+            const r = await call("update_meal", { id: "m1", calories: 450 });
+            expect(textOf(r)).toContain(
+                "Kept the existing values for: calories",
+            );
+            // Nothing is invented on its behalf either: the untouched field
+            // gets no back-dated attribution.
+            expect(
+                writtenProvenance(db.mealUpdates[0])?.calories,
+            ).toBeUndefined();
+        });
+    });
+});
+
+describe("micronutrients are never model-estimated", () => {
+    test("log_meal refuses an estimated sodium figure and says why", async () => {
+        await withTools(null, async (call) => {
+            const r = await call("log_meal", {
+                description: "Chicken soup",
+                meal_type: "lunch",
+                calories: 200,
+                // No nutrient_source: the default is model_estimate, which is
+                // exactly the case this rule exists for.
+                sodium_mg: 900,
+            });
+            const provenance = writtenProvenance(db.inserted[0]);
+            // Absent, not null: nothing about this figure was recorded.
+            expect(provenance).not.toHaveProperty("sodium_mg");
+            expect(provenance?.calories?.source).toBe("model_estimate");
+            expect(textOf(r)).toContain("Not stored: sodium_mg");
+            expect(textOf(r)).toContain("cannot be model-estimated");
+        });
+    });
+
+    // KNOWN BUG (src/mcp.ts, log_meal): the invented 900 mg still reaches
+    // insertMeal, so the row is written with a sodium figure the response has
+    // just told the model was not stored — and the meal renders "Sodium: 900
+    // mg" two lines above "Not stored: sodium_mg".
+    test("the refused micronutrient never reaches the row", async () => {
+        await withTools(null, async (call) => {
+            await call("log_meal", {
+                description: "Chicken soup",
+                meal_type: "lunch",
+                calories: 200,
+                sodium_mg: 900,
+            });
+            expect(db.inserted[0]).not.toHaveProperty("sodium_mg");
+        });
+    });
+
+    test("a real source may supply the same field", async () => {
+        await withTools(null, async (call) => {
+            await call("log_meal", {
+                description: "Chicken soup",
+                meal_type: "lunch",
+                calories: 200,
+                sodium_mg: 900,
+                nutrient_source: "nutrition_label",
+            });
+            expect(db.inserted[0]!.sodium_mg).toBe(900);
+            expect(writtenProvenance(db.inserted[0])?.sodium_mg).toEqual(
+                FROM_LABEL,
+            );
+        });
+    });
+});
+
+describe("mixed-source provenance", () => {
+    /** The common real shape: a barcode gave the macros, the model filled the
+     *  one figure the product had no value for. */
+    async function logMixed(call: CallTool) {
+        return call("log_meal", {
+            description: "Protein bar",
+            meal_type: "snack",
+            calories: 250,
+            protein_g: 20,
+            sugar_g: 8,
+            fiber_g: 3,
+            nutrient_source: "open_food_facts",
+            nutrient_source_id: "off:5000112",
+            estimated_fields: ["fiber_g"],
+        });
+    }
+
+    test("each field is attributed to the source it actually came from", async () => {
+        await withTools(null, async (call) => {
+            await logMixed(call);
+            const provenance = writtenProvenance(db.inserted[0]);
+            for (const field of ["calories", "protein_g", "sugar_g"] as const) {
+                expect(provenance?.[field], field).toEqual(OFF_CALORIES);
+            }
+            expect(provenance?.fiber_g).toEqual(ESTIMATED);
+        });
+    });
+
+    test("it survives the round trip and is shown on the meal", async () => {
+        await withTools(null, async (call) => {
+            await logMixed(call);
+            const text = textOf(await call("get_meals_today"));
+            expect(text).toContain(
+                "Sources — open_food_facts (off:5000112): calories, protein_g, sugar_g | model_estimate: fiber_g",
+            );
+        });
+    });
+
+    test("updating one nutrient leaves the others and their sources alone", async () => {
+        await withTools(null, async (call) => {
+            await logMixed(call);
+            // user_provided (5) may replace the model estimate (6) it is
+            // correcting, and must touch nothing else.
+            await call("update_meal", {
+                id: "m1",
+                fiber_g: 7,
+                nutrient_source: "user_provided",
+            });
+            const update = db.mealUpdates[0]!;
+            expect(update.fiber_g).toBe(7);
+            for (const field of ["calories", "protein_g", "sugar_g"]) {
+                expect(update, field).not.toHaveProperty(field);
+            }
+            const provenance = writtenProvenance(update);
+            expect(provenance?.calories).toEqual(OFF_CALORIES);
+            expect(provenance?.sugar_g).toEqual(OFF_CALORIES);
+            expect(provenance?.fiber_g).toEqual(USER_STATED);
+        });
+    });
+
+    test("clearing a micronutrient stores null and drops its attribution", async () => {
+        await withTools(null, async (call) => {
+            await call("log_meal", {
+                description: "Instant noodles",
+                meal_type: "lunch",
+                calories: 400,
+                sodium_mg: 1600,
+                nutrient_source: "nutrition_label",
+            });
+            await call("update_meal", { id: "m1", sodium_mg: null });
+            const update = db.mealUpdates[0]!;
+            // null, not 0 and not absent: the value is now unknown, and an
+            // absent key would have left the 1600 standing.
+            expect(update.sodium_mg).toBeNull();
+            const provenance = writtenProvenance(update);
+            expect(provenance).not.toHaveProperty("sodium_mg");
+            // The rest of the meal keeps its attribution.
+            expect(provenance?.calories?.source).toBe("nutrition_label");
+            // And the read path stops showing it at all.
+            expect(textOf(await call("get_meals_today"))).not.toContain(
+                "Sodium",
+            );
+        });
+    });
+});
+
+// ---------- (5) lookup_food ----------
+
+// The USDA module is stubbed rather than reached: CONTRACT.md §0.8 forbids a
+// live API call in `bun test`, and the failure modes worth testing here (no key
+// configured, a search that returns candidates, a scaled lookup) are all in the
+// handler, not in the HTTP client. `resolveAmount` is deliberately left REAL so
+// the scaling assertions below exercise the actual arithmetic. Same wholesale-
+// replacement hazard as the ./supabase.js mock above, handled the same way.
+const usda = {
+    candidates: [] as UsdaCandidate[],
+    food: null as FoodNutrition | null,
+    error: null as Error | null,
+};
+
+// Snapshotted BEFORE the mock is installed. `actualUsda` is a live ESM
+// namespace, so mock.module rewrites the very bindings it exposes: restoring
+// with `() => actualUsda` hands the mock back to itself and leaks these stubs
+// into src/usda.test.ts, which runs later in the same process.
+const REAL_USDA = { ...actualUsda };
+
+mock.module("./usda.js", () => ({
+    ...REAL_USDA,
+    searchFoods: async () => {
+        if (usda.error) throw usda.error;
+        return usda.candidates;
+    },
+    lookupFood: async () => {
+        if (usda.error) throw usda.error;
+        return usda.food;
+    },
+}));
+
+afterAll(() => {
+    mock.module("./usda.js", () => REAL_USDA);
+});
+
+function usdaFood(over: Partial<FoodNutrition> = {}): FoodNutrition {
+    return {
+        ...emptyNutrientValues(),
+        name: "Chicken, broilers or fryers, breast, meat only, roasted",
+        brand: null,
+        serving: { kind: "per_100g" },
+        source: "usda_fdc",
+        sourceId: "fdc:171077",
+        ...over,
+    };
+}
+
+function usdaCandidate(
+    fdcId: number,
+    description: string,
+    calories: number | null,
+): UsdaCandidate {
+    return {
+        fdcId,
+        description,
+        dataType: "Foundation",
+        brand: null,
+        category: null,
+        publishedOn: null,
+        preview: { ...emptyNutrientValues(), calories },
+    };
+}
+
+describe("lookup_food", () => {
+    beforeEach(() => {
+        usda.candidates = [];
+        usda.food = null;
+        usda.error = null;
+    });
+
+    // Raw and roasted chicken breast differ by ~40% in calories, so picking for
+    // the model is picking wrong 50% of the time. The tool returns the choice.
+    test("a query alone returns candidates and picks none of them", async () => {
+        usda.candidates = [
+            usdaCandidate(171077, "Chicken, breast, meat only, roasted", 165),
+            usdaCandidate(171116, "Chicken, breast, meat only, raw", 120),
+        ];
+        await withTools(null, async (call) => {
+            const text = textOf(
+                await call("lookup_food", { query: "chicken breast" }),
+            );
+            expect(text).toContain("fdc_id 171077");
+            expect(text).toContain("fdc_id 171116");
+            expect(text).toContain("Call lookup_food again");
+            // No nutrition figures are offered for either: the candidate list
+            // is for disambiguation, and a preview kcal read as the answer is
+            // how the second step gets skipped.
+            expect(text).not.toContain("Pass to log_meal");
+            expect(db.inserted).toHaveLength(0);
+        });
+    });
+
+    test("fdc_id + grams returns values already scaled, and names what USDA lacks", async () => {
+        usda.food = usdaFood({
+            calories: 165,
+            protein_g: 31,
+            fat_g: 3.6,
+            sodium_mg: 74,
+            potassium_mg: 256,
+        });
+        await withTools(null, async (call) => {
+            const text = textOf(
+                await call("lookup_food", { fdc_id: 171077, grams: 200 }),
+            );
+            // 200 g of a per-100 g record: doubled exactly once.
+            expect(text).toContain("calories: 330");
+            expect(text).toContain("protein_g: 62");
+            expect(text).toContain("sodium_mg: 148");
+            expect(text).toContain("potassium_mg: 512");
+            expect(text).toContain("For 200 g");
+            expect(text).toContain("do not scale again");
+            // The fields USDA has no figure for are named as UNKNOWN rather
+            // than omitted, so the model does not read silence as zero.
+            const missing = text
+                .split("\n")
+                .find((line) => line.startsWith("Not recorded by USDA"))!;
+            expect(missing).toContain("vitamin_d_mcg");
+            expect(missing).toContain("fiber_g");
+            expect(missing).not.toContain("sodium_mg");
+            // And the result hands over the exact log_meal attribution.
+            expect(text).toContain("nutrient_source='usda_fdc'");
+            expect(text).toContain("nutrient_source_id='fdc:171077'");
+        });
+    });
+
+    test("with no grams the per-100 g figures come back untouched", async () => {
+        usda.food = usdaFood({ calories: 165, protein_g: 31 });
+        await withTools(null, async (call) => {
+            const text = textOf(await call("lookup_food", { fdc_id: 171077 }));
+            expect(text).toContain("calories: 165");
+            expect(text).toContain("For 100 g");
+        });
+    });
+
+    // An unconfigured server is a deployment state, not a caller error: the
+    // tool degrades to a sentence the model can act on instead of throwing.
+    test("no USDA key configured degrades to a usable message", async () => {
+        usda.error = new actualUsda.UsdaConfigError("USDA_FDC_API_KEY unset");
+        await withTools(null, async (call) => {
+            const r = await call("lookup_food", { query: "spinach raw" });
+            expect(r.isError).not.toBe(true);
+            const text = textOf(r);
+            expect(text).toContain("not configured");
+            expect(text).toContain("USDA_FDC_API_KEY");
+            // Crucially it does not invite the model to fill the gap itself.
+            expect(text).toContain(
+                "leave micronutrients out rather than estimating them",
+            );
+        });
+    });
+
+    test("a network failure says so and does not surface as a tool error", async () => {
+        usda.error = new Error("fetch failed");
+        await withTools(null, async (call) => {
+            const r = await call("lookup_food", { fdc_id: 171077 });
+            expect(r.isError).not.toBe(true);
+            expect(textOf(r)).toContain("Couldn't reach USDA");
+        });
+    });
+
+    test("neither argument is a refusal, not an empty search", async () => {
+        await withTools(null, async (call) => {
+            expect(textOf(await call("lookup_food", {}))).toContain(
+                "Pass a `query`",
+            );
         });
     });
 });

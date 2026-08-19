@@ -1426,6 +1426,47 @@ const MICRONUTRIENT_SET_MCP: ReadonlySet<string> = new Set(
     MICRONUTRIENT_INPUTS.map(([field]) => field),
 );
 
+/**
+ * Strip every nutrient field from a tool's raw arguments.
+ *
+ * This is load-bearing, and its absence was a shipped-in-a-commit bug: the
+ * write used to be built as `{ ...args, ...toMealNutrientInput(resolved) }`,
+ * so a field the policy REFUSED — an estimated micronutrient, a
+ * precedence-blocked overwrite — was simply absent from the overlay and the
+ * caller's original value survived underneath it. The row then held a
+ * model-invented sodium figure while the response said "Not stored:
+ * sodium_mg", and in the update case held a rejected number labelled with
+ * the authoritative provenance of the value it was supposed to have left
+ * alone. Removing the nutrients from the base object is what makes
+ * `resolved.values` the sole authority the surrounding comments claim it is.
+ */
+function withoutNutrientFields<T extends Record<string, unknown>>(
+    args: T,
+): Omit<
+    T,
+    | NutrientField
+    | "nutrient_source"
+    | "nutrient_source_id"
+    | "estimated_fields"
+    | "override_existing"
+> {
+    const out: Record<string, unknown> = { ...args };
+    for (const field of NUTRIENT_FIELDS) delete out[field];
+    // Resolution inputs describe the write; they are not columns.
+    delete out.nutrient_source;
+    delete out.nutrient_source_id;
+    delete out.estimated_fields;
+    delete out.override_existing;
+    return out as Omit<
+        T,
+        | NutrientField
+        | "nutrient_source"
+        | "nutrient_source_id"
+        | "estimated_fields"
+        | "override_existing"
+    >;
+}
+
 /** Human labels for rendering stored micronutrients back to the model. Only
  * non-null fields are ever shown, so a meal with no micronutrient data reads
  * exactly as it did before this field set existed. */
@@ -1738,7 +1779,7 @@ export function registerTools(
                     // nutrient fields are written.
                     const resolved = resolveMealNutrients(null, args);
                     const { meal, deduplicated } = await insertMeal(userId, {
-                        ...args,
+                        ...withoutNutrientFields(args),
                         ...toMealNutrientInput(resolved.values),
                         nutrient_provenance: resolved.provenance,
                         logged_at: iso,
@@ -3330,7 +3371,7 @@ export function registerTools(
                     const prior = await getMealById(userId, id);
                     const resolved = resolveMealNutrients(prior, fields);
                     const meal = await updateMeal(userId, id, {
-                        ...fields,
+                        ...withoutNutrientFields(fields),
                         ...toMealNutrientInput(resolved.values),
                         nutrient_provenance: resolved.provenance,
                         logged_at: iso,
