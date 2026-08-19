@@ -10,6 +10,61 @@ ownership, and the landmines. Do not re-derive any of it.
 
 ---
 
+## START HERE (next session)
+
+### 1. Environment
+
+`bun` is NOT on the default PATH. Every session must run this first, or every
+command in this document fails with "bun: command not found":
+
+```bash
+export PATH="$HOME/.bun/bin:$PATH"
+```
+
+Working directory is the worktree, not the main checkout:
+
+```
+/Users/davidparreira/Documents/Git/nutrition-mcp/.claude/worktrees/nutrient-accuracy-feature-985289
+```
+
+Confirm the baseline before changing anything:
+
+```bash
+bun run format:check && bun run typecheck && bun test
+```
+
+Expect: clean, clean, 841 pass. If that is not what you see, something drifted —
+diagnose before building on top of it.
+
+### 2. The three documents in this directory
+
+| File                 | What it is                        | When to read                                                                                                                                                                           |
+| -------------------- | --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `FEATURE_REQUEST.md` | The original epic spec, verbatim  | Before Agents 5–9. It holds the per-agent acceptance criteria, the six E2E release scenarios, and the Definition of Done checklist that `CONTRACT.md` deliberately does not duplicate. |
+| `CONTRACT.md`        | The binding cross-agent decisions | ALWAYS, first. Names, units, provenance shape, precedence, file ownership, landmines.                                                                                                  |
+| `HANDOFF.md`         | This file — current state         | ALWAYS, second.                                                                                                                                                                        |
+
+`CONTRACT.md` is a distillation, not a replacement. It settles the questions
+builders kept re-deriving; it does not contain the E2E scenarios, the goal
+field list, the CSV header aliases, or the UI hierarchy. Agents 6, 7 and 8 in
+particular need `FEATURE_REQUEST.md`.
+
+### 3. Immediate next actions, in order
+
+1. **Finish Agent 3 before trusting any OFF data.** `src/foods.ts` is written
+   but has ZERO test coverage for its new mapping. Add `src/fixtures/off/`,
+   the tests, `scripts/validate-off.ts` + the `validate:off` script, and
+   `validation/open-food-facts/README.md`. Verify the sodium g -> mg path and
+   every OFF key spelling — none of it has been independently checked.
+2. **Agent 4 (USDA) from scratch.** No files exist. See `CONTRACT.md` §5 for
+   ownership and `FEATURE_REQUEST.md` "Agent 4" for acceptance criteria.
+3. **Agent 5 (resolution + MCP).** The largest job — `src/mcp.ts` is 216 KB.
+   Use a strong model. It must implement the `SOURCE_PRECEDENCE` comparison
+   logic Agent 1 deliberately left out.
+4. Then Agents 6 and 7 (parallel), 8, and finally 9.
+
+---
+
 ## Tree state (verified, not assumed)
 
 ```

@@ -1,7 +1,20 @@
 # Nutrient Accuracy Epic — Canonical Cross-Agent Contract (Agent 0)
 
 READ THIS FIRST. It is the single source of truth for names, units, types and
-file ownership. Do not re-derive any of it. Do not rename anything here.
+file ownership. Do not re-derive any of it, and do not rename anything in it.
+
+Companion documents in this same directory (`docs/nutrient-epic/`):
+
+- `FEATURE_REQUEST.md` — the original epic spec. This contract distills the
+  decisions builders kept re-deriving; it does NOT duplicate the per-agent
+  acceptance criteria, the six E2E release scenarios, the micronutrient goal
+  field list, the CSV header aliases, or the UI hierarchy. Read it for those —
+  Agents 5 through 9 all need it.
+- `HANDOFF.md` — current state of the epic: what is done, what is partial, and
+  what is written but not yet test-covered.
+
+When assigning an agent, point it at `docs/nutrient-epic/CONTRACT.md` in the
+repo. Do not point it at a session scratchpad path — those do not survive.
 
 Repo: nutrition-mcp (Bun + TypeScript). Working dir is a git worktree on branch
 `claude/nutrient-accuracy-feature-985289`. Read `CLAUDE.md` for repo conventions
