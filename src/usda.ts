@@ -20,12 +20,15 @@
 // `readNutrients` below handles BOTH nutrient shapes, because the search
 // endpoint returns the flat one and the detail endpoint the nested one.
 //
-// LIMITATION, on the record: no live FDC response has been checked against
-// this mapping yet — DEMO_KEY was exhausted (OVER_RATE_LIMIT) at the time of
-// writing and no USDA_FDC_API_KEY was available. The shapes come from the
-// published schema; the nutrient NUMBERS come from the long-stable INFOODS
-// tagnames USDA has used since SR. `bun run validate:usda` exists precisely
-// to close that gap the moment a key is present — see validation/usda/.
+// VALIDATED LIVE 2026-08-19 (`bun run validate:usda`, five real records
+// across SR Legacy and Survey (FNDDS); see validation/usda/README.md for
+// exactly what is proven and what is still assumed). The fixtures under
+// src/fixtures/usda/ named after a food are now real captured payloads.
+//
+// Two things the live data corrected: `unitName` arrives LOWERCASE with a
+// real micro sign ("g", "mg", "µg", "kcal"), not uppercase; and nutrient 539
+// (added sugars) appeared in none of the sampled records, so that one row of
+// NUTRIENT_NUMBERS remains unexercised by real data.
 
 import {
     NUTRIENT_FIELDS,
@@ -103,6 +106,10 @@ const NUTRIENT_NUMBERS: ReadonlyArray<readonly [string, NutrientField]> = [
     ["205", "carbs_g"], // Carbohydrate, by difference
     ["291", "fiber_g"], // Fiber, total dietary
     ["269", "sugar_g"], // Sugars, total — TOTAL, never added
+    // 539 (Sugars, added) is carried by Branded records and by a minority of
+    // FNDDS ones; none of the five foods validated live on 2026-08-19 had it,
+    // so this row is mapped from the INFOODS tagname and NOT yet confirmed
+    // against a real payload. Recorded in validation/usda/README.md.
     ["539", "added_sugar_g"], // Sugars, added — its own measurement
     ["221", "alcohol_g"], // Alcohol, ethyl
     ["262", "caffeine_mg"],
@@ -123,8 +130,11 @@ const ENERGY_KCAL_NUMBER = "208";
 
 /**
  * Map an FDC `unitName` to the NutrientUnit vocabulary
- * `convertNutrientValue` understands. FDC writes these uppercase ("G", "MG",
- * "UG", "KCAL", "IU"); matching is case- and whitespace-insensitive.
+ * `convertNutrientValue` understands. Live FDC writes these LOWERCASE and
+ * uses a real micro sign ("g", "mg", "µg", "kcal", "IU" — verified 2026-08-19
+ * across SR Legacy, Survey (FNDDS) and Foundation records), but the published
+ * schema and older mirrors show uppercase, so matching stays case- and
+ * whitespace-insensitive and accepts "ug" as well as "µg".
  *
  * Anything not confidently a mass unit returns null — including "IU",
  * "MG_ATE" (α-tocopherol equivalents) and "%". Per CONTRACT.md §0.9 an
@@ -361,13 +371,33 @@ function toCandidate(food: RawFdcFood): UsdaCandidate | null {
     };
 }
 
-// `dataType` MUST be sent as repeated parameters, never comma-joined: one of
-// the dataset names is "Survey (FNDDS)", and a comma-joined value containing
-// its parentheses is rejected by USDA's front end with a bare nginx 400 that
-// says nothing about why. Verified live.
+// A PARENTHESIS ANYWHERE IN THE URL QUERY STRING IS UNUSABLE HERE.
+//
+// api.data.gov's edge (which fronts api.nal.usda.gov) intermittently answers
+// any request whose query string contains "(" or ")" with a bare nginx
+// `400 Bad Request` — no JSON, no explanation. Measured live 2026-08-19:
+//
+//   ?query=spinach                        12/12 -> 200
+//   ?query=spinach&dataType=SR%20Legacy   12/12 -> 200
+//   ?query=spinach%20(x)                   2/12 -> 200   (10 x 400)
+//   ?query=spinach&dataType=Survey%20(FNDDS)   ~50% -> 400
+//   ?query=spinach&dataType=Survey%20%28FNDDS%29 ~50% -> 400
+//
+// Percent-encoding does not help (the edge decodes first), repeated vs
+// comma-joined `dataType` makes no difference (comma-joined answers 200 just
+// as often), and it is not pinned to one edge IP. It is a flaky filter on the
+// decoded query string, and it matters because one dataset is literally named
+// "Survey (FNDDS)" — and because a user may well search for "chicken (cooked)".
+//
+// The fix is to keep parentheses out of the URL entirely: FDC documents
+// `POST /v1/foods/search` taking the same criteria as a JSON body, with only
+// `api_key` left in the URL. 12/12 -> 200 with the full three-dataset list.
+// GET is still used for `/food/{id}`, whose path and params cannot contain a
+// parenthesis.
 async function fdcFetch(
     path: string,
     params: Record<string, string | readonly string[]>,
+    body?: unknown,
 ) {
     const url = new URL(`${FDC_BASE_URL}${path}`);
     url.searchParams.set("api_key", apiKey());
@@ -380,8 +410,21 @@ async function fdcFetch(
     }
     const response = await fetch(url, {
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-        headers: { Accept: "application/json" },
+        method: body === undefined ? "GET" : "POST",
+        headers: {
+            Accept: "application/json",
+            ...(body === undefined
+                ? {}
+                : { "Content-Type": "application/json" }),
+        },
+        body: body === undefined ? undefined : JSON.stringify(body),
     });
+    // 404 is "no such record", not a failure. FDC's search index and its
+    // detail endpoint are not perfectly in sync — fdcId 747447 ("Broccoli,
+    // raw", Foundation) is returned by search and 404s on /food/{id}, every
+    // time (checked 2026-08-19). Throwing there would turn a routine dead
+    // link into a tool error instead of a null lookup.
+    if (response.status === 404) return null;
     if (!response.ok) {
         // The key is in the URL, so the URL must never reach a log or an
         // error message. Status only.
@@ -403,12 +446,16 @@ export async function searchFoods(
 ): Promise<UsdaCandidate[]> {
     const trimmed = query.trim();
     if (!trimmed) return [];
-    const payload = (await fdcFetch("/foods/search", {
-        query: trimmed,
-        pageSize: String(Math.min(Math.max(options.pageSize ?? 10, 1), 50)),
-        dataType: options.dataTypes ?? DEFAULT_DATA_TYPES,
-    })) as { foods?: RawFdcFood[] };
-    return (payload.foods ?? [])
+    const payload = (await fdcFetch(
+        "/foods/search",
+        {},
+        {
+            query: trimmed,
+            pageSize: Math.min(Math.max(options.pageSize ?? 10, 1), 50),
+            dataType: [...(options.dataTypes ?? DEFAULT_DATA_TYPES)],
+        },
+    )) as { foods?: RawFdcFood[] } | null;
+    return (payload?.foods ?? [])
         .map(toCandidate)
         .filter((c): c is UsdaCandidate => c !== null);
 }

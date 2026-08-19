@@ -5,23 +5,35 @@ import {
     resolveAmount,
     buildUsdaProvenance,
     searchFoods,
+    fetchFoodFromFdc,
     toFdcNutrientUnit,
     UsdaConfigError,
     DEFAULT_DATA_TYPES,
 } from "./usda.js";
 import { MICRONUTRIENT_FIELDS } from "./nutrients.js";
 
-// No live FDC calls, ever — CONTRACT.md §0.8. Fixtures under
-// src/fixtures/usda/ are currently SYNTHETIC but schema-shaped (see each
-// file's `_note` and validation/usda/README.md); they are modeled on USDA's
-// published OpenAPI schema, so they exercise the real response SHAPE even
-// though the numbers still await a live capture.
+// No live FDC calls, ever — CONTRACT.md §0.8.
+//
+// The five food fixtures under src/fixtures/usda/ are REAL payloads captured
+// from FoodData Central on 2026-08-19 by `bun run validate:usda`, so every
+// number asserted below is a number USDA actually publishes. Re-run that
+// script to refresh them; if a value here moves, USDA republished the record.
+//
+// The four remaining fixtures (kilojoule-only, unexpected-units,
+// partial-nutrients, search-raw-vs-cooked) are still SYNTHETIC on purpose —
+// each `_note` says so. They cover shapes the real records do not contain
+// (energy in kJ only, IU-only vitamins, a missing unitName, a negative
+// amount), and a fixture we cannot find in the wild is the only way to test
+// them.
 
 const realFetch = globalThis.fetch;
 
-function mockFetch(impl: (url: string) => Response | Promise<Response>) {
-    globalThis.fetch = mock((input: string | URL | Request) =>
-        Promise.resolve(impl(String(input))),
+function mockFetch(
+    impl: (url: string, init?: RequestInit) => Response | Promise<Response>,
+) {
+    globalThis.fetch = mock(
+        (input: string | URL | Request, init?: RequestInit) =>
+            Promise.resolve(impl(String(input), init)),
     ) as unknown as typeof fetch;
 }
 
@@ -40,7 +52,12 @@ afterEach(() => {
 });
 
 describe("toFdcNutrientUnit", () => {
-    test("accepts FDC's uppercase mass units", () => {
+    test("accepts the mass units FDC actually sends, in either case", () => {
+        // Live FDC (2026-08-19) sends lowercase with a real micro sign;
+        // the published schema shows uppercase. Both must work.
+        expect(toFdcNutrientUnit("g")).toBe("g");
+        expect(toFdcNutrientUnit("mg")).toBe("mg");
+        expect(toFdcNutrientUnit("µg")).toBe("mcg");
         expect(toFdcNutrientUnit("G")).toBe("g");
         expect(toFdcNutrientUnit("MG")).toBe("mg");
         expect(toFdcNutrientUnit("UG")).toBe("mcg");
@@ -62,31 +79,101 @@ describe("normalizeFdcFood", () => {
             "Chicken, broilers or fryers, breast, meat only, cooked, roasted",
         );
         expect(food.source).toBe("usda_fdc");
-        expect(food.sourceId).toBe("fdc:171077");
+        // The real record is 171477. The synthetic placeholder guessed
+        // 171077 — which is a real fdcId, just a different chicken.
+        expect(food.sourceId).toBe("fdc:171477");
         // FDC reports every dataset per 100 g; declaring that honestly is
         // what lets resolveAmount scale exactly once.
         expect(food.serving).toEqual({ kind: "per_100g" });
 
-        expect(food.calories).toBe(165); // 208 KCAL, never the 268 kJ entry
+        // 208 "kcal", never the 268 entry — which this record really does
+        // carry, at 690 kJ. Reading that would log 4.2x the calories.
+        expect(food.calories).toBe(165);
         expect(food.protein_g).toBe(31.02);
         expect(food.fat_g).toBe(3.57);
         expect(food.saturated_fat_g).toBe(1.01);
         expect(food.cholesterol_mg).toBe(85);
         expect(food.sodium_mg).toBe(74);
         expect(food.potassium_mg).toBe(256);
+        expect(food.calcium_mg).toBe(15);
+        expect(food.iron_mg).toBe(1.04);
         expect(food.magnesium_mg).toBe(29);
-        expect(food.vitamin_a_mcg).toBe(6); // 320 RAE, not the 318 IU entry
-        expect(food.vitamin_d_mcg).toBe(0.2);
+        // 320 (RAE, µg). The record also carries 318 "Vitamin A, IU" = 21 IU
+        // and 324 "Vitamin D, IU" = 5 IU; both are dropped, never converted.
+        expect(food.vitamin_a_mcg).toBe(6);
+        expect(food.vitamin_d_mcg).toBe(0.1);
 
-        // The source explicitly measured zero here — zero is data.
+        // The source explicitly measured zero here — zero is data, and USDA
+        // really does publish 0 for all of these on this record.
         expect(food.carbs_g).toBe(0);
         expect(food.fiber_g).toBe(0);
+        expect(food.sugar_g).toBe(0);
+        expect(food.vitamin_c_mg).toBe(0);
+        expect(food.caffeine_mg).toBe(0);
+        expect(food.alcohol_g).toBe(0);
 
-        // Not measured in this record.
-        expect(food.sugar_g).toBeNull();
+        // Genuinely absent from the record — unknown, not zero.
+        expect(food.trans_fat_g).toBeNull();
         expect(food.added_sugar_g).toBeNull();
-        expect(food.vitamin_c_mg).toBeNull();
-        expect(food.caffeine_mg).toBeNull();
+    });
+
+    test("a Survey (FNDDS) record reads identically to an SR Legacy one", async () => {
+        // Different dataset, different payload envelope (foodCode /
+        // wweiaFoodCategory instead of ndbNumber), same per-100 g basis and
+        // the same nutrient numbers and lowercase unit names.
+        const food = normalizeFdcFood(await fixture("spinach-raw"))!;
+        expect(food.sourceId).toBe("fdc:2709614");
+        expect(food.serving).toEqual({ kind: "per_100g" });
+        expect(food.calories).toBe(27);
+        expect(food.protein_g).toBe(2.85);
+        expect(food.carbs_g).toBe(2.41);
+        expect(food.fiber_g).toBe(1.6);
+        expect(food.magnesium_mg).toBe(93);
+        expect(food.potassium_mg).toBe(582);
+        expect(food.vitamin_c_mg).toBe(26.5);
+        expect(food.vitamin_a_mcg).toBe(283); // µg RAE, lowercase "µg"
+        expect(food.vitamin_d_mcg).toBe(0); // measured zero
+        expect(food.cholesterol_mg).toBe(0);
+        expect(food.trans_fat_g).toBeNull();
+        expect(food.added_sugar_g).toBeNull();
+    });
+
+    test("a whole-egg record carries trans fat and a real vitamin D", async () => {
+        // The only sampled record with nutrient 605 (trans fat) present, and
+        // the one that pins vitamin D coming from 328 (µg) rather than the
+        // 324 (IU) entry sitting next to it at 82 IU.
+        const food = normalizeFdcFood(await fixture("egg-whole-raw"))!;
+        expect(food.sourceId).toBe("fdc:171287");
+        expect(food.calories).toBe(143);
+        expect(food.protein_g).toBe(12.56);
+        expect(food.fat_g).toBe(9.51);
+        expect(food.saturated_fat_g).toBe(3.126);
+        expect(food.trans_fat_g).toBe(0.038);
+        expect(food.cholesterol_mg).toBe(372);
+        expect(food.vitamin_a_mcg).toBe(160);
+        expect(food.vitamin_d_mcg).toBe(2);
+        expect(food.added_sugar_g).toBeNull();
+    });
+
+    test("plant foods keep zero cholesterol as zero, not null", async () => {
+        const potato = normalizeFdcFood(await fixture("potato-baked"))!;
+        expect(potato.sourceId).toBe("fdc:170111");
+        expect(potato.calories).toBe(93);
+        expect(potato.carbs_g).toBe(21.15);
+        expect(potato.fiber_g).toBe(2.2);
+        expect(potato.potassium_mg).toBe(535);
+        expect(potato.vitamin_c_mg).toBe(9.6);
+        expect(potato.cholesterol_mg).toBe(0);
+        expect(potato.trans_fat_g).toBe(0);
+
+        const rice = normalizeFdcFood(await fixture("rice-white-cooked"))!;
+        expect(rice.sourceId).toBe("fdc:169708");
+        expect(rice.calories).toBe(123);
+        expect(rice.carbs_g).toBe(26.05);
+        expect(rice.iron_mg).toBe(1.81); // enriched
+        expect(rice.cholesterol_mg).toBe(0);
+        expect(rice.vitamin_a_mcg).toBe(0);
+        expect(rice.trans_fat_g).toBeNull(); // absent, unlike the potato's 0
     });
 
     test("a macros-only record leaves every micronutrient null", async () => {
@@ -165,10 +252,13 @@ describe("resolveAmount", () => {
         expect(scaled.calories).toBeCloseTo(247.5, 6); // 165 * 1.5
         expect(scaled.protein_g).toBeCloseTo(46.53, 6); // 31.02 * 1.5
         expect(scaled.sodium_mg).toBeCloseTo(111, 6); // 74 * 1.5
-        expect(scaled.vitamin_d_mcg).toBeCloseTo(0.3, 6);
+        expect(scaled.potassium_mg).toBeCloseTo(384, 6); // 256 * 1.5
+        expect(scaled.vitamin_d_mcg).toBeCloseTo(0.15, 6); // 0.1 * 1.5
         // Explicit zero scales to zero; unknown stays unknown.
         expect(scaled.carbs_g).toBe(0);
-        expect(scaled.vitamin_c_mg).toBeNull();
+        expect(scaled.vitamin_c_mg).toBe(0);
+        expect(scaled.trans_fat_g).toBeNull();
+        expect(scaled.added_sugar_g).toBeNull();
     });
 
     test("an unusable gram amount yields null, not a zeroed meal", async () => {
@@ -219,19 +309,36 @@ describe("searchFoods", () => {
         expect(candidates[3]!.preview.calories).toBeNull();
     });
 
-    test("sends the default generic-food datasets and never Branded", async () => {
-        let seen = "";
-        mockFetch(async (url) => {
-            seen = url;
+    test("searches by POST body, keeping parentheses out of the URL", async () => {
+        let seenUrl = "";
+        let seenInit: RequestInit | undefined;
+        mockFetch(async (url, init) => {
+            seenUrl = url;
+            seenInit = init;
             return Response.json({ foods: [] });
         });
-        await searchFoods("spinach");
-        const params = new URL(seen).searchParams;
-        // Repeated params, NOT comma-joined: "Survey (FNDDS)" contains
-        // parentheses, and a comma-joined dataType is rejected upstream with
-        // a bare nginx 400. This assertion is the lock on that.
-        expect(params.getAll("dataType")).toEqual([...DEFAULT_DATA_TYPES]);
-        expect(params.get("query")).toBe("spinach");
+        await searchFoods("chicken (cooked)");
+
+        // THE LOCK on the live 400: api.data.gov's edge intermittently
+        // rejects any query string containing "(" or ")", and one dataset is
+        // named "Survey (FNDDS)". Only api_key may ride in the URL.
+        expect(seenUrl).not.toContain("(");
+        expect(seenUrl).not.toContain(")");
+        expect(seenUrl).not.toContain("%28");
+        expect([...new URL(seenUrl).searchParams.keys()]).toEqual(["api_key"]);
+
+        expect(seenInit?.method).toBe("POST");
+        const body = JSON.parse(String(seenInit?.body));
+        expect(body.query).toBe("chicken (cooked)");
+        expect(body.dataType).toEqual([...DEFAULT_DATA_TYPES]);
+        expect(body.dataType).not.toContain("Branded");
+    });
+
+    test("a 404 is an empty lookup, not an error", async () => {
+        // FDC's search index and detail endpoint are not in sync: fdcId
+        // 747447 is a live search hit that 404s on /food/{id}.
+        mockFetch(() => new Response("", { status: 404 }));
+        expect(await fetchFoodFromFdc(747447)).toBeNull();
     });
 
     test("an empty query never hits the network", async () => {

@@ -1,26 +1,127 @@
 # USDA FoodData Central — real-source validation (Agent 4)
 
-> **STATUS: NOT YET VALIDATED AGAINST LIVE DATA.**
-> No `USDA_FDC_API_KEY` was available when this provider was built, and the
-> shared `DEMO_KEY` was returning `OVER_RATE_LIMIT`. Everything below is
-> ready to run; nothing below has run. Agent 4's real-source gate is
-> formally UNMET until it does.
+> **STATUS: VALIDATED AGAINST LIVE DATA — 2026-08-19.**
+> `bun run validate:usda` ran clean against the live FoodData Central API
+> with a real `USDA_FDC_API_KEY`: five foods, zero mismatches. The fixtures
+> under `src/fixtures/usda/` named after a food are the real captured
+> payloads, so `bun test` now asserts numbers USDA actually publishes. The
+> per-run comparison table is in `live-report.md` (written by the script).
+> Read "Still assumed" below before treating this as blanket coverage.
 
-## What is unverified, precisely
+## The records validated
 
-| Verified from                    | What                                                                                                                                                                                             |
-| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| USDA's published OpenAPI v3 spec | Endpoint paths, both `foodNutrients` shapes (nested `nutrient.{number,name,unitName}` + `amount` on detail; flat `{number,name,unitName,amount}` on search), the `dataType` enum, `foodPortions` |
-| Long-stable INFOODS tagnames     | The nutrient NUMBERS in `NUTRIENT_NUMBERS` (`src/usda.ts`)                                                                                                                                       |
-| **Nothing**                      | That a live record actually uses those numbers with those units, and that the per-100 g basis assumption holds for every dataset                                                                 |
+| Food                   | fdcId       | Dataset        | Record                                                  | Amount |
+| ---------------------- | ----------- | -------------- | ------------------------------------------------------- | ------ |
+| Roasted chicken breast | **171477**  | SR Legacy      | Chicken, broilers or fryers, breast, meat only, roasted | 150 g  |
+| Whole raw egg          | **171287**  | SR Legacy      | Egg, whole, raw, fresh                                  | 100 g  |
+| Baked potato           | **170111**  | SR Legacy      | Potatoes, baked, flesh and skin, with salt              | 200 g  |
+| Raw spinach            | **2709614** | Survey (FNDDS) | Spinach, raw                                            | 100 g  |
+| Cooked white rice      | **169708**  | SR Legacy      | Rice, white, long-grain, parboiled, enriched, cooked    | 100 g  |
 
-The mapping is written defensively for exactly that reason: the unit is read
-from each nutrient's own `unitName` rather than assumed, and anything not
-confidently `G`/`MG`/`UG` yields `null`. A wrong assumption should therefore
-produce a missing nutrient, not a wrong number — but "should" is not
-"validated".
+The synthetic placeholders guessed several of these wrong — most visibly
+chicken breast, guessed as 171077 (a real fdcId, but a different chicken)
+and carrying a guessed vitamin D of 0.2 µg where the real record says 0.1.
 
-## Running it
+## The 400 that blocked this, and what it actually was
+
+`bun run validate:usda` used to die on a bare nginx `400 Bad Request` with no
+JSON body. The cause is **a parenthesis anywhere in the URL query string**:
+api.data.gov's edge (which fronts `api.nal.usda.gov`) rejects such requests
+intermittently. Measured live on 2026-08-19, same key, back-to-back:
+
+| Request                                        | Result      |
+| ---------------------------------------------- | ----------- |
+| `?query=spinach`                               | 12/12 → 200 |
+| `?query=spinach&dataType=SR%20Legacy`          | 12/12 → 200 |
+| `?query=spinach&dataType=Survey`               | 12/12 → 200 |
+| `?query=spinach%20(x)`                         | 2/12 → 200  |
+| `?query=spinach&dataType=Survey%20(FNDDS)`     | ~50% → 400  |
+| `?query=spinach&dataType=Survey%20%28FNDDS%29` | ~50% → 400  |
+| `?query=spinach&dataType=Foo(Bar)`             | 10/12 → 200 |
+
+What this rules out, all of which looked plausible first:
+
+- **Not percent-encoding.** `%28`/`%29` fails as often as a literal `(`; the
+  edge decodes before filtering.
+- **Not comma-joined vs repeated `dataType`.** A comma-joined value answers
+  200 just as often. The comment previously in `src/usda.ts` blaming
+  comma-joining was wrong — it happened to be a coin flip either way.
+- **Not one bad edge node.** Pinning `--resolve` to each A record still gave
+  a mix of 200 and 400 from the same IP.
+- **Not the query text.** `spinach (x)` fails; `spinach` never does.
+
+It matters beyond `Survey (FNDDS)`: a user searching `chicken (cooked)` would
+have hit the same coin flip.
+
+**Fix:** `searchFoods` now uses the documented `POST /v1/foods/search` with
+the criteria in a JSON body, leaving only `api_key` in the URL. 12/12 → 200
+with the full three-dataset list. `GET /v1/food/{id}` is unchanged — neither
+its path nor its params can contain a parenthesis. The regression lock is the
+`searchFoods` test asserting the request URL contains no `(`, `)` or `%28`.
+
+## What is now PROVEN by live data
+
+- **Every nutrient number in `NUTRIENT_NUMBERS` except 539** appeared in at
+  least one captured record with the unit the mapping expects: 203/204/205/
+  291/269/221 in `g`, 262/601/307/306/301/303/304/401 in `mg`, 320/328 in
+  `µg`, 605/606 in `g`, 208 in `kcal`.
+- **The kJ hazard is real, not theoretical.** Four of the five records carry
+  268 Energy in kJ (chicken: 690 kJ beside 165 kcal). Energy is read only
+  from 208 with `unitName` kcal.
+- **The IU hazard is real too.** Chicken, egg, potato and rice each carry
+  318 (Vitamin A, IU) and 324 (Vitamin D, IU) _alongside_ 320 (RAE, µg) and
+  328 (µg). The IU entries are dropped; the µg ones are read.
+- **Unit names arrive LOWERCASE with a real micro sign** — `"g"`, `"mg"`,
+  `"µg"`, `"kcal"` — not the uppercase the published schema shows. The
+  case-insensitive `toFdcNutrientUnit` absorbed this; a `switch` on `"UG"`
+  alone would have nulled every µg nutrient. Both cases are now tested.
+- **Per-100 g holds for SR Legacy and Survey (FNDDS).** Neither carries
+  `servingSize`, `servingSizeUnit` or `labelNutrients`; `foodPortions` gives
+  gram weights separately, and applying them to the per-100 g figures
+  reproduces USDA's own published per-portion numbers (rice 123 kcal × 1.58
+  = 194 kcal per cup; egg 143 × 0.44 = 63 kcal per medium egg; potato
+  93 × 1.73 = 161 kcal per medium potato).
+- **Zero is preserved as zero and absence as null,** on real records: the
+  chicken publishes explicit `0` for carbs, fiber, sugar, vitamin C, alcohol
+  and caffeine while genuinely omitting trans fat and added sugar. The
+  potato publishes trans fat `0`; the rice omits it. `live-report.md`
+  asserts null against null, never against a tolerance around zero.
+- **Serving scaling is correct at 1.5x and 2x.** The script computes
+  `base * grams / 100` itself rather than calling `src/nutrient-units.ts`,
+  so the scaler cannot validate itself, and compares with the absolute
+  tolerances from `validation/README.md` (≤ 1 kcal, ≤ 0.1 g, ≤ 1 mg,
+  ≤ 1 µg) — never a percentage. Every diff came back 0.0000.
+
+## Still ASSUMED — not proven by this run
+
+- **Nutrient 539 (added sugars) has never been seen in a real payload.**
+  None of the five foods carries it; it is mapped from the INFOODS tagname
+  only. It is carried mainly by Branded records (excluded by default) and a
+  minority of FNDDS ones. `added_sugar_g` from FDC is therefore unverified.
+- **No Foundation record is in the validated set** — all five resolved to
+  SR Legacy or Survey (FNDDS). Foundation was inspected separately (fdcId
+  2685576, "Beets, raw") and it is per-100 g with the same lowercase units,
+  but it is not covered by a committed fixture or by `live-report.md`.
+- **Foundation records may carry no nutrient 208 at all.** 2685576 reports
+  energy _only_ as 957 (Atwater General, 44.62 kcal) and 958 (Atwater
+  Specific, 40.97 kcal). Under the current rule such a food normalizes with
+  a null `calories`. The previous note called this "the rare record";
+  on the evidence it may be normal for newer Foundation records. Decide
+  deliberately whether to accept 957 — do not let it drift.
+- **Branded and `labelNutrients` remain entirely unexercised.** Out of scope
+  by design (Open Food Facts owns barcoded product), so no claim is made.
+- **The cache path (`lookupFood`, `food_cache`) was not exercised live.**
+  The validation script calls `fetchFoodFromFdc` directly; only the
+  Supabase-free path is covered here.
+
+## Other live finding
+
+FDC's search index and its detail endpoint are not in sync: fdcId **747447**
+("Broccoli, raw", Foundation) is returned by `/foods/search` and returns
+`404` from `/food/747447`, reproducibly (5/5). `fdcFetch` now maps 404 to
+`null` so a dead link is an empty lookup rather than a thrown tool error.
+
+## Re-running it
 
 ```bash
 # free key, no card: https://fdc.nal.usda.gov/api-key-signup.html
@@ -28,59 +129,26 @@ echo "USDA_FDC_API_KEY=..." >> .env    # .env is gitignored
 bun run validate:usda
 ```
 
-The script does two things:
+It re-captures each record into `src/fixtures/usda/`, re-checks the scaling,
+rewrites `live-report.md` and exits non-zero on any mismatch. It never prints
+the key — the key travels in the query string, so API errors report a status
+code only, never the URL. If a captured fixture changes, USDA republished the
+record: review the diff and update `src/usda.test.ts`; a mismatch there is a
+finding, not a chore.
 
-1. **Captures** the real record for each food into `src/fixtures/usda/`,
-   replacing the synthetic placeholders committed today. Review that diff —
-   it is the moment the deterministic tests start asserting real data. The
-   expected values in `src/usda.test.ts` will need updating to match, and
-   any mismatch there is a finding, not a chore.
-2. **Compares** each record scaled to a requested gram amount against
-   arithmetic done inside the script itself, independently of
-   `src/nutrient-units.ts`, so a bug in the scaler cannot validate itself.
+Candidate selection is explicit and recorded in the report: for these queries
+FDC returns materially different records (raw vs cooked, skin-on vs skinless,
+with salt vs without), and `searchFoods` deliberately does not pick one.
 
-It writes `live-report.md` here and exits non-zero on any mismatch. It never
-prints the key (the key travels in the query string, so API errors report a
-status code only, never the URL).
+## Known limitations (by design)
 
-## Foods and amounts
-
-The set the epic names, each at a gram amount that is not 100 g wherever
-possible — scaling by 1.0 would validate nothing:
-
-| Food                   | Query                                          | Amount |
-| ---------------------- | ---------------------------------------------- | ------ |
-| Roasted chicken breast | `chicken breast roasted` (prefers "meat only") | 150 g  |
-| Whole raw egg          | `egg whole raw fresh`                          | 100 g  |
-| Baked potato           | `potato baked flesh and skin`                  | 200 g  |
-| Raw spinach            | `spinach raw`                                  | 100 g  |
-| Cooked white rice      | `rice white long-grain cooked`                 | 100 g  |
-
-Candidate selection is explicit and recorded in the report: for these
-queries FDC returns materially different records (raw vs cooked, skin-on vs
-skinless), and `searchFoods` deliberately does not pick one.
-
-## Tolerances
-
-Absolute, from `validation/README.md`: ≤ 1 kcal, ≤ 0.1 g, ≤ 1 mg, ≤ 1 µg.
-`null` is compared as `null`, separately — "within 1 mg of zero" is never a
-pass for a nutrient the record does not carry.
-
-## Known limitations
-
-- **Vitamin A and vitamin D in IU are dropped, not converted.** FDC carries
-  318 (A, IU) and 324 (D, IU) alongside 320 (A, RAE) and 328 (D, µg). Only
-  the µg entries are read; a record carrying only the IU form yields `null`.
-  There is no single valid IU → µg RAE factor (see `src/nutrient-units.ts`).
-- **Energy is read only from nutrient 208 with `unitName` KCAL.** FDC
-  reports the same food under 268 (kJ) and, for Foundation foods, 957/958
-  (Atwater kcal variants). Accepting those would make "where did this
-  calorie figure come from" unanswerable; the cost is a `null` on the rare
-  record that carries no plain 208.
-- **`Branded` is excluded from the default search datasets.** Barcoded
-  packaged food is Open Food Facts' job. A caller can still pass it
-  explicitly.
-- **`labelNutrients` is not read.** Branded records carry per-serving label
-  figures there; mixing them with the per-100 g `foodNutrients` inside one
-  result is precisely the double-basis bug the serving contract exists to
-  prevent.
+- **Vitamin A and vitamin D in IU are dropped, not converted.** There is no
+  single valid IU → µg RAE factor (see `src/nutrient-units.ts`). A record
+  carrying only the IU form yields `null`.
+- **Energy is read only from nutrient 208 with `unitName` kcal.** See the
+  Foundation/Atwater caveat above for what this costs.
+- **`Branded` is excluded from the default search datasets.** A caller can
+  still pass it explicitly.
+- **`labelNutrients` is not read.** Mixing per-serving label figures with
+  per-100 g `foodNutrients` in one result is exactly the double-basis bug
+  the serving contract exists to prevent.
