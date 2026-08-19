@@ -1,8 +1,10 @@
 # Nutrient Accuracy & Micronutrient Expansion — Handoff
 
-**Branch:** `claude/nutrient-accuracy-feature-985289` (git worktree)
+**Branch:** `claude/nutrient-accuracy-d3e306` (git worktree; fast-forwarded
+from `claude/nutrient-accuracy-feature-985289`, which holds the same history)
 **Date:** 2026-08-19
-**Status:** Wave 1 complete, Wave 2 partial. Tree is GREEN and safe to continue from.
+**Status:** Wave 1 and Wave 2 complete. Tree is GREEN, and everything is now
+COMMITTED. Next up: Agent 5 (resolution + MCP).
 
 Read `docs/nutrient-epic/CONTRACT.md` FIRST. It is the canonical cross-agent
 contract — nutrient names, units, provenance shape, source precedence, file
@@ -14,12 +16,16 @@ ownership, and the landmines. Do not re-derive any of it.
 
 ### 1. Environment
 
-`bun` is NOT on the default PATH. Every session must run this first, or every
-command in this document fails with "bun: command not found":
+`bun` may not be installed at all on the machine you land on — the earlier
+sessions ran elsewhere. Check first:
 
 ```bash
-export PATH="$HOME/.bun/bin:$PATH"
+bun --version || npm i bun --prefix /tmp/bun-host   # then PATH it
+export PATH="$HOME/.bun/bin:/tmp/bun-host/node_modules/.bin:$PATH"
 ```
+
+Installing into a scratch prefix keeps it out of the repo and off the user's
+global toolchain.
 
 Working directory is the worktree, not the main checkout:
 
@@ -33,7 +39,7 @@ Confirm the baseline before changing anything:
 bun run format:check && bun run typecheck && bun test
 ```
 
-Expect: clean, clean, 841 pass. If that is not what you see, something drifted —
+Expect: clean, clean, 870 pass. If that is not what you see, something drifted —
 diagnose before building on top of it.
 
 ### 2. The three documents in this directory
@@ -51,17 +57,18 @@ particular need `FEATURE_REQUEST.md`.
 
 ### 3. Immediate next actions, in order
 
-1. **Finish Agent 3 before trusting any OFF data.** `src/foods.ts` is written
-   but has ZERO test coverage for its new mapping. Add `src/fixtures/off/`,
-   the tests, `scripts/validate-off.ts` + the `validate:off` script, and
-   `validation/open-food-facts/README.md`. Verify the sodium g -> mg path and
-   every OFF key spelling — none of it has been independently checked.
-2. **Agent 4 (USDA) from scratch.** No files exist. See `CONTRACT.md` §5 for
-   ownership and `FEATURE_REQUEST.md` "Agent 4" for acceptance criteria.
-3. **Agent 5 (resolution + MCP).** The largest job — `src/mcp.ts` is 216 KB.
+1. **Run `bun run validate:usda` as soon as a `USDA_FDC_API_KEY` exists.**
+   This is the one outstanding gate on Agent 4. The script CAPTURES real FDC
+   records over the synthetic fixtures in `src/fixtures/usda/` and compares
+   scaled values against independent arithmetic; the expected numbers in
+   `src/usda.test.ts` will need updating to match, and any mismatch there is
+   a finding, not a chore. Free key:
+   <https://fdc.nal.usda.gov/api-key-signup.html>.
+2. **Agent 5 (resolution + MCP).** The largest job — `src/mcp.ts` is 216 KB.
    Use a strong model. It must implement the `SOURCE_PRECEDENCE` comparison
-   logic Agent 1 deliberately left out.
-4. Then Agents 6 and 7 (parallel), 8, and finally 9.
+   logic Agent 1 deliberately left out, and wire both providers
+   (`src/foods.ts`, `src/usda.ts`) behind it.
+3. Then Agents 6 and 7 (parallel), 8, and finally 9.
 
 ---
 
@@ -70,13 +77,21 @@ particular need `FEATURE_REQUEST.md`.
 ```
 bun run format:check   PASS
 bun run typecheck      PASS  (src/ typechecks clean)
-bun test               PASS  841 / 841, 28 files
+bun test               PASS  870 / 870, 29 files
+bun run validate:off   PASS  (live, 2026-08-19)
+bun run validate:usda  NOT RUN — needs USDA_FDC_API_KEY
 ```
 
-Baseline before this epic was 698 tests. Net +143, all from Agent 1.
+Baseline before this epic was 698 tests. Net +172.
 
-**IMPORTANT: none of this is committed.** Everything is uncommitted working-tree
-changes in the worktree. Commit before doing anything risky.
+Everything is committed:
+
+```
+06b8052  feat(nutrients): canonical nutrient model, provenance and unit normalization
+01fec6d  docs(nutrient-epic): vendor the epic spec and add a START HERE guide
+7e3fd30  test(off): cover the micronutrient mapping with fixtures and live validation
+e273f8e  feat(usda): FoodData Central provider for generic whole foods
+```
 
 ---
 
@@ -137,43 +152,47 @@ they never raced the same file. Keep that split.
 
 ---
 
-## PARTIAL — resume here
+### Agent 3 — Open Food Facts (COMPLETE, live-validated)
 
-### Agent 3 — Open Food Facts (implementation ~complete, NO TESTS)
+- `src/foods.ts` maps all 12 micronutrients, reading each product's own
+  `<key>_unit` rather than assuming grams, so an IU-reported vitamin A yields
+  `null` instead of a wrong number.
+- `src/fixtures/off/` — three REAL captured API responses (Nutella, Cheerios,
+  Chocapic) plus five synthetic edge fixtures, each carrying a `_note`.
+- `src/foods.test.ts` +11 tests: the sodium `0.0428 g -> 42.8 mg` false-zero
+  lock, explicit source zeros surviving as `0`, ambiguous units -> `null`,
+  per-serving vs per-100g basis, provenance, and the `toFoodNutrition`
+  adapter.
+- `scripts/validate-off.ts` + `validate:off`, `validation/open-food-facts/`.
 
-`src/foods.ts` has +422 lines and typechecks clean. It already has:
+Verified live before writing anything: the hyphenated key spellings, the
+`<key>_unit` sibling convention, and that OFF stores every micronutrient in
+GRAMS regardless of the field's canonical unit. `validate:off` passed clean
+on 2026-08-19 across all three products.
 
-- all 12 micronutrients mapped, with per-nutrient OFF key + unit recorded in
-  comments against verified doc URLs;
-- the sodium g -> mg conversion, including a real bug it caught and documented:
-  rounding to 1 decimal first would turn Nutella's `sodium_100g 0.0428 g` into
-  `0.0` and then `0 mg`, destroying a real 42.8 mg value;
-- provenance emission (`open_food_facts` / `authoritative` / `off:<barcode>`);
-- the cache-backfill landmine handled via `BACKFILL_NULL_FIELDS`, including
-  best-effort `servingBasis` reconstruction for pre-existing cached rows.
+Not covered live: vitamin C (no sampled product reported it) and vitamin A
+in IU (ditto) — both are documented in `validation/open-food-facts/README.md`
+and covered deterministically by fixtures.
 
-STILL MISSING:
+### Agent 4 — USDA FoodData Central (BUILT, live validation OUTSTANDING)
 
-- `src/fixtures/off/` fixtures (complete / partial / per-serving / per-100g /
-  explicit zero / missing / bad value / bad serving basis)
-- tests in `src/foods.test.ts` asserting null-vs-zero distinctly, plus an
-  explicit test that grams-sodium becomes the right mg number
-- `scripts/validate-off.ts` + `validate:off` package.json script
-- `validation/open-food-facts/README.md`
+- `src/usda.ts` — `searchFoods`, `getFood`/`lookupFood`, `normalizeFdcFood`,
+  `readNutrients`, `resolveAmount`, `buildUsdaProvenance`. Cache stores the
+  RAW payload so the mapping can improve without waiting out the TTL.
+- `src/usda.test.ts` (18 tests), `src/fixtures/usda/` (5 fixtures),
+  `scripts/validate-usda.ts` + `validate:usda`, `USDA_FDC_API_KEY` in
+  `.env.example`, `validation/usda/README.md`.
 
-VERIFY BEFORE TRUSTING: nobody has independently checked Agent 3's OFF key
-spellings, unit assumptions, or the sodium conversion. It wrote no tests, so
-none of its mapping is currently covered.
+Response shapes came from USDA's published OpenAPI v3 spec (both the nested
+detail shape and the flat abridged search shape). Two deliberate refusals,
+both tested: energy is read ONLY from nutrient 208 with `unitName` KCAL (268
+is kJ — a 4x error that looks plausible), and vitamin A/D in IU (318, 324)
+are dropped rather than converted.
 
-### Agent 4 — USDA FoodData Central (NOT STARTED)
-
-Produced no files. It had verified the FDC API contract with live DEMO_KEY calls
-and was about to write code when it hit the limit. Start fresh.
-Owns: `src/usda.ts`, `src/usda.test.ts`, `src/fixtures/usda/`,
-`scripts/validate-usda.ts`, `USDA_FDC_API_KEY` in `.env.example`,
-`validation/usda/`.
-
----
+**The fixtures are SYNTHETIC** — schema-shaped, placeholder numbers, each
+saying so in its own `_note`. No live FDC response has ever been checked
+against this mapping; DEMO_KEY was rate-limited and no key was available.
+This is the epic's one knowingly-unmet gate. See action 1 above.
 
 ## NOT STARTED
 
@@ -229,11 +248,13 @@ Owns: `src/usda.ts`, `src/usda.test.ts`, `src/fixtures/usda/`,
 2. **`updateMeal.nutrient_provenance` is full-replace, not per-key merge.**
    Consistent with every other field, documented and tested. Confirm that is
    what Agent 5 wants before building resolution on top of it.
-3. **Nothing is committed.** Recommend committing the green state before Wave 3.
-4. **No live validation has run.** No `.env`, no `SUPABASE_URL`,
-   no `USDA_FDC_API_KEY`, no `OFF_USER_AGENT`. The migration has never been
-   applied to a real database. Every "real-source validation" and E2E gate in
-   the feature request remains formally unmet.
-5. `bun` is not on the default PATH — `export PATH="$HOME/.bun/bin:$PATH"`.
-   `bun.lock` has a benign 3-line change (dependency-range mirror resyncing to
-   the already-committed `package.json`; no resolved version changed).
+3. ~~Nothing is committed.~~ Resolved — all four commits are on the branch.
+4. **Live validation is partially done.** `validate:off` has passed against
+   real products. Still outstanding: `USDA_FDC_API_KEY` (Agent 4's gate),
+   and `SUPABASE_URL` / `SUPABASE_SECRET_KEY` pointing at a TEST project —
+   the migration `20260819120000_micronutrient_expansion.sql` has still never
+   been applied to any database, so Agent 1's round-trip gate and every E2E
+   scenario remain formally unmet.
+5. Agent 4's `resolveAmount` is the only scaling entry point callers should
+   use. If Agent 5 scales again on top of it, that is the double-scaling bug
+   the contract forbids.
