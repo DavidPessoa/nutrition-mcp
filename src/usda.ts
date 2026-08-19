@@ -126,7 +126,23 @@ const NUTRIENT_NUMBERS: ReadonlyArray<readonly [string, NutrientField]> = [
     ["328", "vitamin_d_mcg"], // Vitamin D (D2 + D3)
 ];
 
-const ENERGY_KCAL_NUMBER = "208";
+// Energy, in preference order. All three are kcal; none of them is 268 (kJ).
+//
+// 208 is the classic SR/FNDDS energy and is what most records carry. Newer
+// FOUNDATION records may carry NO 208 at all: fdcId 2685576 ("Beets, raw",
+// captured 2026-08-19) reports energy only as 957 and 958. Refusing those
+// would hand back `calories: null` for a plain whole food — the exact case
+// this provider exists to answer — so they are accepted as a documented
+// fallback rather than a silent one.
+//
+// The order is deliberate. 957 (Atwater General Factors) applies the
+// familiar 4/4/9 factors and is the figure USDA itself shows first; 958
+// (Atwater Specific Factors) applies food-specific factors and differs
+// (44.6 vs 41.0 kcal/100 g for those beets). Taking the general figure keeps
+// one food's calories comparable with every other food's, which is what a
+// daily total requires; a mix of conventions inside one total would be
+// silently incoherent.
+const ENERGY_NUMBERS = ["208", "957", "958"] as const;
 
 /**
  * Map an FDC `unitName` to the NutrientUnit vocabulary
@@ -187,23 +203,33 @@ function readEntry(entry: RawFdcNutrient): {
 }
 
 /**
- * Energy in kcal, and ONLY in kcal. FDC carries the same food's energy under
- * 208 (kcal) and 268 (kJ); an entry numbered 208 whose unitName is not KCAL
- * is treated as unusable rather than assumed — 1506 read as calories instead
- * of 360 is a 4x error that looks entirely plausible in a food log.
+ * Energy in kcal, and ONLY in kcal.
+ *
+ * FDC carries the same food's energy under 208 (kcal) AND 268 (kJ) — 4 of
+ * the 5 validated records carry both — so the unit is checked on every
+ * candidate rather than inferred from the nutrient number: an entry whose
+ * unitName is not kcal is unusable, full stop. 1506 kJ read as 1506 kcal is
+ * a 4x error that looks entirely plausible in a food log, and no later layer
+ * could detect it.
+ *
+ * Candidates are tried in ENERGY_NUMBERS order, not in payload order, so the
+ * choice between 208 and the Atwater fallbacks is this function's and not an
+ * accident of how USDA happened to sort the array.
  */
 function readCalories(entries: readonly RawFdcNutrient[]): number | null {
-    for (const entry of entries) {
-        const { number, unitName, amount } = readEntry(entry);
-        if (number !== ENERGY_KCAL_NUMBER) continue;
-        if (amount == null || amount < 0) continue;
-        if (
-            String(unitName ?? "")
-                .trim()
-                .toLowerCase() !== "kcal"
-        )
-            continue;
-        return amount;
+    for (const wanted of ENERGY_NUMBERS) {
+        for (const entry of entries) {
+            const { number, unitName, amount } = readEntry(entry);
+            if (number !== wanted) continue;
+            if (amount == null || amount < 0) continue;
+            if (
+                String(unitName ?? "")
+                    .trim()
+                    .toLowerCase() !== "kcal"
+            )
+                continue;
+            return amount;
+        }
     }
     return null;
 }

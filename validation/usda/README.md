@@ -98,16 +98,11 @@ its path nor its params can contain a parenthesis. The regression lock is the
   None of the five foods carries it; it is mapped from the INFOODS tagname
   only. It is carried mainly by Branded records (excluded by default) and a
   minority of FNDDS ones. `added_sugar_g` from FDC is therefore unverified.
-- **No Foundation record is in the validated set** — all five resolved to
-  SR Legacy or Survey (FNDDS). Foundation was inspected separately (fdcId
-  2685576, "Beets, raw") and it is per-100 g with the same lowercase units,
-  but it is not covered by a committed fixture or by `live-report.md`.
-- **Foundation records may carry no nutrient 208 at all.** 2685576 reports
-  energy _only_ as 957 (Atwater General, 44.62 kcal) and 958 (Atwater
-  Specific, 40.97 kcal). Under the current rule such a food normalizes with
-  a null `calories`. The previous note called this "the rare record";
-  on the evidence it may be normal for newer Foundation records. Decide
-  deliberately whether to accept 957 — do not let it drift.
+- **No Foundation record is in the five-food `live-report.md` set** — all
+  five resolved to SR Legacy or Survey (FNDDS). Foundation is now covered by
+  a committed real fixture instead (fdcId 2685576, "Beets, raw", captured
+  2026-08-19): per-100 g, same lowercase units, and the energy case below is
+  resolved rather than left open.
 - **Branded and `labelNutrients` remain entirely unexercised.** Out of scope
   by design (Open Food Facts owns barcoded product), so no claim is made.
 - **The cache path (`lookupFood`, `food_cache`) was not exercised live.**
@@ -140,13 +135,32 @@ Candidate selection is explicit and recorded in the report: for these queries
 FDC returns materially different records (raw vs cooked, skin-on vs skinless,
 with salt vs without), and `searchFoods` deliberately does not pick one.
 
+## Foundation energy: a decision, not an oversight
+
+`Beets, raw` (fdcId 2685576, Foundation) carries **no nutrient 208 at all**.
+Its only energy figures are 957 (Atwater General, 44.6205 kcal/100 g) and
+958 (Atwater Specific, 40.965255). Refusing both would return `calories:
+null` for a plain whole food — precisely the case this provider exists to
+answer — so energy is read in the order **208 → 957 → 958**.
+
+Why 957 before 958: the general factors are the familiar 4/4/9 convention
+and are what USDA shows first, so every food's calories stay comparable with
+every other food's. Specific factors are more accurate per food but mixing
+the two conventions inside one daily total is silently incoherent.
+
+The unit check is unchanged and still absolute: an energy entry whose
+`unitName` is not `kcal` is refused whatever its number, so widening the
+accepted numbers cannot let a kilojoule figure through. Covered by tests
+against the real captured record.
+
 ## Known limitations (by design)
 
 - **Vitamin A and vitamin D in IU are dropped, not converted.** There is no
   single valid IU → µg RAE factor (see `src/nutrient-units.ts`). A record
   carrying only the IU form yields `null`.
-- **Energy is read only from nutrient 208 with `unitName` kcal.** See the
-  Foundation/Atwater caveat above for what this costs.
+- **Energy prefers 208, then falls back to 957 and 958** — all kcal, never
+  268 (kJ). See "Foundation energy" above for why, and what the ordering
+  costs.
 - **`Branded` is excluded from the default search datasets.** A caller can
   still pass it explicitly.
 - **`labelNutrients` is not read.** Mixing per-serving label figures with

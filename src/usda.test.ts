@@ -192,6 +192,39 @@ describe("normalizeFdcFood", () => {
         expect(food.protein_g).toBe(12); // the rest of the record still maps
     });
 
+    test("a Foundation record with no 208 falls back to Atwater General", async () => {
+        // REAL capture: fdcId 2685576 "Beets, raw" carries no nutrient 208 at
+        // all — its only energy figures are 957 (Atwater General, 44.6205
+        // kcal) and 958 (Atwater Specific, 40.965255). Refusing both would
+        // hand back null calories for a plain whole food, which is the exact
+        // case this provider exists to answer.
+        const food = normalizeFdcFood(await fixture("beets-raw-foundation"))!;
+        expect(food.calories).toBe(44.6205);
+        // NOT the specific-factors figure: mixing conventions inside one
+        // daily total is silently incoherent, so the general factors win.
+        expect(food.calories).not.toBe(40.965255);
+        expect(food.protein_g).toBe(1.6875);
+    });
+
+    test("208 still wins when a record carries both it and Atwater", () => {
+        // Order comes from ENERGY_NUMBERS, not from however USDA happened to
+        // sort the array — so the Atwater entry appearing first must not win.
+        const values = readNutrients([
+            { nutrient: { number: "957", unitName: "kcal" }, amount: 44.6 },
+            { nutrient: { number: "208", unitName: "kcal" }, amount: 43 },
+        ]);
+        expect(values.calories).toBe(43);
+    });
+
+    test("an Atwater entry in the wrong unit is still refused", () => {
+        // The fallback widens WHICH nutrient numbers count as energy. It does
+        // not weaken the unit check that keeps kJ out.
+        const values = readNutrients([
+            { nutrient: { number: "957", unitName: "kJ" }, amount: 186.7 },
+        ]);
+        expect(values.calories).toBeNull();
+    });
+
     test("unconvertible units and negative amounts yield null", async () => {
         const food = normalizeFdcFood(await fixture("unexpected-units"))!;
         expect(food.vitamin_a_mcg).toBeNull(); // IU only, no RAE entry
