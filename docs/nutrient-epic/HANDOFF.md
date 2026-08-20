@@ -6,6 +6,8 @@
 returned **FAIL** with three findings; two are fixed, one is open. The epic is
 NOT done. See "Where it actually stands".
 
+**Working tree is CLEAN.** Everything is committed; nothing is half-finished.
+
 Read `docs/nutrient-epic/CONTRACT.md` FIRST — names, units, provenance shape,
 source precedence, file ownership, landmines. Do not re-derive any of it.
 `FEATURE_REQUEST.md` (same directory) holds the per-agent acceptance criteria,
@@ -71,6 +73,8 @@ earned their place:
 ### Commits on this branch (newest first)
 
 ```
+a161298  fix(import): the widget was dropping every micronutrient it could already read
+2f592fc  docs(nutrient-epic): hand over with the verification failure stated plainly
 c721a15  fix(summaries): scale a micronutrient target to the range it is judged over
 cdfca38  fix(validation): stop the validators editing the evidence they validate
 9a2fb4a  feat(summaries): fold per-nutrient confidence into the coverage payload
@@ -88,36 +92,19 @@ e273f8e  feat(usda): FoodData Central provider for generic whole foods
 06b8052  feat(nutrients): canonical nutrient model, provenance and unit normalization
 ```
 
-### UNCOMMITTED WORK IN THE TREE — read before you touch anything
-
-An agent was fixing verification Finding 2 (below) when this session ended.
-Its work is in the working tree, **uncommitted and unreviewed**:
-
-```
-public/widgets/src/templates/import-meals.html
-src/csv.ts
-src/csv.test.ts
-src/widgets.test.ts
-```
-
-The tree was green (1013 pass) at the moment of handover, but that agent
-never filed a report, so nothing about its work has been reviewed. Read the
-diff, run the gate, judge it on its merits, finish or discard it. Do not
-assume it is complete.
-
 ### Builder tracks
 
-| #   | Track              | State                                                                           |
-| --- | ------------------ | ------------------------------------------------------------------------------- |
-| 1   | schema + storage   | BUILT, verifier PASS                                                            |
-| 2   | units / conversion | BUILT, verifier PASS                                                            |
-| 3   | Open Food Facts    | BUILT, live-validated, verifier PASS (re-validated independently)               |
-| 4   | USDA FDC           | BUILT, live-validated, verifier PASS                                            |
-| 5   | resolution + MCP   | BUILT, PASS on log_meal/update_meal — **but see Finding 3**                     |
-| 6   | summaries + goals  | BUILT; verifier FAIL (Finding 1) → **fixed** in c721a15                         |
-| 7   | import / export    | BUILT server-side; verifier FAIL (Finding 2) → **fix in progress, uncommitted** |
-| 8   | widgets            | BUILT; rendered Finding 1's false verdict → **fixed** in c721a15                |
-| 9   | verification       | Ran once, returned FAIL. **Must run again** after the open findings close.      |
+| #   | Track              | State                                                                      |
+| --- | ------------------ | -------------------------------------------------------------------------- |
+| 1   | schema + storage   | BUILT, verifier PASS                                                       |
+| 2   | units / conversion | BUILT, verifier PASS                                                       |
+| 3   | Open Food Facts    | BUILT, live-validated, verifier PASS (re-validated independently)          |
+| 4   | USDA FDC           | BUILT, live-validated, verifier PASS                                       |
+| 5   | resolution + MCP   | BUILT, PASS on log_meal/update_meal — **but see Finding 3**                |
+| 6   | summaries + goals  | BUILT; verifier FAIL (Finding 1) → **fixed** in c721a15                    |
+| 7   | import / export    | BUILT; verifier FAIL (Finding 2) → **fixed** in a161298                    |
+| 8   | widgets            | BUILT; rendered Finding 1's false verdict → **fixed** in c721a15           |
+| 9   | verification       | Ran once, returned FAIL. **Must run again** after the open findings close. |
 
 ---
 
@@ -148,15 +135,23 @@ in `src/mcp.ts`.
 
 ### 2. Re-run independent verification
 
-Findings 1, 4 and 5 are fixed and 2 is in progress, but **no verifier has
-seen any of those fixes**. Re-run a full adversarial pass once Finding 2 and
-Finding 3 close. Brief it with the three bugs already found in this epic as
+Findings 1, 2, 4 and 5 are fixed, but **no verifier has seen any of those
+fixes** — they were written by the same builders whose work failed. Re-run a
+full adversarial pass once Finding 3 closes. Attack the range-scaling shape
+(`target_days`) and the widget's new browser-side CSV mapper hardest; both
+are new logic written under time pressure at the end of a session. Brief it with the three bugs already found in this epic as
 calibration — they are listed in "Bugs this epic actually found" below.
 
 ### 3. Small, known, unfixed
 
 - `public/widgets/STYLE_GUIDE.md` (~line 763) documents the
   `NUTRIENT_COVERAGE_ITEM` row shape and never mentions `target_days`.
+- The import widget's height re-report after its now-wider preview table was
+  NOT verified in a real host iframe — `bun run harness`'s sandboxed iframe is
+  blocked by a browser client policy in this environment. The sizing path
+  itself is unchanged (bridge.js's ResizeObserver), but it is unproven.
+- The import preview table is ~1850px wide with full nutrient names. It
+  scrolls inside the existing `.tscroll`; abbreviations would be kinder.
 - `resolveNutrientWrite` treats `{field: undefined}` as an explicit clear.
   No live path reaches it (`suppliedNutrients` filters `undefined` first) but
   it is one refactor away from wiping stored values.
