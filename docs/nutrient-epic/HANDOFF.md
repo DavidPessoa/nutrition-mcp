@@ -1,7 +1,7 @@
 # Nutrient Accuracy & Micronutrient Expansion — Handoff
 
 **Branch:** `claude/nutrient-accuracy-d3e306` (git worktree)
-**Updated:** 2026-08-20
+**Updated:** 2026-08-20 (session 2)
 **Status:** All eight builder tracks BUILT. Independent verification ran once and
 returned **FAIL** with three findings; **all three are now fixed, none has been
 re-verified**. The epic is NOT done: the one thing still owed on the code is a
@@ -115,6 +115,20 @@ e273f8e  feat(usda): FoodData Central provider for generic whole foods
 
 ### 1. Finding 3 — CLOSED in 2327c36, and the residual is deliberate
 
+Also closed this session: `resolveNutrientWrite` treated `{field: undefined}`
+as an explicit clear (7b333ac — now absent, as CONTRACT §0.1 requires), the
+`target_days` gap in STYLE_GUIDE.md, and the duplicated export->row mapper,
+now `src/csv-export-map.ts` (c204a12).
+
+An end-to-end release runner was started and is NOT in the repo: it lives at
+`<scratchpad>/e2e-nutrients.WIP.ts` and is roughly half written (preflight,
+migration probe, throwaway-user lifecycle, MCP JSON-RPC client with 429
+retry, server spawn — but none of the six scenarios and no main). Its design
+is worth keeping: it drives the REAL tool surface over `/mcp` with a minted
+`oauth_tokens` row, so tool descriptions, zod schemas, outputSchema
+validation, analytics and the resolution policy are all in the path. It also
+needs a `e2e:nutrients` entry in package.json, which was never added.
+
 `bulk_import_meals` consulted no part of the resolution policy. It now refuses
 the one thing CONTRACT §0.2 refuses everywhere else: a micronutrient whose row
 declares it `model_estimate` is **not stored** — absent rather than null, so the
@@ -142,7 +156,90 @@ cost the round trip are a per-account "imports may not claim authoritative
 sources" preference, or a distinct tool for restores that the model cannot see.
 Both are larger than this epic.
 
-### 2. Re-run independent verification
+### 2. Verifier B's report — 10 CONFIRMED defects in the CSV mapper, NONE FIXED
+
+Verification was re-run as five independent adversarial passes. **Only one
+finished** (the browser-side CSV mapper); the other four — summaries/coverage,
+the import write path, providers/units, and the MCP tool surface — were killed
+mid-run when the session ended and produced nothing. Re-run those four.
+
+The one that finished came back FAIL with ten confirmed defects, every one
+reproduced by driving the REAL assembled widget. Nothing below is fixed. They
+share two root causes, and the first two lines of fix close five of them.
+
+**Root cause 1 — `normalizeHeader` deletes `%` before anything can refuse it**
+(`src/csv.ts:443`, with `UNSUPPORTED_UNIT_TOKENS` at :934).
+
+1. HIGH — a `%DV` micronutrient column ("Iron (%)") imports as canonical mass:
+   20 %DV of iron becomes 20 mg, previewed under a fabricated "Iron (mg)"
+   header, with a reassuring "read as mg" notice. An IU column IS refused; a
+   percent column is not. Fix: in `normalizeHeader`, `.replace(/%/g, " pct ")`
+   before the `[^a-z0-9]+` sweep — `pct` is already an unsupported token, so
+   the existing refusal path lights up with no other change.
+2. HIGH — with both "Iron (%)" and "Iron (mg)" present, the percent column
+   wins on header order and the real 3.6 mg is discarded as a `duplicate`
+   (`src/csv.ts:1174`). Same one-line fix.
+3. MEDIUM — the same `%` deletion auto-maps "Protein (%)" / "Carbs (%)" /
+   "Fat (%)" percent-of-energy columns straight into the gram fields: a 600
+   kcal bowl stored as 30 g protein / 45 g carbs / 25 g fat. Same fix.
+
+**Root cause 2 — sniffers and peels that stop one step too early**
+
+4. HIGH — `Energy (kJ)` never auto-maps (`import-meals.html:288`,
+   `ALIASES.calories` has no kJ spelling), so every row is sent with NO
+   calories at all AND `expected_total_kcal` is omitted, which silently
+   disables the server-side control total that would have caught the loss.
+   Fix: add `energy_kj`, `kj`, `kilojoules`, `energie_kj`; `sniffEnergyUnit`
+   already returns `"kj"` for those headers.
+5. HIGH — `sniffDecimalSeparator` (`src/csv.ts:160`) reads a thousands group
+   (`1,240`) as evidence of a comma decimal, so a dot-decimal file with
+   thousands-separated micronutrients has every decimal multiplied by 10 and
+   every thousands number divided by 1000 — protein 12.5 → 125, sodium 1,240
+   → 1.24. Silent: the date format and energy unit each get a user-editable
+   control precisely because a silent sniff is dangerous; this one gets
+   neither a control nor a readout. Fix: require a non-three-digit fraction,
+   `/^-?\d+,\d{1,2}$|^-?\d+,\d{4,}$/`, and show the chosen separator on the
+   map step.
+6. MEDIUM — the qualifier peel runs BEFORE the unit peel
+   (`src/csv.ts:1068`), so `Vitamin A, RAE (mcg)`, `Sodium total (mg)` and
+   `Calcium, total (mg)` resolve to nothing and are dropped with NO notice at
+   all. Also unmapped: USDA's own `Fatty acids, total saturated (g)` /
+   `total trans (g)` / `Fat, saturated (g)`, and the element-symbol forms
+   `Calcium, Ca (mg)`, `Iron, Fe (mg)`, `Potassium, K (mg)`,
+   `Magnesium, Mg (mg)`. Fix: run the qualifier peel again after the unit
+   peel, plus those aliases.
+7. MEDIUM — `isTotalsRow` (`src/csv.ts:410`) tests only the first non-empty
+   cell, so in any export whose first column is a date or id — i.e. every
+   export this widget targets — a MyFitnessPal-style totals row is imported
+   as an extra meal and the day is double-counted.
+8. MEDIUM — `tokenize` (`src/csv.ts:266`) only honours a quote that is the
+   field's first character, so `, "Beans, baked", 250` splits into corrupted
+   fields, truncates the description and loses the calories.
+9. LOW — `parseNumber` turns a censored value into a definite one: `<1` → 1,
+   `>2000` → 2000. Should be null, or a counted rejection.
+10. LOW/SUSPECTED — the bridge appends its "you can disable these widgets"
+    footer inside `paint()`, but this widget's interactions assign
+    `innerHTML` directly, so the footer disappears the moment a file is
+    picked.
+
+Two coverage gaps it named, worth closing while in there: the "inlines each
+partial in full" test walks only the template's own includes (a nested
+include inside a partial would be unguarded), and `@inlinets` completeness is
+not asserted at all.
+
+Found CLEAN and re-provable: `nutrient_units` is only ever g/mg/mcg; IU
+columns ARE refused and demoted correctly; a blank cell arrives as null and a
+real 0 as 0; 49 nutrient names x 6 unit suffixes all land on the right field
+(no sodium/salt, no total/added sugar confusion); BOM, NBSP, CRLF, casing,
+quoted newlines, duplicate headers, `source_line` integrity, preview-vs-sent
+agreement, and the European `;` + comma-decimal + DD.MM.YYYY file end to end.
+Widget height reporting is still UNPROVEN — no render path calls `sendSize()`
+explicitly, all three interactive widgets rely on the bridge's
+`ResizeObserver`, and a real layout cannot be executed outside a browser. The
+in-app browser is blocked from the harness by a client policy in this
+environment, so this needs a real host or a headless Chrome.
+
+### 3. Re-run independent verification
 
 Findings 1, 2 and 3 are fixed, but **no verifier has seen any of those
 fixes** — they were written by the same builders whose work failed. Re-run a
@@ -151,7 +248,7 @@ full adversarial pass once Finding 3 closes. Attack the range-scaling shape
 are new logic written under time pressure at the end of a session. Brief it with the three bugs already found in this epic as
 calibration — they are listed in "Bugs this epic actually found" below.
 
-### 3. Small, known, unfixed
+### 4. Small, known, unfixed
 
 - The import widget's height re-report after its now-wider preview table was
   NOT verified in a real host iframe — `bun run harness`'s sandboxed iframe is
@@ -159,9 +256,6 @@ calibration — they are listed in "Bugs this epic actually found" below.
   itself is unchanged (bridge.js's ResizeObserver), but it is unproven.
 - The import preview table is ~1850px wide with full nutrient names. It
   scrolls inside the existing `.tscroll`; abbreviations would be kinder.
-- `resolveNutrientWrite` treats `{field: undefined}` as an explicit clear.
-  No live path reaches it (`suppliedNutrients` filters `undefined` first) but
-  it is one refactor away from wiping stored values.
 - `scripts/validate-usda.ts` reads its "per 100 g (source)" column from the
   app's own `normalizeFdcFood` output, so it validates the scaling arithmetic
   only — the nutrient-number → field → unit mapping is compared against
