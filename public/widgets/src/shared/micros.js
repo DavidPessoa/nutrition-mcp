@@ -20,8 +20,13 @@
 //
 // A row of the payload:
 //   { nutrient, unit, known_total, known_meals, total_meals, known_calories,
-//     total_calories, coverage, complete, target, direction }
+//     total_calories, coverage, complete, target, target_days, direction }
 //   plus an OPTIONAL `confidence` — see microProv().
+//
+// `target` is ALREADY SCALED to the same span as `known_total` — the daily
+// goal times `target_days` — so `known_total` vs `target` is a like-for-like
+// comparison at any range length, and target_days only ever changes the
+// wording ("over 3 days"). Do not divide either one by it.
 //
 // ---------------------------------------------------------------------------
 // THE SIX STATES THIS SECTION EXISTS TO KEEP APART
@@ -188,8 +193,12 @@ function microRow(r) {
     // by the verdict when there is one.
     const capParts = [];
     if (r.target != null) {
+        // The span goes in the caption whenever it is more than a day, or a
+        // 3-day 6,900 mg ceiling reads as a wildly generous daily one.
+        const days = Number(r.target_days) || 1;
+        const span = days > 1 ? ` over ${days} days` : "";
         capParts.push(
-            `${r.direction === "maximum" ? "limit" : "of"} ${microNum(r.target)} ${unit}`,
+            `${r.direction === "maximum" ? "limit" : "of"} ${microNum(r.target)} ${unit}${span}`,
         );
     }
     if (verdict) capParts.push(verdict.text);

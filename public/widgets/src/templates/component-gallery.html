@@ -214,6 +214,9 @@
                 coverage: 0,
                 complete: false,
                 target: null,
+                // Single-day by default; a range payload scales `target` by
+                // this and the caption then says "over N days".
+                target_days: 1,
                 direction: null,
                 ...o,
             });
@@ -315,6 +318,22 @@
                     target: 15,
                     direction: "minimum",
                     confidence: "user_provided",
+                }),
+                cov({
+                    // A RANGE row: the target is already scaled to the span,
+                    // so the same value/target comparison holds and only the
+                    // caption changes.
+                    nutrient: "sodium_mg",
+                    known_total: 2400,
+                    known_meals: 12,
+                    total_meals: 12,
+                    known_calories: 6000,
+                    total_calories: 6000,
+                    coverage: 1,
+                    complete: true,
+                    target: 6900,
+                    target_days: 3,
+                    direction: "maximum",
                 }),
             ];
 

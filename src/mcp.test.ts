@@ -4146,6 +4146,30 @@ describe("lookup_food", () => {
         });
     });
 
+    // 0.1 mcg/100 g scaled to a 1 g serving is 0.001 mcg; two decimals print
+    // that as a bare "0", and the same message tells the model to pass these
+    // figures to log_meal — where 0 means the source measured zero. A nonzero
+    // figure must never be rendered as one.
+    test("a tiny nonzero figure never prints as a bare 0", async () => {
+        usda.food = usdaFood({
+            calories: 30,
+            vitamin_d_mcg: 0.1,
+            sodium_mg: 4.28,
+        });
+        await withTools(null, async (call) => {
+            const text = textOf(
+                await call("lookup_food", { fdc_id: 171077, grams: 1 }),
+            );
+            const line = text
+                .split("\n")
+                .find((l) => l.startsWith("vitamin_d_mcg:"))!;
+            expect(line).toBe("vitamin_d_mcg: 0.001");
+            expect(Number(line.split(": ")[1])).toBeGreaterThan(0);
+            // Anything two decimals can still express is unchanged.
+            expect(text).toContain("sodium_mg: 0.04");
+        });
+    });
+
     test("with no grams the per-100 g figures come back untouched", async () => {
         usda.food = usdaFood({ calories: 165, protein_g: 31 });
         await withTools(null, async (call) => {
@@ -4396,6 +4420,8 @@ describe("nutrientCoveragePayload", () => {
             coverage: 0.67,
             complete: false,
             target: 2300,
+            // One day, so the scaled target is the daily one.
+            target_days: 1,
             direction: "maximum",
             confidence: null,
         });
@@ -4472,6 +4498,69 @@ describe("nutrientCoveragePayload", () => {
         expect(added?.complete).toBe(true);
         // No goal column exists for it, so it has no direction to declare.
         expect(added?.direction).toBeNull();
+    });
+
+    // A RANGE TOTAL JUDGED AGAINST A DAILY TARGET. The payload used to ship
+    // the raw daily goal column beside a total summed over every meal in the
+    // window, so a consumer doing the obvious `value > target` — which our own
+    // widget does — read three ordinary days as a breach. Both directions are
+    // covered because the bug inverts on a floor: there a range total clears a
+    // daily target it never met on any single day.
+    const threeDays = (extra: Partial<Meal>) => [
+        meal({ id: "a", logged_at: "2026-07-26T12:00:00.000Z", ...extra }),
+        meal({ id: "b", logged_at: "2026-07-27T12:00:00.000Z", ...extra }),
+        meal({ id: "c", logged_at: "2026-07-28T12:00:00.000Z", ...extra }),
+    ];
+
+    test("a ceiling is scaled to the range, so three ordinary days are not a breach", () => {
+        const rows = nutrientCoveragePayload(
+            threeDays({ sodium_mg: 800 }),
+            goals({ max_sodium_mg: 2300 }),
+            3,
+        );
+        expect(shape.safeParse(rows).success).toBe(true);
+        const sodium = rows.find((r) => r.nutrient === "sodium_mg")!;
+        expect(sodium.known_total).toBe(2400);
+        expect(sodium.target).toBe(6900);
+        expect(sodium.target_days).toBe(3);
+        // The whole point: the naive comparison is now the right one.
+        expect(sodium.known_total! > sodium.target!).toBe(false);
+    });
+
+    test("a floor is scaled too, so a range total cannot fake a met target", () => {
+        const rows = nutrientCoveragePayload(
+            threeDays({ calcium_mg: 333.34 }),
+            goals({ min_calcium_mg: 1000 }),
+            3,
+        );
+        const calcium = rows.find((r) => r.nutrient === "calcium_mg")!;
+        expect(calcium.known_total).toBe(1000);
+        expect(calcium.target).toBe(3000);
+        expect(calcium.target_days).toBe(3);
+        expect(calcium.known_total! >= calcium.target!).toBe(false);
+    });
+
+    test("the single-day default leaves the target exactly as stored", () => {
+        const rows = nutrientCoveragePayload(
+            [meal({ id: "a", sodium_mg: 800 })],
+            goals({ max_sodium_mg: 2300 }),
+        );
+        const sodium = rows.find((r) => r.nutrient === "sodium_mg")!;
+        expect(sodium.target).toBe(2300);
+        expect(sodium.target_days).toBe(1);
+    });
+
+    // A 0 span would zero every ceiling and read every row as over its limit.
+    test("a zero day count is floored at one rather than zeroing every target", () => {
+        const rows = nutrientCoveragePayload(
+            [meal({ id: "a", sodium_mg: 800 })],
+            goals({ max_sodium_mg: 2300 }),
+            0,
+        );
+        expect(rows.find((r) => r.nutrient === "sodium_mg")).toMatchObject({
+            target: 2300,
+            target_days: 1,
+        });
     });
 
     test("coverage is computed over every meal in a multi-day range", () => {
@@ -4622,6 +4711,7 @@ describe("get_goal_progress surfaces coverage", () => {
                 coverage: 0.67,
                 complete: false,
                 target: 2300,
+                target_days: 1,
                 direction: "maximum",
                 // These fixture meals carry no nutrient_provenance, so
                 // nothing vouches for the total. null is what a widget needs
@@ -4686,6 +4776,45 @@ describe("get_nutrition_summary surfaces range-wide coverage", () => {
             });
             // Per-day sections still qualify their own day's figure.
             expect(textOf(r)).toContain("Calcium: 200 mg");
+        });
+    });
+
+    // The text output computes micronutrient progress per DAY; the payload
+    // sums the range. If the payload carried the raw daily target, the two
+    // halves of one tool call would disagree about the same three days —
+    // the text saying "under limit" each day and the widget "over limit".
+    test("range targets are scaled to the logged days, so text and payload agree", async () => {
+        db.goals = goals({ max_sodium_mg: 2300, min_calcium_mg: 1000 });
+        db.meals = ["2026-07-26", "2026-07-27", "2026-07-28"].map((d, i) =>
+            meal({
+                id: String.fromCharCode(97 + i),
+                logged_at: `${d}T12:00:00.000Z`,
+                calories: 700,
+                sodium_mg: 800,
+                calcium_mg: 333.34,
+            }),
+        );
+        await withTools(null, async (call) => {
+            const r = await call("get_nutrition_summary", {
+                start_date: "2026-07-26",
+                end_date: "2026-07-28",
+            });
+            expect(r.isError).toBeFalsy();
+            const cov = (
+                r.structuredContent as unknown as {
+                    nutrient_coverage: Array<Record<string, unknown>>;
+                }
+            ).nutrient_coverage;
+            expect(cov.find((c) => c.nutrient === "sodium_mg")).toMatchObject({
+                known_total: 2400,
+                target: 6900,
+                target_days: 3,
+            });
+            expect(cov.find((c) => c.nutrient === "calcium_mg")).toMatchObject({
+                known_total: 1000,
+                target: 3000,
+                target_days: 3,
+            });
         });
     });
 });

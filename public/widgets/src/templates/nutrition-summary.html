@@ -86,6 +86,10 @@
                 // is NOT in NUTRIENT_COVERAGE_ITEM yet; the two rows carrying
                 // it here are what the badge looks like once it is, and every
                 // other row shows the (correct) absence of a badge.
+                // `target` is scaled to the range — 2,300 mg/day of sodium
+                // over the 3 logged days above is 6,900 here — and
+                // `target_days` says over how many, so `known_total` and
+                // `target` are always the same span.
                 nutrient_coverage: [
                     {
                         nutrient: "sodium_mg",
@@ -98,6 +102,7 @@
                         coverage: 0.64,
                         complete: false,
                         target: 6900,
+                        target_days: 3,
                         direction: "maximum",
                         confidence: "authoritative",
                     },
@@ -112,6 +117,7 @@
                         coverage: 1,
                         complete: true,
                         target: 60,
+                        target_days: 3,
                         direction: "maximum",
                         confidence: "authoritative",
                     },
@@ -126,6 +132,7 @@
                         coverage: 0.82,
                         complete: false,
                         target: null,
+                        target_days: 3,
                         direction: "minimum",
                     },
                     {
@@ -139,6 +146,7 @@
                         coverage: 1,
                         complete: true,
                         target: 2100,
+                        target_days: 3,
                         direction: "minimum",
                     },
                     {
@@ -152,6 +160,7 @@
                         coverage: 0,
                         complete: false,
                         target: 54,
+                        target_days: 3,
                         direction: "minimum",
                     },
                     {
@@ -165,6 +174,7 @@
                         coverage: 1,
                         complete: true,
                         target: null,
+                        target_days: 3,
                         direction: null,
                     },
                     {
@@ -178,6 +188,7 @@
                         coverage: 0.36,
                         complete: false,
                         target: 45,
+                        target_days: 3,
                         direction: "minimum",
                         confidence: "user_provided",
                     },

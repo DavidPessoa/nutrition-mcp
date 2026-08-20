@@ -1796,7 +1796,27 @@ export const NUTRIENT_COVERAGE_ITEM = z.object({
      * is a LOWER BOUND on the real intake, and must not be rendered as if it
      * were the whole figure. */
     complete: z.boolean(),
+    /** The target `known_total` is judged against, SCALED to the same span —
+     * the daily goal multiplied by `target_days`.
+     *
+     * The alternative shapes were: ship the raw daily column and let the
+     * consumer scale it, or add a per-day average beside the total. Both
+     * leave `known_total` and `target` sitting side by side in one row
+     * measuring different spans, and the first consumer to write
+     * `value > target` — which both our own widget and the obvious external
+     * reading do — gets a wrong answer with no way to notice. A range total
+     * of 2,400 mg sodium over three days rendered "100 mg over limit"
+     * against a 2,300 mg/day ceiling, and a 1,000 mg calcium total over
+     * three days rendered "target met" against a 1,000 mg/day floor. Scaling
+     * here makes the naive comparison the correct one; `target_days` is
+     * carried so a consumer can still say "of 6,900 mg over 3 days" or
+     * divide back to the daily figure. */
     target: z.number().nullable(),
+    /** How many days `known_total` and `target` span. 1 for a single-day
+     * payload; the number of LOGGED days for a range (the days the total is
+     * actually summed over — scaling by calendar days in the range would
+     * judge a total against days that contributed nothing to it). */
+    target_days: z.number(),
     direction: z.enum(["minimum", "maximum"]).nullable(),
     /** The confidence behind `known_total`, folded from each contributing
      * meal's nutrient_provenance entry for THIS nutrient: the single
@@ -1849,10 +1869,22 @@ export function foldConfidence(
     return [...seen][0] as "authoritative" | "user_provided" | "estimated";
 }
 
+/**
+ * @param days How many days `meals` spans — 1 for a single day (the default,
+ *   so the single-day callers read exactly as before), the number of logged
+ *   days for a range. Every target is scaled by it; see `target` on
+ *   NUTRIENT_COVERAGE_ITEM for why the row carries a scaled target rather
+ *   than the raw daily column.
+ */
 export function nutrientCoveragePayload(
     meals: Meal[],
     goals: NutritionGoals | null,
+    days = 1,
 ): Array<z.infer<typeof NUTRIENT_COVERAGE_ITEM>> {
+    // A range with meals in it has at least one logged day; the guard is for
+    // a caller that hands us a count it derived some other way, since a 0
+    // would zero out every ceiling and make every row read "over limit".
+    const span = Math.max(1, Math.round(days));
     const rows: Array<z.infer<typeof NUTRIENT_COVERAGE_ITEM>> = [];
     for (const g of MICRONUTRIENT_SPECS) {
         const cov = nutrientCoverage(meals, g.field);
@@ -1862,8 +1894,11 @@ export function nutrientCoveragePayload(
         // and emitting it here as `target: 0` handed a widget a target the
         // text output flatly denies exists — and one every progress ratio
         // divides by. A 0 CEILING stays a real target, as it does in the text.
-        const target = hasActiveTarget(stored, g.direction) ? stored : null;
-        if (cov.known_meals === 0 && target == null) continue;
+        const daily = hasActiveTarget(stored, g.direction) ? stored : null;
+        if (cov.known_meals === 0 && daily == null) continue;
+        // Rounded, so a 3-day 2,300 mg ceiling is 6900 and not 6900.000000001.
+        const target =
+            daily == null ? null : Math.round(daily * span * 10) / 10;
         rows.push({
             nutrient: g.field,
             unit: g.unit.trim(),
@@ -1878,6 +1913,7 @@ export function nutrientCoveragePayload(
             coverage: Math.round(cov.coverage * 100) / 100,
             complete: cov.complete,
             target,
+            target_days: span,
             direction:
                 g.column == null
                     ? null
@@ -1888,6 +1924,22 @@ export function nutrientCoveragePayload(
         });
     }
     return rows;
+}
+
+/**
+ * Render one USDA figure for the model. Two decimals is right for grams and
+ * milligrams and catastrophic for micrograms: 0.1 mcg/100 g of vitamin D
+ * scaled to a 1 g serving is 0.001 mcg, which rounds to a bare `0` — and the
+ * next line of the same message tells the model to pass these figures to
+ * log_meal, where 0 means "the source measured zero". Null is unknown and 0
+ * is measured everywhere else in this server; a printed 0 must mean the
+ * source said 0. So anything that would round away keeps two significant
+ * digits instead.
+ */
+export function formatLookupValue(v: number): string {
+    const rounded = Math.round(v * 100) / 100;
+    if (rounded !== 0 || v === 0) return String(rounded);
+    return String(Number(v.toPrecision(2)));
 }
 
 /**
@@ -2604,7 +2656,7 @@ export function registerTools(
                             (field) => values[field] != null,
                         ).map(
                             (field) =>
-                                `${field}: ${Math.round((values[field] as number) * 100) / 100}`,
+                                `${field}: ${formatLookupValue(values[field] as number)}`,
                         );
                         const missing = NUTRIENT_FIELDS.filter(
                             (field) => values[field] == null,
@@ -3256,10 +3308,16 @@ export function registerTools(
                                     : null,
                                 caffeine_mg: recordedDays.caffeine_mg,
                             },
-                            // Range-wide, over every meal in the window.
+                            // Range-wide, over every meal in the window — so
+                            // every target is scaled to the logged days the
+                            // total actually spans. Handing back the raw
+                            // DAILY column beside a multi-day total is what
+                            // made a 3-day 2,400 mg sodium total render "100
+                            // mg over limit" against a 2,300 mg/day ceiling.
                             nutrient_coverage: nutrientCoveragePayload(
                                 meals,
                                 goals,
+                                days.length,
                             ),
                             days,
                             // Multi-day range → tag each meal with its date.
