@@ -4,6 +4,8 @@ import {
     computeTrends,
     computeWeeklyDigest,
     computeWeightTrend,
+    dayCarries,
+    nutrientCoverage,
     type DailyBucket,
 } from "./insights.js";
 import type { Meal, NutritionGoals, WeightEntry } from "./supabase.js";
@@ -138,6 +140,18 @@ function goals(fields: Partial<NutritionGoals> = {}): NutritionGoals {
         daily_caffeine_mg: null,
         daily_water_ml: null,
         target_weight_g: null,
+        // Micronutrient goals: unset by default, like every other optional
+        // target. Explicit nulls because NutritionGoals requires the keys.
+        max_saturated_fat_g: null,
+        max_sodium_mg: null,
+        min_potassium_mg: null,
+        max_cholesterol_mg: null,
+        min_calcium_mg: null,
+        min_iron_mg: null,
+        min_magnesium_mg: null,
+        min_vitamin_a_mcg: null,
+        min_vitamin_c_mg: null,
+        min_vitamin_d_mcg: null,
         updated_at: "2026-06-02T00:00:00Z",
         ...fields,
     };
@@ -635,4 +649,126 @@ test("computeWeeklyDigest keeps the plain header on a fully logged week", () => 
     const out = computeWeeklyDigest(buckets, goals());
     expect(out).toContain("Daily averages:");
     expect(out).not.toContain("per calendar day");
+});
+
+// ---------- micronutrient coverage ----------
+//
+// The failure this whole feature exists to prevent, stated once: breakfast
+// 600 mg sodium, lunch unknown, dinner 700 mg is NOT a 1300 mg day. Every test
+// below is a way of getting that wrong.
+
+test("nutrientCoverage reports a partial total as partial", () => {
+    const meals = [
+        meal("2026-08-01T08:00:00Z", { sodium_mg: 600 }),
+        meal("2026-08-01T12:00:00Z"), // lunch: sodium unknown
+        meal("2026-08-01T19:00:00Z", { sodium_mg: 700 }),
+    ];
+    expect(nutrientCoverage(meals, "sodium_mg")).toEqual({
+        known_total: 1300,
+        known_meals: 2,
+        total_meals: 3,
+        coverage: 2 / 3,
+        complete: false,
+    });
+});
+
+test("nutrientCoverage: 0% coverage has NO total, not a zero one", () => {
+    const meals = [meal("2026-08-01T08:00:00Z"), meal("2026-08-01T12:00:00Z")];
+    const cov = nutrientCoverage(meals, "sodium_mg");
+    // The distinction the entire epic rests on. `known_total: 0` here would
+    // say "this user ate no sodium today", which nobody measured.
+    expect(cov.known_total).toBeNull();
+    expect(cov.known_meals).toBe(0);
+    expect(cov.total_meals).toBe(2);
+    expect(cov.coverage).toBe(0);
+    expect(cov.complete).toBe(false);
+});
+
+test("nutrientCoverage: 100% coverage is complete", () => {
+    const meals = [
+        meal("2026-08-01T08:00:00Z", { potassium_mg: 300 }),
+        meal("2026-08-01T19:00:00Z", { potassium_mg: 200 }),
+    ];
+    expect(nutrientCoverage(meals, "potassium_mg")).toEqual({
+        known_total: 500,
+        known_meals: 2,
+        total_meals: 2,
+        coverage: 1,
+        complete: true,
+    });
+});
+
+// THE SUBTLE ONE. A source that says "0 g trans fat" has MEASURED it. Treating
+// an explicit zero as missing would drop a real data point and mark a fully
+// recorded day as partial; treating a missing value as zero is the opposite
+// error. Both are wrong and this test pins both directions at once.
+test("nutrientCoverage counts an explicit zero as KNOWN", () => {
+    const meals = [
+        meal("2026-08-01T08:00:00Z", { trans_fat_g: 0 }),
+        meal("2026-08-01T19:00:00Z", { trans_fat_g: 0 }),
+    ];
+    const cov = nutrientCoverage(meals, "trans_fat_g");
+    expect(cov.known_total).toBe(0);
+    expect(cov.known_meals).toBe(2);
+    expect(cov.complete).toBe(true);
+    // And a zero alongside a real value neither hides nor inflates it.
+    const mixed = nutrientCoverage(
+        [
+            meal("2026-08-01T08:00:00Z", { trans_fat_g: 0 }),
+            meal("2026-08-01T19:00:00Z", { trans_fat_g: 1.5 }),
+        ],
+        "trans_fat_g",
+    );
+    expect(mixed.known_total).toBe(1.5);
+    expect(mixed.known_meals).toBe(2);
+    expect(mixed.complete).toBe(true);
+});
+
+test("nutrientCoverage over many meals across many days", () => {
+    // Two days, three meals each; day 1 fully recorded, day 2 not at all.
+    const meals = [
+        meal("2026-08-01T08:00:00Z", { calcium_mg: 100 }),
+        meal("2026-08-01T12:00:00Z", { calcium_mg: 200 }),
+        meal("2026-08-01T19:00:00Z", { calcium_mg: 300 }),
+        meal("2026-08-02T08:00:00Z"),
+        meal("2026-08-02T12:00:00Z"),
+        meal("2026-08-02T19:00:00Z"),
+    ];
+    const cov = nutrientCoverage(meals, "calcium_mg");
+    expect(cov.known_total).toBe(600);
+    expect(cov.known_meals).toBe(3);
+    expect(cov.total_meals).toBe(6);
+    expect(cov.complete).toBe(false);
+    // Per day the same function tells the two days apart, which is what keeps
+    // a range figure from claiming a day it never saw.
+    expect(nutrientCoverage(meals.slice(0, 3), "calcium_mg").complete).toBe(
+        true,
+    );
+    expect(
+        nutrientCoverage(meals.slice(3), "calcium_mg").known_total,
+    ).toBeNull();
+});
+
+test("nutrientCoverage on no meals at all is not 'complete'", () => {
+    // Vacuously complete would let an empty day report "fully recorded".
+    expect(nutrientCoverage([], "iron_mg")).toEqual({
+        known_total: null,
+        known_meals: 0,
+        total_meals: 0,
+        coverage: 0,
+        complete: false,
+    });
+});
+
+// dayCarries and nutrientCoverage must agree about what "recorded" means, or
+// the summary and the trend line disagree about the same day.
+test("dayCarries accepts the micronutrients and matches nutrientCoverage", () => {
+    const meals = [
+        meal("2026-08-01T08:00:00Z", { magnesium_mg: 0 }),
+        meal("2026-08-01T12:00:00Z"),
+    ];
+    expect(dayCarries(meals, "magnesium_mg")).toBe(true);
+    expect(nutrientCoverage(meals, "magnesium_mg").known_meals).toBe(1);
+    expect(dayCarries(meals, "vitamin_c_mg")).toBe(false);
+    expect(nutrientCoverage(meals, "vitamin_c_mg").known_meals).toBe(0);
 });

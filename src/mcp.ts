@@ -37,6 +37,8 @@ import {
     getMealById,
     existingIdempotencyKeys,
     existingMealIds,
+    MICRONUTRIENT_GOAL_FIELDS,
+    type MicronutrientGoalField,
     type Meal,
     type MealInput,
     type NutritionGoals,
@@ -62,8 +64,11 @@ import {
     computeWeightTrend,
     dayCarries,
     coveredDailyAverage,
+    nutrientCoverage,
+    type PartialNutrient,
     dateDiffDays,
     type DailyBucket,
+    type NutrientCoverage,
 } from "./insights.js";
 import {
     toGrams,
@@ -1083,6 +1088,24 @@ export function formatGoals(
     parts.push(
         `- Target weight: ${goals.target_weight_g != null ? formatWeight(goals.target_weight_g, weightUnit) : "not set"}`,
     );
+    // Micronutrient goals: only the ones actually SET are listed, unlike the
+    // macros above. Ten "not set" rows on every goal echo would bury the
+    // targets the user does have; the model learns these exist from
+    // set_nutrition_goals' own field list instead. One pointer line covers the
+    // empty case so the capability is never invisible.
+    const micros = MICRONUTRIENT_GOALS.filter((g) =>
+        hasActiveTarget(goals[g.column], g.direction),
+    ).map(
+        (g) =>
+            `- ${g.label} (${g.direction === "ceiling" ? "max" : "min"}): ${goals[g.column]}${g.unit}`,
+    );
+    parts.push(
+        ...(micros.length > 0
+            ? micros
+            : [
+                  "- Micronutrient goals (saturated fat, sodium, potassium, cholesterol, calcium, iron, magnesium, vitamins A/C/D): none set",
+              ]),
+    );
     return parts.join("\n");
 }
 
@@ -1494,6 +1517,250 @@ export function micronutrientLine(meal: Meal): string | null {
         ([field]) => meal[field] != null,
     ).map(([field, label, unit]) => `${label}: ${meal[field]} ${unit}`);
     return parts.length > 0 ? parts.join(" · ") : null;
+}
+
+// ---------- Micronutrient coverage and goals ----------
+
+/** Label and unit for every micronutrient, keyed by field, built from the
+ * table above so the two cannot drift. */
+const MICRONUTRIENT_META = new Map(
+    MICRONUTRIENT_LABELS.map(([field, label, unit]) => [
+        field,
+        { label, unit: unit === "g" ? "g" : ` ${unit}` },
+    ]),
+);
+
+/** Every micronutrient as one spec: its goal column (null for the two that
+ * have none), its display label and unit, which way its goal points, and the
+ * ceiling its goal column's precision allows.
+ *
+ * ONE list drives the Zod schema, the merge in set_nutrition_goals, the goal
+ * echo, the progress lines and the structured payload. THE DIRECTION IS READ
+ * OFF THE COLUMN NAME rather than kept in a second table: the whole point of
+ * naming the columns `min_`/`max_` is that no layer has to look the direction
+ * up and no lookup can go stale.
+ *
+ * The bound mirrors the column precision, for the same overflow reason
+ * MAX_GOAL_G exists: numeric(6,2) for the gram target, numeric(7,2) for the
+ * mg and mcg ones. Anything above it is a Postgres "numeric field overflow"
+ * rather than a saved goal. */
+interface MicronutrientSpec {
+    column: MicronutrientGoalField | null;
+    // PartialNutrient, not NutrientField: nutrientCoverage only accepts
+    // nutrients where null genuinely means "not recorded", which is the whole
+    // micronutrient set but not calories or the macros.
+    field: PartialNutrient;
+    label: string;
+    unit: string;
+    direction: GoalDirection;
+    max: number;
+}
+
+const MICRONUTRIENT_SPECS: readonly MicronutrientSpec[] = [
+    ...MICRONUTRIENT_GOAL_FIELDS.map(([column, field]): MicronutrientSpec => {
+        const meta = MICRONUTRIENT_META.get(field)!;
+        return {
+            column,
+            field,
+            label: meta.label,
+            unit: meta.unit,
+            direction: column.startsWith("max_") ? "ceiling" : "floor",
+            max: column.endsWith("_g") ? MAX_GOAL_G : MAX_GOAL_MG,
+        };
+    }),
+    // The two micronutrients with no goal column — see
+    // MICRONUTRIENT_GOAL_FIELDS for why. They still get a coverage line and a
+    // payload row once recorded: being ungoalable is not a reason to hide the
+    // data. `column: null` means no target is ever looked up for them.
+    ...(["trans_fat_g", "added_sugar_g"] as const).map(
+        (field): MicronutrientSpec => ({
+            column: null,
+            field,
+            label: MICRONUTRIENT_META.get(field)!.label,
+            unit: MICRONUTRIENT_META.get(field)!.unit,
+            direction: "ceiling",
+            max: MAX_GOAL_G,
+        }),
+    ),
+];
+
+/** The goalable subset, in the epic's order. */
+const MICRONUTRIENT_GOALS = MICRONUTRIENT_SPECS.filter(
+    (s): s is MicronutrientSpec & { column: MicronutrientGoalField } =>
+        s.column !== null,
+);
+
+/** set_nutrition_goals' micronutrient inputs. Bounded in the schema like every
+ * other goal field (see the MAX_* block for why this tool differs from
+ * bulk_import_meals), `.nullable()` so a target can be cleared, `.optional()`
+ * so an omitted field keeps its stored value.
+ *
+ * Deliberately NO defaults and no suggested figures in the descriptions. There
+ * are widely published reference intakes for all ten, and offering them here
+ * would turn a tracking tool into a source of dietary advice for a user who
+ * never asked — the direction and the unit are what the model needs, and the
+ * number is the user's. */
+function micronutrientGoalSchema(): Record<
+    MicronutrientGoalField,
+    z.ZodOptional<z.ZodNullable<z.ZodCoercedNumber<unknown>>>
+> {
+    const shape = {} as Record<
+        MicronutrientGoalField,
+        z.ZodOptional<z.ZodNullable<z.ZodCoercedNumber<unknown>>>
+    >;
+    for (const g of MICRONUTRIENT_GOALS) {
+        const noun = g.direction === "ceiling" ? "maximum" : "minimum";
+        shape[g.column] = z.coerce
+            .number()
+            .min(0)
+            .max(g.max)
+            .nullable()
+            .optional()
+            .describe(
+                `Daily ${g.label.toLowerCase()} goal in ${g.unit.trim()}, treated as a ${noun} to ${g.direction === "ceiling" ? "stay under" : "reach"}. Set it to the figure the USER gives you; do not supply a recommended value of your own. Null to clear.`,
+            );
+    }
+    return shape;
+}
+
+function micronutrientGoalMerge(
+    args: Partial<Record<MicronutrientGoalField, number | null | undefined>>,
+    existing: NutritionGoals | null,
+): Record<string, number | null> {
+    const out: Record<string, number | null> = {};
+    for (const g of MICRONUTRIENT_GOALS) {
+        out[g.column] =
+            args[g.column] === undefined
+                ? (existing?.[g.column] ?? null)
+                : (args[g.column] ?? null);
+    }
+    return out;
+}
+
+/** How an incomplete total must be qualified, in words, everywhere it is
+ * printed.
+ *
+ * This string is the feature. "Sodium: 1300 mg / 2300 mg limit (57%, under)"
+ * on a day where one of three meals never recorded sodium is a FALSE
+ * statement — the unrecorded meal's sodium is unknown and non-negative, so the
+ * real intake may be well over the limit. The verdict is not suppressed
+ * (a user with a target wants to see where they stand), but it is never
+ * allowed to stand unqualified: the sentence says out loud that it covers the
+ * recorded meals only and that the true total is higher. */
+export function coverageNote(cov: NutrientCoverage): string {
+    if (cov.complete || cov.known_meals === 0) return "";
+    return ` — recorded meals only, ${cov.known_meals} of ${cov.total_meals}; the true total is higher`;
+}
+
+/** Coverage-aware progress lines for the micronutrients.
+ *
+ * Data-driven display, exactly like fiber/sugar/caffeine and with no opt-in
+ * flag: a nutrient appears once the user has actually recorded it, or once
+ * they have set a target for it, and is silent otherwise. A user who has never
+ * logged a sodium figure sees no sodium row rather than a fabricated "0 mg".
+ *
+ * `≥` rather than a bare number whenever coverage is partial: the recorded
+ * meals are a floor on the day's intake, not the day's intake. */
+export function micronutrientProgressLines(
+    meals: Meal[],
+    goals: NutritionGoals | null,
+): string[] {
+    const lines: string[] = [];
+    for (const g of MICRONUTRIENT_SPECS) {
+        const cov = nutrientCoverage(meals, g.field);
+        const target = g.column == null ? null : (goals?.[g.column] ?? null);
+        if (cov.known_meals === 0) {
+            // Nothing recorded. Say so only when a target makes the silence
+            // look like tracking having broken — same rule as recordedGoalLine.
+            if (!hasActiveTarget(target, g.direction)) continue;
+            const noun = g.direction === "ceiling" ? "limit" : "target";
+            lines.push(`${g.label}: not recorded / ${target}${g.unit} ${noun}`);
+            continue;
+        }
+        const value = Math.round(cov.known_total! * 10) / 10;
+        const hasTarget = hasActiveTarget(target, g.direction);
+        // formatGoalLine renders the unit itself when there is no target and
+        // puts it on the target when there is, so the "≥" override has to
+        // match whichever form it is about to take.
+        const actualText = cov.complete
+            ? undefined
+            : hasTarget
+              ? `≥${value}`
+              : `≥${value}${g.unit}`;
+        lines.push(
+            formatGoalLine(
+                g.label,
+                g.unit,
+                value,
+                target,
+                g.direction,
+                actualText,
+            ) + coverageNote(cov),
+        );
+    }
+    return lines;
+}
+
+/** Per-nutrient coverage for the structured payloads.
+ *
+ * An ARRAY, not a fixed object: a `.nullable()` field is REQUIRED in the
+ * emitted JSON Schema, so a twelve-key object would force every consumer and
+ * every literal to carry twelve explicit nulls forever. A row exists only for
+ * a nutrient the user has data or a target for, which is also exactly the
+ * data-driven display rule the text output follows.
+ *
+ * `direction` is the epic's explicit vocabulary — "minimum"/"maximum" — not
+ * this file's internal floor/ceiling wording, and it is stated for every
+ * goalable nutrient whether or not a target is currently set: a consumer
+ * needs to know which way sodium points before it can offer to set one. */
+export const NUTRIENT_COVERAGE_ITEM = z.object({
+    nutrient: z.string(),
+    unit: z.string(),
+    /** Sum over the meals that recorded it. NULL when none did — an
+     * unmeasured nutrient has no total, and 0 would be a lie. */
+    known_total: z.number().nullable(),
+    known_meals: z.number(),
+    total_meals: z.number(),
+    /** known_meals / total_meals, 0..1, rounded to two places. */
+    coverage: z.number(),
+    /** True only when every meal recorded a value. False means `known_total`
+     * is a LOWER BOUND on the real intake, and must not be rendered as if it
+     * were the whole figure. */
+    complete: z.boolean(),
+    target: z.number().nullable(),
+    direction: z.enum(["minimum", "maximum"]).nullable(),
+});
+
+export function nutrientCoveragePayload(
+    meals: Meal[],
+    goals: NutritionGoals | null,
+): Array<z.infer<typeof NUTRIENT_COVERAGE_ITEM>> {
+    const rows: Array<z.infer<typeof NUTRIENT_COVERAGE_ITEM>> = [];
+    for (const g of MICRONUTRIENT_SPECS) {
+        const cov = nutrientCoverage(meals, g.field);
+        const target = g.column == null ? null : (goals?.[g.column] ?? null);
+        if (cov.known_meals === 0 && target == null) continue;
+        rows.push({
+            nutrient: g.field,
+            unit: g.unit.trim(),
+            known_total:
+                cov.known_total == null
+                    ? null
+                    : Math.round(cov.known_total * 10) / 10,
+            known_meals: cov.known_meals,
+            total_meals: cov.total_meals,
+            coverage: Math.round(cov.coverage * 100) / 100,
+            complete: cov.complete,
+            target,
+            direction:
+                g.column == null
+                    ? null
+                    : g.direction === "ceiling"
+                      ? "maximum"
+                      : "minimum",
+        });
+    }
+    return rows;
 }
 
 /**
@@ -2672,6 +2939,14 @@ export function registerTools(
                     alcohol_g: z.number().nullable(),
                     caffeine_mg: z.number(),
                 }),
+                // Per-micronutrient coverage across the WHOLE range: the
+                // recorded total, and how many of the range's meals it was
+                // recorded on. `complete: false` means the total is a lower
+                // bound and must not be rendered as the range's intake. The
+                // per-day rows below carry no micronutrients — a consumer that
+                // wants a day's coverage asks get_goal_progress for that day,
+                // rather than being handed twelve nullable columns x 365 days.
+                nutrient_coverage: z.array(NUTRIENT_COVERAGE_ITEM),
                 days: z.array(
                     TOTALS_ITEM.extend({
                         date: z.string(),
@@ -2733,6 +3008,12 @@ export function registerTools(
                                     alcohol_g: alcohol ? 0 : null,
                                     caffeine_mg: 0,
                                 },
+                                // Empty, not omitted: a declared outputSchema
+                                // field the SDK rejects the whole result over.
+                                // No meals means no coverage to report — the
+                                // goals may exist, but with nothing recorded
+                                // there is no total to qualify.
+                                nutrient_coverage: [],
                                 days: [],
                                 meals: [],
                             },
@@ -2778,8 +3059,15 @@ export function registerTools(
                         // the range average down towards zero.
                         const present = nutrientPresence(dateMeals);
                         const header = `## ${date} (${dateMeals.length} meal${dateMeals.length === 1 ? "" : "s"})`;
+                        const microLines = micronutrientProgressLines(
+                            dateMeals,
+                            goals,
+                        );
                         sections.push(
-                            `${header}\n${formatProgress(totals, goals, alcohol, present)}`,
+                            `${header}\n${formatProgress(totals, goals, alcohol, present)}` +
+                                (microLines.length > 0
+                                    ? `\n${microLines.join("\n")}`
+                                    : ""),
                         );
                         days.push({
                             date,
@@ -2865,6 +3153,11 @@ export function registerTools(
                                     : null,
                                 caffeine_mg: recordedDays.caffeine_mg,
                             },
+                            // Range-wide, over every meal in the window.
+                            nutrient_coverage: nutrientCoveragePayload(
+                                meals,
+                                goals,
+                            ),
                             days,
                             // Multi-day range → tag each meal with its date.
                             meals: mealBreakdown(meals, tz, alcohol),
@@ -2978,6 +3271,7 @@ export function registerTools(
                     .describe(
                         "Unit for target_weight. Defaults to the user's preferred weight unit.",
                     ),
+                ...micronutrientGoalSchema(),
             },
         },
         async (args) => {
@@ -3044,6 +3338,11 @@ export function registerTools(
                                 ? (existing?.daily_water_ml ?? null)
                                 : args.daily_water_ml,
                         target_weight_g,
+                        // Same undefined-vs-null merge as every field above:
+                        // omitted keeps the stored target, explicit null
+                        // clears it. Generated, because ten hand-written
+                        // ternaries is ten chances to paste the wrong key.
+                        ...micronutrientGoalMerge(args, existing),
                     };
                     const goals = await upsertNutritionGoals(userId, merged);
                     // An alcohol target set by someone who has alcohol tracking
@@ -3128,6 +3427,11 @@ export function registerTools(
                 drink_unit: DRINK_UNIT_FIELD,
                 goals: GOALS_ITEM.nullable(),
                 totals: TOTALS_ITEM,
+                // Per-micronutrient coverage: what was recorded, over how many
+                // of the day's meals, and whether that is the whole story. A
+                // consumer must not render `known_total` as the day's intake
+                // when `complete` is false.
+                nutrient_coverage: z.array(NUTRIENT_COVERAGE_ITEM),
                 weight: z
                     .object({
                         current: z.number().nullable(),
@@ -3160,12 +3464,18 @@ export function registerTools(
                     totals.water_ml = sumWater(water);
                     const present = nutrientPresence(meals);
                     const header = `Progress for ${targetDate} (${meals.length} meal${meals.length === 1 ? "" : "s"}, ${water.length} water entr${water.length === 1 ? "y" : "ies"})`;
-                    const body = formatProgress(
-                        totals,
-                        goals,
-                        alcohol,
-                        present,
-                    );
+                    // Micronutrients hang off the macro block rather than
+                    // going through formatProgress: they need per-nutrient
+                    // COVERAGE (how many of the day's meals actually recorded
+                    // each one), which a DailyTotals sum has thrown away by the
+                    // time it gets here — summing a missing sodium as 0 is
+                    // precisely the failure this section exists to prevent.
+                    const microLines = micronutrientProgressLines(meals, goals);
+                    const body =
+                        formatProgress(totals, goals, alcohol, present) +
+                        (microLines.length > 0
+                            ? `\n${microLines.join("\n")}`
+                            : "");
 
                     // Weight is a standing metric (latest overall), not per-date.
                     let weightLine = "";
@@ -3234,6 +3544,10 @@ export function registerTools(
                             water_entries: water.length,
                             goals: goalsPayload,
                             totals: totalsPayload,
+                            nutrient_coverage: nutrientCoveragePayload(
+                                meals,
+                                goals,
+                            ),
                             weight: weightPayload,
                             // Single day → label rows by meal type in the widget.
                             meals: mealBreakdown(meals, null, alcohol),

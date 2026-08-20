@@ -4,6 +4,9 @@ import { runImport, resolveLoggedAt } from "./import.js";
 import { buildMealsCsv } from "./export.js";
 import type { Meal } from "./supabase.js";
 import {
+    MICRONUTRIENT_HEADER_ALIASES,
+    resolveNutrientHeader,
+    parseUnitToken,
     parseCsv,
     decodeBytes,
     stripBom,
@@ -992,4 +995,165 @@ test("the export's id column is what the importer's source_id alias matches", ()
     const t = parseCsv(buildMealsCsv(STORED, "UTC"));
     expect(findColumn(t.headers, ["id"])).toBe(0);
     expect(t.rows[0]![0]).toBe(STORED[0]!.id);
+});
+
+// ---------- micronutrient header resolution ----------
+
+test("the alias table covers exactly the canonical micronutrient fields", async () => {
+    // csv.ts spells the twelve field names out because it is inlined into the
+    // import widget by @inlinets, which forbids runtime imports. This is the
+    // guard that keeps that copy from drifting from the model.
+    const { MICRONUTRIENT_FIELDS } = await import("./nutrients.js");
+    expect(Object.keys(MICRONUTRIENT_HEADER_ALIASES).sort()).toEqual(
+        [...MICRONUTRIENT_FIELDS].sort(),
+    );
+});
+
+test("resolves the headings and aliases real exports use", () => {
+    const cases: [string, string][] = [
+        ["Saturated Fat", "saturated_fat_g"],
+        ["Sat Fat", "saturated_fat_g"],
+        ["saturated_fat_g", "saturated_fat_g"],
+        ["Trans Fat", "trans_fat_g"],
+        ["Added Sugar", "added_sugar_g"],
+        ["Added Sugars", "added_sugar_g"],
+        ["Sodium", "sodium_mg"],
+        ["Potassium", "potassium_mg"],
+        ["Cholesterol", "cholesterol_mg"],
+        ["Calcium", "calcium_mg"],
+        ["Iron", "iron_mg"],
+        ["Magnesium", "magnesium_mg"],
+        ["Vitamin A", "vitamin_a_mcg"],
+        ["Vitamin C", "vitamin_c_mg"],
+        ["Vitamin D", "vitamin_d_mcg"],
+        ["Gesättigte Fettsäuren", "saturated_fat_g"],
+        ["Natrium", "sodium_mg"],
+    ];
+    for (const [header, field] of cases) {
+        const m = resolveNutrientHeader(header);
+        expect(m).not.toBeNull();
+        expect(m!.field).toBe(field);
+    }
+});
+
+test("a unit-qualified header reports the unit the header states", () => {
+    expect(resolveNutrientHeader("Sodium (mg)")).toEqual({
+        field: "sodium_mg",
+        unit: "mg",
+        unitStated: true,
+    });
+    // The case that must never silently become milligrams.
+    expect(resolveNutrientHeader("Sodium (g)")).toEqual({
+        field: "sodium_mg",
+        unit: "g",
+        unitStated: true,
+    });
+    expect(resolveNutrientHeader("Vitamin D (mcg)")).toEqual({
+        field: "vitamin_d_mcg",
+        unit: "mcg",
+        unitStated: true,
+    });
+    // µ is folded to "u" by normalizeHeader, so "µg" arrives as "ug".
+    expect(resolveNutrientHeader("Vitamin D (µg)")).toEqual({
+        field: "vitamin_d_mcg",
+        unit: "mcg",
+        unitStated: true,
+    });
+    // "mcg RAE" is our own canonical spelling for vitamin A.
+    expect(resolveNutrientHeader("Vitamin A (mcg RAE)")).toEqual({
+        field: "vitamin_a_mcg",
+        unit: "mcg",
+        unitStated: true,
+    });
+});
+
+test("a unit-less header is read canonically but says it assumed", () => {
+    // Flagged, not silent: the caller has to be able to tell the user
+    // "Sodium will be read as mg" before anything is written.
+    expect(resolveNutrientHeader("Sodium")).toEqual({
+        field: "sodium_mg",
+        unit: "mg",
+        unitStated: false,
+    });
+    expect(resolveNutrientHeader("Vitamin A")).toEqual({
+        field: "vitamin_a_mcg",
+        unit: "mcg",
+        unitStated: false,
+    });
+    expect(resolveNutrientHeader("Saturated Fat")).toEqual({
+        field: "saturated_fat_g",
+        unit: "g",
+        unitStated: false,
+    });
+});
+
+test("an unconvertible unit is refused, never read as the canonical one", () => {
+    // IU has no single conversion to µg RAE, so this must surface as a refusal
+    // the caller can explain — not fall back to mcg, which would be wrong by a
+    // factor of 3 to 20 while looking entirely plausible.
+    expect(resolveNutrientHeader("Vitamin A (IU)")).toEqual({
+        field: "vitamin_a_mcg",
+        unit: null,
+        unsupportedUnit: "iu",
+    });
+    expect(resolveNutrientHeader("Vitamin D (IU)")).toEqual({
+        field: "vitamin_d_mcg",
+        unit: null,
+        unsupportedUnit: "iu",
+    });
+    expect(resolveNutrientHeader("Vitamin C (% DV)")).toEqual({
+        field: "vitamin_c_mg",
+        unit: null,
+        unsupportedUnit: "dv",
+    });
+});
+
+test("does not claim columns that are not micronutrients", () => {
+    for (const header of [
+        "",
+        "Food",
+        "Calories",
+        "Fat (g)",
+        "Sugar",
+        "Sugars",
+        "Total Sugars",
+        "Sugar Alcohols (g)",
+        "Caffeine (mg)",
+        "Notes",
+    ]) {
+        expect(resolveNutrientHeader(header)).toBeNull();
+    }
+});
+
+test("parseUnitToken accepts the mass ladder and refuses everything else", () => {
+    expect(parseUnitToken("g")).toBe("g");
+    expect(parseUnitToken("Grams")).toBe("g");
+    expect(parseUnitToken("MG")).toBe("mg");
+    expect(parseUnitToken("mcg")).toBe("mcg");
+    expect(parseUnitToken("µg")).toBe("mcg");
+    expect(parseUnitToken("micrograms")).toBe("mcg");
+    for (const bad of ["IU", "%", "% DV", "kcal", "oz", "", "  ", "flurbs"]) {
+        expect(parseUnitToken(bad)).toBeNull();
+    }
+    expect(parseUnitToken(undefined)).toBeNull();
+});
+
+test("the exported meals.csv micronutrient headers resolve back to their own fields", async () => {
+    // The re-import contract for the twelve, checked against the resolver
+    // rather than a copy of the names: a rename on either side silently turns a
+    // restored backup into one with no micronutrients.
+    const { MICRONUTRIENT_FIELDS } = await import("./nutrients.js");
+    const headers = parseCsv(buildMealsCsv([], "UTC")).headers;
+    for (const field of MICRONUTRIENT_FIELDS) {
+        expect(headers).toContain(field);
+        expect(resolveNutrientHeader(field)).toEqual({
+            field,
+            unit: field.endsWith("_mcg")
+                ? "mcg"
+                : field.endsWith("_mg")
+                  ? "mg"
+                  : "g",
+            unitStated: true,
+        });
+    }
 });

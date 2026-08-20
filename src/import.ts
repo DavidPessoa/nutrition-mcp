@@ -30,6 +30,14 @@ import {
 } from "./tz.js";
 import { decodeEscapeSequences } from "./normalize.js";
 import { toStoredInteger } from "./units.js";
+import { parseUnitToken } from "./csv.js";
+import {
+    MICRONUTRIENT_FIELDS,
+    NUTRIENT_UNITS,
+    parseNutrientProvenance,
+    type NutrientProvenance,
+} from "./nutrients.js";
+import { convertNutrientValue } from "./nutrient-units.js";
 
 export type MealType = MealInput["meal_type"];
 
@@ -55,6 +63,19 @@ export const MAX_ALCOHOL_G = 500;
  *  failure — 0.18 instead of 180 — and no ceiling can catch that, which is why
  *  the header must carry the unit (see CSV_COLUMNS in src/export.ts). */
 export const MAX_CAFFEINE_MG = 5_000;
+/** Ceiling for the mg-valued micronutrients, applied to the CANONICAL value
+ *  after any unit conversion — the bound is stated in the unit the column is
+ *  stored in, or a `Sodium (g)` column would be judged against a milligram
+ *  limit. 100,000 mg is 100 g: past every real single row (a whole day's
+ *  sodium is ~3,000 mg, the most calcium-dense meal imaginable a few thousand)
+ *  while still catching the mistake that matters here — a column mapped to the
+ *  wrong nutrient, or an mg figure declared as grams and multiplied by 1000. */
+export const MAX_MICRO_MG = 100_000;
+/** Ceiling for the mcg-valued micronutrients (vitamins A and D), same
+ *  reasoning. 100,000 mcg is 100 mg of vitamin D — roughly 200x the tolerable
+ *  upper intake, so nothing real reaches it and a g-for-mcg mix-up (a factor
+ *  of a million) cannot slip past. */
+export const MAX_MICRO_MCG = 100_000;
 const MAX_DESCRIPTION_CHARS = 2_000;
 const MAX_NOTES_CHARS = 4_000;
 const MAX_PAST_MS = 20 * 365.25 * 24 * 3600 * 1000;
@@ -119,6 +140,49 @@ export interface ImportRow {
      *  a caller reading "caffeine" off a column and sending grams is off by
      *  1000x, and no bound can distinguish that from a genuinely small dose. */
     caffeine_mg?: number;
+    // ---- The twelve micronutrients (CONTRACT §1). `number | null` rather
+    // than `number | undefined` alone, because a file CAN say "this cell is
+    // empty" and that must arrive as null and stay null: absent and null both
+    // mean "not recorded", and neither may ever become 0.
+    //
+    // Values are in each field's canonical unit (which is in its name) UNLESS
+    // `nutrient_units` names a different one for that field.
+    saturated_fat_g?: number | null;
+    trans_fat_g?: number | null;
+    /** Added/free sugars only. NOT derived from, and not a substitute for,
+     *  `sugar_g`, which stays TOTAL sugars. */
+    added_sugar_g?: number | null;
+    sodium_mg?: number | null;
+    potassium_mg?: number | null;
+    cholesterol_mg?: number | null;
+    calcium_mg?: number | null;
+    iron_mg?: number | null;
+    magnesium_mg?: number | null;
+    /** Micrograms RAE. An IU figure has no single conversion to RAE and must
+     *  be left out entirely rather than converted — see src/nutrient-units.ts. */
+    vitamin_a_mcg?: number | null;
+    vitamin_c_mg?: number | null;
+    vitamin_d_mcg?: number | null;
+    /**
+     * The unit a micronutrient value is actually in, keyed by canonical field
+     * name, for a source column that states something other than the canonical
+     * unit ("Sodium (g)"). Only "g", "mg" and "mcg" (with their long spellings)
+     * are accepted; anything else — an IU column, a "% DV" column, a typo — is
+     * a per-row error rather than a fallback to the canonical unit, because
+     * every fallback here is a coin flip that produces a plausible wrong
+     * number. The conversion itself is done by src/nutrient-units.ts, the only
+     * module allowed to hold unit arithmetic (CONTRACT §0.5).
+     */
+    nutrient_units?: Record<string, string>;
+    /**
+     * Per-nutrient provenance carried back in from this server's own export,
+     * as the JSON text of that file's `nutrient_provenance` cell (an already
+     * parsed object is accepted too). Unparseable or unrecognised content is
+     * dropped with an aggregate warning rather than failing the row: it is
+     * metadata about the numbers, and losing it must never cost the user the
+     * numbers themselves.
+     */
+    nutrient_provenance?: string | Record<string, unknown> | null;
     notes?: string;
     /** Caller-chosen correlation label. Echoed back; never used as a key. */
     client_row_id?: string;
@@ -153,6 +217,10 @@ export interface ResolvedRow {
      *  unset-timezone warning to rows that actually depended on the account
      *  default, so a row carrying its own zone never triggers it. */
     logged_at_used_row_timezone: boolean;
+    /** Internal: this row carried a `nutrient_provenance` value that could not
+     *  be read, so the numbers were kept and the provenance discarded. Drives
+     *  an aggregate warning; not part of the tool's output schema. */
+    provenance_dropped: boolean;
 }
 
 export type RowValidation =
@@ -715,6 +783,102 @@ export function validateRow(
         if (err) return fail(err);
     }
 
+    // ---- Micronutrients: resolve the unit, convert, then bound-check.
+    //
+    // That order matters. The ceilings are stated in each field's canonical
+    // unit, so a `Sodium (g)` column of 2.3 has to become 2300 mg before it is
+    // judged — checking first would pass a 2.3 that later becomes 2,300,000.
+    // The conversion itself is delegated to src/nutrient-units.ts; there is no
+    // arithmetic in this file (CONTRACT §0.5).
+    //
+    // null and undefined are kept apart from 0 all the way through: an absent
+    // key stays absent, an explicit null is written as null, and only a real 0
+    // in the source becomes a stored 0 (CONTRACT §0.1).
+    const micros: Partial<
+        Record<(typeof MICRONUTRIENT_FIELDS)[number], number | null>
+    > = {};
+    for (const field of MICRONUTRIENT_FIELDS) {
+        const raw = row[field];
+        if (raw === undefined) continue;
+        if (raw === null) {
+            micros[field] = null;
+            continue;
+        }
+        if (!Number.isFinite(raw)) {
+            return fail({
+                code: "value_not_finite",
+                field,
+                message: `${field} is not a finite number; got ${raw}`,
+                suggested_fix: "Omit the field when the source cell is empty.",
+                retryable: true,
+            });
+        }
+        const canonical = NUTRIENT_UNITS[field];
+        const max =
+            canonical === "g"
+                ? MAX_MACRO_G
+                : canonical === "mg"
+                  ? MAX_MICRO_MG
+                  : MAX_MICRO_MCG;
+        if (raw < 0) return fail(numberError(field, raw, max, canonical));
+
+        // No unit stated means the value is already in the field's canonical
+        // unit — which the field NAME states, so this is a contract with the
+        // caller and not an assumption about the data.
+        const declared = row.nutrient_units?.[field];
+        let unit = canonical;
+        if (declared !== undefined && String(declared).trim() !== "") {
+            const parsed = parseUnitToken(String(declared));
+            if (parsed === null) {
+                return fail({
+                    code: "ambiguous_unit",
+                    field,
+                    message: `nutrient_units.${field} is ${JSON.stringify(String(declared))}, which is not a unit this server can convert`,
+                    suggested_fix: `Send ${field} in ${canonical} and drop the unit, or state one of g, mg, mcg. International Units and %-of-daily-value columns cannot be converted to a mass and must be left out.`,
+                    retryable: true,
+                });
+            }
+            unit = parsed;
+        }
+
+        const converted = convertNutrientValue(field, raw, unit);
+        if (converted === null) {
+            return fail({
+                code: "unit_conversion_failed",
+                field,
+                message: `${field} could not be converted from ${unit} to ${canonical}; got ${raw}`,
+                suggested_fix: `Send ${field} as a finite, non-negative number in ${canonical}.`,
+                retryable: true,
+            });
+        }
+        if (converted > max) {
+            return fail(numberError(field, converted, max, canonical));
+        }
+        micros[field] = converted;
+    }
+
+    // ---- Provenance. Metadata about the numbers, so a broken cell costs the
+    // provenance and never the row: a user restoring a backup would rather
+    // have their sodium without knowing where it came from than not at all.
+    let provenanceDropped = false;
+    let provenance: NutrientProvenance | null = null;
+    if (row.nutrient_provenance != null && row.nutrient_provenance !== "") {
+        let candidate: unknown = row.nutrient_provenance;
+        if (typeof candidate === "string") {
+            try {
+                candidate = JSON.parse(candidate);
+            } catch {
+                candidate = null;
+                provenanceDropped = true;
+            }
+        }
+        // parseNutrientProvenance is already defensive — it drops unknown
+        // fields, unknown sources and malformed entries rather than throwing —
+        // so anything it returns is safe to store as-is.
+        provenance = parseNutrientProvenance(candidate);
+        if (provenance === null && !provenanceDropped) provenanceDropped = true;
+    }
+
     const input: MealInput = {
         description,
         meal_type: mealType,
@@ -743,6 +907,38 @@ export function validateRow(
     if (row.caffeine_mg !== undefined) input.caffeine_mg = row.caffeine_mg;
     if (row.notes !== undefined) input.notes = row.notes;
 
+    // Written through the canonical field list rather than twelve hand-copied
+    // lines, so a field added to the model cannot be forgotten here. `null` is
+    // assigned as `null` — insertMeal distinguishes it from an absent key, and
+    // both mean "not recorded" while neither means 0.
+    for (const field of MICRONUTRIENT_FIELDS) {
+        if (field in micros) input[field] = micros[field] ?? null;
+    }
+
+    // Stamp provenance for micronutrient values this row actually carried and
+    // the file said nothing about. Tier 5, `user_provided` confidence: an
+    // import is the user's own history, not a third-party claim, so it must
+    // neither clobber nor be clobbered by something they typed directly
+    // (CONTRACT §4). Provenance the file DID carry — our own export's
+    // `nutrient_provenance` column — is more specific and wins, which is what
+    // makes an export/re-import round trip lossless.
+    //
+    // Only the twelve micronutrients are stamped, never the macros: a file
+    // with no micronutrient columns then produces exactly the row it produced
+    // before this epic, with nutrient_provenance still null, rather than
+    // gaining a jsonb blob on every historical meal for no new information.
+    const stamped: NutrientProvenance = { ...(provenance ?? {}) };
+    for (const field of MICRONUTRIENT_FIELDS) {
+        if (micros[field] == null) continue;
+        if (stamped[field] !== undefined) continue;
+        stamped[field] = {
+            source: "import",
+            source_id: null,
+            confidence: "user_provided",
+        };
+    }
+    if (Object.keys(stamped).length > 0) input.nutrient_provenance = stamped;
+
     return {
         ok: true,
         index,
@@ -757,6 +953,7 @@ export function validateRow(
             logged_at_used_profile_tz: ts.value.usedProfileTimezone,
             logged_at_used_row_timezone:
                 usedRowTimezone && ts.value.usedProfileTimezone,
+            provenance_dropped: provenanceDropped,
         },
     };
 }
@@ -1148,6 +1345,14 @@ export async function runImport(
     if (synthesized > 0) {
         warnings.push(
             `${synthesized} row(s) had no food name in the source; a placeholder description was used.`,
+        );
+    }
+    const provenanceDropped = okRows.filter(
+        (v) => v.resolved.provenance_dropped,
+    ).length;
+    if (provenanceDropped > 0) {
+        warnings.push(
+            `${provenanceDropped} row(s) had a nutrient_provenance value that could not be read; the nutrient values were imported and only the source information was dropped.`,
         );
     }
     const bareDates = okRows.filter(

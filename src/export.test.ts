@@ -52,7 +52,7 @@ function meal(overrides: Partial<Meal> = {}): Meal {
 }
 
 const HEADER =
-    "id,logged_at,timezone,meal_type,description,calories,protein_g,carbs_g,fat_g,fiber_g,sugar_g,alcohol_g,caffeine_mg,notes";
+    "id,logged_at,timezone,meal_type,description,calories,protein_g,carbs_g,fat_g,fiber_g,sugar_g,alcohol_g,caffeine_mg,saturated_fat_g,trans_fat_g,added_sugar_g,sodium_mg,potassium_mg,cholesterol_mg,calcium_mg,iron_mg,magnesium_mg,vitamin_a_mcg,vitamin_c_mg,vitamin_d_mcg,notes,nutrient_provenance";
 
 /**
  * Minimal RFC-4180 reader: splits a CSV document into rows of fields, honouring
@@ -164,6 +164,28 @@ test("every value lands under its own header name", () => {
                     sugar_g: 12,
                     alcohol_g: 3,
                     caffeine_mg: 95,
+                    // Distinct micronutrient values for the same reason the
+                    // macros above are distinct: a one-column shift anywhere in
+                    // the twelve lands a value under the wrong name.
+                    saturated_fat_g: 4.5,
+                    trans_fat_g: 0,
+                    added_sugar_g: 2.25,
+                    sodium_mg: 610,
+                    potassium_mg: 430,
+                    cholesterol_mg: 85,
+                    calcium_mg: 120,
+                    iron_mg: 1.8,
+                    magnesium_mg: 55,
+                    vitamin_a_mcg: 90,
+                    vitamin_c_mg: 12,
+                    vitamin_d_mcg: 0.4,
+                    nutrient_provenance: {
+                        sodium_mg: {
+                            source: "usda_fdc",
+                            source_id: "fdc:173410",
+                            confidence: "authoritative",
+                        },
+                    },
                     notes: "post-run",
                 }),
             ],
@@ -184,7 +206,22 @@ test("every value lands under its own header name", () => {
         sugar_g: "12",
         alcohol_g: "3",
         caffeine_mg: "95",
+        saturated_fat_g: "4.5",
+        // A real zero, rendered as "0" and not as an empty cell.
+        trans_fat_g: "0",
+        added_sugar_g: "2.25",
+        sodium_mg: "610",
+        potassium_mg: "430",
+        cholesterol_mg: "85",
+        calcium_mg: "120",
+        iron_mg: "1.8",
+        magnesium_mg: "55",
+        vitamin_a_mcg: "90",
+        vitamin_c_mg: "12",
+        vitamin_d_mcg: "0.4",
         notes: "post-run",
+        nutrient_provenance:
+            '{"sodium_mg":{"source":"usda_fdc","source_id":"fdc:173410","confidence":"authoritative"}}',
     });
 });
 
@@ -208,7 +245,22 @@ test("header column order is stable and importer-compatible", () => {
         // matches on this exact string, and "caffeine" alone would let a grams
         // column bind to a milligram field.
         "caffeine_mg",
+        // The twelve micronutrients, each spelled as its canonical field name
+        // so a re-import binds them without a unit assumption.
+        "saturated_fat_g",
+        "trans_fat_g",
+        "added_sugar_g",
+        "sodium_mg",
+        "potassium_mg",
+        "cholesterol_mg",
+        "calcium_mg",
+        "iron_mg",
+        "magnesium_mg",
+        "vitamin_a_mcg",
+        "vitamin_c_mg",
+        "vitamin_d_mcg",
         "notes",
+        "nutrient_provenance",
     ]);
 });
 
@@ -339,6 +391,18 @@ function weight(overrides: Partial<WeightEntry> = {}): WeightEntry {
 function goals(overrides: Partial<NutritionGoals> = {}): NutritionGoals {
     return {
         user_id: "user-1",
+        // Micronutrient goals: unset by default, like every other optional
+        // target. Explicit nulls because NutritionGoals requires the keys.
+        max_saturated_fat_g: null,
+        max_sodium_mg: null,
+        min_potassium_mg: null,
+        max_cholesterol_mg: null,
+        min_calcium_mg: null,
+        min_iron_mg: null,
+        min_magnesium_mg: null,
+        min_vitamin_a_mcg: null,
+        min_vitamin_c_mg: null,
+        min_vitamin_d_mcg: null,
         daily_calories: 2200,
         daily_protein_g: 150,
         daily_carbs_g: 220,

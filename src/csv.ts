@@ -880,3 +880,235 @@ export function toKcal(value: number, unit: EnergyUnit): number {
     if (unit === "kcal") return Math.round(value);
     return Math.round(value / KJ_PER_KCAL);
 }
+
+// ---------- micronutrient columns ----------
+//
+// Header -> canonical nutrient field, plus the unit the header STATES. This
+// module does no arithmetic (CONTRACT §0.5 reserves every conversion for
+// src/nutrient-units.ts); it only reports what the column claims to be, and
+// whoever holds the value converts it.
+//
+// The twelve field names are spelled out here rather than imported from
+// src/nutrients.ts because this module is inlined verbatim into the import
+// widget by the `@inlinets` marker (see CLAUDE.md), which only works for a
+// module with NO runtime imports. src/csv.test.ts asserts that the keys of
+// MICRONUTRIENT_HEADER_ALIASES are exactly MICRONUTRIENT_FIELDS, so the
+// duplication cannot drift without CI saying so.
+
+/** The mass units a nutrient column may state. No "kcal": these are all
+ *  masses, and no "IU" — see UNSUPPORTED_UNIT_TOKENS. */
+export type CsvNutrientUnit = "g" | "mg" | "mcg";
+
+/** Spellings of each unit seen in real export headers and in hand-edited
+ *  files. `normalizeHeader` has already folded µ/μ to "u", which is why "ug"
+ *  rather than "µg" is what arrives here. */
+const UNIT_TOKENS: Record<string, CsvNutrientUnit> = {
+    g: "g",
+    gram: "g",
+    grams: "g",
+    gr: "g",
+    gramm: "g",
+    gramme: "g",
+    grammes: "g",
+    mg: "mg",
+    milligram: "mg",
+    milligrams: "mg",
+    milligramm: "mg",
+    mcg: "mcg",
+    ug: "mcg",
+    mcgs: "mcg",
+    microgram: "mcg",
+    micrograms: "mcg",
+    mikrogramm: "mcg",
+};
+
+/** Units a column may state that cannot be converted to a canonical mass.
+ *  IU is the one that matters: there is no single IU -> µg RAE factor for
+ *  vitamin A (it depends on which compound was measured, which no export
+ *  states), and src/nutrient-units.ts deliberately refuses that conversion.
+ *  "%" / "DV" columns are a fraction of a reference intake, not a mass, and
+ *  the reference itself varies by country and by the user's age and sex.
+ *  Both are reported so a caller can say WHY a column was not mapped, rather
+ *  than leaving the nutrient silently blank or — far worse — treating the
+ *  number as if it were milligrams. */
+const UNSUPPORTED_UNIT_TOKENS = new Set([
+    "iu",
+    "ius",
+    "ie", // German "Internationale Einheit"
+    "ui", // French/Spanish/Italian
+    "dv",
+    "rdi",
+    "rda",
+    "nrv",
+    "percent",
+    "pct",
+]);
+
+/** Trailing words that qualify a nutrient without naming its unit.
+ *  "Vitamin A (mcg RAE)" is the canonical spelling of our own unit. */
+const QUALIFIER_TOKENS = new Set(["rae", "re", "total"]);
+
+/**
+ * Aliases per canonical micronutrient field, as `normalizeHeader` keys and
+ * WITHOUT any unit suffix — the unit is peeled off the header separately, so
+ * listing "sodium" here matches "Sodium", "Sodium (mg)", "Sodium (g)" and
+ * "sodium_mg" alike. Localised spellings are the accent-folded forms
+ * normalizeHeader produces ("Gesättigte Fettsäuren" -> gesattigte_fettsauren).
+ */
+export const MICRONUTRIENT_HEADER_ALIASES: Record<string, string[]> = {
+    saturated_fat_g: [
+        "saturated_fat",
+        "sat_fat",
+        "saturated",
+        "saturated_fats",
+        "saturated_fatty_acids",
+        "gesattigte_fettsauren",
+        "grasas_saturadas",
+        "acides_gras_satures",
+    ],
+    trans_fat_g: [
+        "trans_fat",
+        "trans_fats",
+        "trans",
+        "trans_fatty_acids",
+        "transfett",
+        "transfette",
+        "grasas_trans",
+    ],
+    // Deliberately does NOT include "sugar"/"sugars": total sugars is a
+    // different quantity that already has its own field, and conflating them
+    // under-reports one and over-reports the other.
+    added_sugar_g: [
+        "added_sugar",
+        "added_sugars",
+        "sugar_added",
+        "sugars_added",
+        "free_sugar",
+        "free_sugars",
+        "zugesetzter_zucker",
+        "azucares_anadidos",
+    ],
+    sodium_mg: ["sodium", "natrium", "sodio"],
+    potassium_mg: ["potassium", "kalium", "potasio"],
+    cholesterol_mg: ["cholesterol", "cholesterin", "colesterol"],
+    calcium_mg: ["calcium", "kalzium", "calcio"],
+    iron_mg: ["iron", "eisen", "hierro", "fer", "ferro"],
+    magnesium_mg: ["magnesium", "magnesio"],
+    vitamin_a_mcg: ["vitamin_a", "vit_a", "vitamina_a"],
+    vitamin_c_mg: ["vitamin_c", "vit_c", "ascorbic_acid", "vitamina_c"],
+    vitamin_d_mcg: [
+        "vitamin_d",
+        "vit_d",
+        "vitamin_d3",
+        "vitamina_d",
+        "calciferol",
+    ],
+};
+
+/** The unit each canonical field is stored in — read straight off the field
+ *  name, which is why they are named that way. Used only to report what a
+ *  unit-less header will be READ as; no arithmetic happens here. */
+function canonicalUnitOf(field: string): CsvNutrientUnit {
+    if (field.endsWith("_mcg")) return "mcg";
+    if (field.endsWith("_mg")) return "mg";
+    return "g";
+}
+
+const ALIAS_TO_FIELD: Map<string, string> = (() => {
+    const m = new Map<string, string>();
+    for (const [field, aliases] of Object.entries(
+        MICRONUTRIENT_HEADER_ALIASES,
+    )) {
+        for (const a of aliases) m.set(a, field);
+    }
+    return m;
+})();
+
+export type NutrientHeaderMatch =
+    | {
+          field: string;
+          unit: CsvNutrientUnit;
+          /** False when the header named no unit and the canonical one was
+           *  applied. Callers MUST surface this — see resolveNutrientHeader. */
+          unitStated: boolean;
+      }
+    | {
+          field: string;
+          unit: null;
+          /** The unit token the header stated, which cannot be converted. */
+          unsupportedUnit: string;
+      };
+
+/**
+ * Resolve a column header to a canonical micronutrient field and the unit its
+ * values are in, or null when the header names no micronutrient we carry.
+ *
+ * On a header that states no unit ("Sodium"), the canonical unit is applied
+ * and `unitStated: false` is returned. This is NOT a guess in the sense
+ * CONTRACT §0.9 forbids: every nutrition label, every regulator's format and
+ * every export surveyed states sodium, potassium, cholesterol, calcium, iron
+ * and magnesium in milligrams and vitamins A and D in micrograms, so the
+ * canonical unit is the only reading a bare header has ever had. It is still
+ * an assumption the user did not make explicitly, which is exactly why it is
+ * flagged rather than silent — the caller is expected to show it ("Sodium
+ * will be read as mg") before writing anything, the same way the widget
+ * already shows a mapped column's preview values.
+ *
+ * A header stating a unit we cannot convert (IU, % DV) returns the field with
+ * `unit: null` and the offending token, so the caller can explain the refusal.
+ * It must never fall back to the canonical unit: an IU figure read as
+ * micrograms is wrong by a factor of 3 to 20 and looks completely plausible.
+ */
+export function resolveNutrientHeader(
+    header: string,
+): NutrientHeaderMatch | null {
+    const key = normalizeHeader(header);
+    if (key === "") return null;
+
+    let tokens = key.split("_");
+    // Peel trailing qualifiers ("mcg RAE" -> the unit is "mcg").
+    while (
+        tokens.length > 1 &&
+        QUALIFIER_TOKENS.has(tokens[tokens.length - 1]!)
+    )
+        tokens = tokens.slice(0, -1);
+
+    const last = tokens[tokens.length - 1]!;
+    let unit: CsvNutrientUnit | null = null;
+    let unsupported: string | null = null;
+    if (tokens.length > 1 && UNIT_TOKENS[last] !== undefined) {
+        unit = UNIT_TOKENS[last]!;
+        tokens = tokens.slice(0, -1);
+    } else if (tokens.length > 1 && UNSUPPORTED_UNIT_TOKENS.has(last)) {
+        unsupported = last;
+        tokens = tokens.slice(0, -1);
+    }
+
+    // A "% DV" header normalizes to e.g. "vitamin_c_dv"; "Vitamin C (% DV)"
+    // to "vitamin_c_dv" as well, since normalizeHeader drops the "%".
+    const field = ALIAS_TO_FIELD.get(tokens.join("_"));
+    if (field === undefined) return null;
+
+    if (unsupported !== null) {
+        return { field, unit: null, unsupportedUnit: unsupported };
+    }
+    if (unit === null) {
+        return { field, unit: canonicalUnitOf(field), unitStated: false };
+    }
+    return { field, unit, unitStated: true };
+}
+
+/**
+ * Normalize a free-text unit string ("mg", "Milligrams", "µg") to a canonical
+ * mass unit, or null when it is not one we recognise. Null means "ambiguous or
+ * unknown" and callers must turn it into an error rather than picking a
+ * default — this is the "never guess" rule at its sharpest, because a unit we
+ * do not recognise is exactly the case where any assumption is a coin flip.
+ */
+export function parseUnitToken(
+    raw: string | undefined,
+): CsvNutrientUnit | null {
+    if (raw === undefined) return null;
+    const key = normalizeHeader(raw);
+    return UNIT_TOKENS[key] ?? null;
+}

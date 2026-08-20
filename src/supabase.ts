@@ -929,7 +929,42 @@ export async function upsertProfile(
 
 // ---------- Nutrition goals ----------
 
-export interface NutritionGoals {
+/** The micronutrient goal columns, paired with the `meals` column each one
+ * scores. ONE list, iterated by every layer — the Zod schema, the merge in
+ * set_nutrition_goals, the goal echo, the progress lines and the structured
+ * payload — because ten fields x five hand-written copies is how the caffeine
+ * limit came to be stored, listed, and then quietly ignored on the progress
+ * line it was set for.
+ *
+ * The direction is IN THE NAME (`min_` / `max_`), so no layer has to look it
+ * up and no second table can disagree with this one. See the migration
+ * 20260819130000_micronutrient_goals.sql for why.
+ *
+ * Ten of the twelve micronutrients, matching the epic's list. `trans_fat_g`
+ * and `added_sugar_g` are recorded and summarized like the rest but have no
+ * goal column: no target anyone sets is meaningful for trans fat (the answer
+ * is "as little as possible"), and added sugar's ceiling is already served by
+ * the shipped `daily_sugar_g`. Adding either later is one migration and one
+ * row here. */
+export const MICRONUTRIENT_GOAL_FIELDS = [
+    ["max_saturated_fat_g", "saturated_fat_g"],
+    ["max_sodium_mg", "sodium_mg"],
+    ["min_potassium_mg", "potassium_mg"],
+    ["max_cholesterol_mg", "cholesterol_mg"],
+    ["min_calcium_mg", "calcium_mg"],
+    ["min_iron_mg", "iron_mg"],
+    ["min_magnesium_mg", "magnesium_mg"],
+    ["min_vitamin_a_mcg", "vitamin_a_mcg"],
+    ["min_vitamin_c_mg", "vitamin_c_mg"],
+    ["min_vitamin_d_mcg", "vitamin_d_mcg"],
+] as const;
+
+export type MicronutrientGoalField =
+    (typeof MICRONUTRIENT_GOAL_FIELDS)[number][0];
+
+type MicronutrientGoals = Record<MicronutrientGoalField, number | null>;
+
+export interface NutritionGoals extends MicronutrientGoals {
     user_id: string;
     daily_calories: number | null;
     daily_protein_g: number | null;
@@ -948,7 +983,9 @@ export interface NutritionGoals {
     updated_at: string;
 }
 
-export interface NutritionGoalsInput {
+export interface NutritionGoalsInput extends Partial<
+    Record<MicronutrientGoalField, number | null>
+> {
     daily_calories?: number | null;
     daily_protein_g?: number | null;
     daily_carbs_g?: number | null;
@@ -990,6 +1027,11 @@ export async function upsertNutritionGoals(
                         ? null
                         : toStoredInteger(input.daily_water_ml),
                 target_weight_g: input.target_weight_g ?? null,
+                // Every micronutrient goal, written explicitly from the one
+                // list. An upsert replaces the whole row, so a column omitted
+                // here would be silently cleared on every save — which is why
+                // this is derived rather than hand-listed.
+                ...micronutrientGoalColumns(input),
                 updated_at: new Date().toISOString(),
             },
             { onConflict: "user_id" },
@@ -998,7 +1040,33 @@ export async function upsertNutritionGoals(
         .single();
 
     if (error) throw new Error(`Failed to save goals: ${error.message}`);
-    return data as NutritionGoals;
+    return normalizeNutritionGoals(data);
+}
+
+function micronutrientGoalColumns(
+    input: NutritionGoalsInput,
+): Record<string, number | null> {
+    const out: Record<string, number | null> = {};
+    for (const [column] of MICRONUTRIENT_GOAL_FIELDS)
+        out[column] = input[column] ?? null;
+    return out;
+}
+
+/** Backfill the micronutrient goal columns to explicit NULL.
+ *
+ * The same treatment `getCachedFood` gives newly added food-cache keys, and
+ * for the same reason: a goals row written before this migration deserializes
+ * with those keys ABSENT, and `undefined` fails a `.nullable()` structured
+ * payload where `null` passes. It also matters for the merge in
+ * set_nutrition_goals, which distinguishes "field omitted by the caller" from
+ * "field explicitly cleared" — reading an absent column back as undefined
+ * would make an unset goal indistinguishable from an unmentioned one. */
+function normalizeNutritionGoals(raw: unknown): NutritionGoals {
+    const row = raw as Record<string, unknown>;
+    const out = { ...row } as Record<string, unknown>;
+    for (const [column] of MICRONUTRIENT_GOAL_FIELDS)
+        out[column] = (row[column] as number | null | undefined) ?? null;
+    return out as unknown as NutritionGoals;
 }
 
 export async function getNutritionGoals(
@@ -1011,7 +1079,7 @@ export async function getNutritionGoals(
         .maybeSingle();
 
     if (error) throw new Error(`Failed to get goals: ${error.message}`);
-    return (data as NutritionGoals | null) ?? null;
+    return data == null ? null : normalizeNutritionGoals(data);
 }
 
 // ---------- Water log ----------

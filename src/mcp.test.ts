@@ -30,6 +30,10 @@ import {
     MAX_GOAL_G,
     MAX_GOAL_MG,
     gateAlcohol,
+    micronutrientProgressLines,
+    nutrientCoveragePayload,
+    coverageNote,
+    NUTRIENT_COVERAGE_ITEM,
 } from "./mcp.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -112,6 +116,18 @@ function goals(over: Partial<NutritionGoals> = {}): NutritionGoals {
         daily_caffeine_mg: 400,
         daily_water_ml: 2500,
         target_weight_g: null,
+        // Micronutrient goals: unset by default, like every other optional
+        // target. Explicit nulls because NutritionGoals requires the keys.
+        max_saturated_fat_g: null,
+        max_sodium_mg: null,
+        min_potassium_mg: null,
+        max_cholesterol_mg: null,
+        min_calcium_mg: null,
+        min_iron_mg: null,
+        min_magnesium_mg: null,
+        min_vitamin_a_mcg: null,
+        min_vitamin_c_mg: null,
+        min_vitamin_d_mcg: null,
         updated_at: "2026-07-26T00:00:00.000Z",
         ...over,
     };
@@ -1483,6 +1499,11 @@ mock.module("./supabase.js", () => ({
     getMealById: async (_userId: string, id: string) =>
         db.meals.find((m) => m.id === id) ?? null,
     getWaterByDate: async () => [],
+    // get_goal_progress reads the latest weight to render a weight line. The
+    // real implementation goes through getSupabase(), which is stubbed here
+    // to answer analytics inserts only — so without this the whole tool
+    // throws before any coverage assertion is reached.
+    getLatestWeight: async () => null,
     // The range readers behind get_nutrition_summary. They ignore the dates and
     // hand back whatever the test staged: the fixtures below already sit inside
     // the window they ask for, and filtering here would only re-implement the
@@ -4163,6 +4184,431 @@ describe("lookup_food", () => {
             expect(textOf(await call("lookup_food", {}))).toContain(
                 "Pass a `query`",
             );
+        });
+    });
+});
+
+// ---------- micronutrient coverage and goals ----------
+//
+// The scenario the epic is built around: breakfast 600 mg sodium, lunch
+// unknown, dinner 700 mg. A line that reads "Sodium: 1300 mg / 2300 mg limit
+// (57%, under)" is FALSE — the unrecorded lunch's sodium is unknown and
+// non-negative, so the day may be well over. Every test here is a way of
+// shipping that sentence by accident.
+
+const SODIUM_DAY = [
+    meal({ id: "b", meal_type: "breakfast", sodium_mg: 600 }),
+    meal({ id: "l", meal_type: "lunch" }), // sodium unknown
+    meal({ id: "d", meal_type: "dinner", sodium_mg: 700 }),
+];
+
+function microLine(lines: string[], label: string): string | undefined {
+    return lines.find((l) => l.startsWith(`${label}:`));
+}
+
+describe("micronutrientProgressLines", () => {
+    test("a partial total is marked partial, with the denominator", () => {
+        const line = microLine(
+            micronutrientProgressLines(SODIUM_DAY, null),
+            "Sodium",
+        );
+        expect(line).toBe(
+            "Sodium: ≥1300 mg — recorded meals only, 2 of 3; the true total is higher",
+        );
+    });
+
+    test("a partial total against a limit never claims 'under' unqualified", () => {
+        const line = microLine(
+            micronutrientProgressLines(
+                SODIUM_DAY,
+                goals({ max_sodium_mg: 2300 }),
+            ),
+            "Sodium",
+        );
+        // The verdict is still shown — a user with a limit wants to know where
+        // they stand — but it can never stand alone.
+        expect(line).toContain("under");
+        expect(line).toContain("recorded meals only, 2 of 3");
+        expect(line).toContain("the true total is higher");
+        expect(line).toContain("≥1300");
+    });
+
+    test("a complete total carries no qualifier and no ≥", () => {
+        const complete = [
+            meal({ id: "b", sodium_mg: 600 }),
+            meal({ id: "d", sodium_mg: 700 }),
+        ];
+        const line = microLine(
+            micronutrientProgressLines(
+                complete,
+                goals({ max_sodium_mg: 2300 }),
+            ),
+            "Sodium",
+        );
+        expect(line).toBe("Sodium: 1300 / 2300 mg limit (57%, under)");
+        expect(line).not.toContain("≥");
+        expect(line).not.toContain("recorded meals only");
+    });
+
+    test("a minimum goal reads as a floor, a maximum as a ceiling", () => {
+        const day = [meal({ id: "a", potassium_mg: 1000, sodium_mg: 1000 })];
+        const lines = micronutrientProgressLines(
+            day,
+            goals({ min_potassium_mg: 3500, max_sodium_mg: 2300 }),
+        );
+        // Floor: something to reach. Ceiling: something to stay under. The
+        // wordings are opposites and swapping them turns a shortfall into
+        // congratulation.
+        expect(microLine(lines, "Potassium")).toBe(
+            "Potassium: 1000 / 3500 mg (29%, 2500 mg to go)",
+        );
+        expect(microLine(lines, "Sodium")).toBe(
+            "Sodium: 1000 / 2300 mg limit (43%, under)",
+        );
+    });
+
+    test("missing intake with a target says 'not recorded', never 0", () => {
+        const lines = micronutrientProgressLines(
+            [meal({ id: "a" })],
+            goals({ max_sodium_mg: 2300, min_calcium_mg: 1000 }),
+        );
+        expect(microLine(lines, "Sodium")).toBe(
+            "Sodium: not recorded / 2300 mg limit",
+        );
+        expect(microLine(lines, "Calcium")).toBe(
+            "Calcium: not recorded / 1000 mg target",
+        );
+    });
+
+    test("missing target with intake still reports the figure", () => {
+        const lines = micronutrientProgressLines(
+            [meal({ id: "a", iron_mg: 8 })],
+            null,
+        );
+        expect(microLine(lines, "Iron")).toBe("Iron: 8 mg");
+    });
+
+    test("neither intake nor target renders nothing at all", () => {
+        // Data-driven display, exactly like fiber/sugar/caffeine: a user who
+        // has never recorded sodium is not shown a sodium row.
+        expect(micronutrientProgressLines([meal({ id: "a" })], null)).toEqual(
+            [],
+        );
+        expect(micronutrientProgressLines([], null)).toEqual([]);
+    });
+
+    test("an explicitly recorded zero is a complete measurement, not a gap", () => {
+        const lines = micronutrientProgressLines(
+            [
+                meal({ id: "a", trans_fat_g: 0 }),
+                meal({ id: "b", trans_fat_g: 0 }),
+            ],
+            null,
+        );
+        expect(microLine(lines, "Trans fat")).toBe("Trans fat: 0g");
+    });
+
+    test("a zero limit is a real limit, not 'unset'", () => {
+        const lines = micronutrientProgressLines(
+            [meal({ id: "a", sodium_mg: 5 })],
+            goals({ max_sodium_mg: 0 }),
+        );
+        expect(microLine(lines, "Sodium")).toBe(
+            "Sodium: 5 / 0 mg limit (5 mg over)",
+        );
+    });
+
+    test("a zero FLOOR is unset — a 0 mg calcium target is meaningless", () => {
+        const lines = micronutrientProgressLines(
+            [meal({ id: "a", calcium_mg: 5 })],
+            goals({ min_calcium_mg: 0 }),
+        );
+        expect(microLine(lines, "Calcium")).toBe("Calcium: 5 mg");
+    });
+});
+
+describe("coverageNote", () => {
+    test("is empty when complete and when nothing was recorded", () => {
+        // Nothing recorded gets the "not recorded" line instead; a note about
+        // partial coverage on a total that does not exist is noise.
+        expect(
+            coverageNote({
+                known_total: 10,
+                known_meals: 2,
+                total_meals: 2,
+                coverage: 1,
+                complete: true,
+            }),
+        ).toBe("");
+        expect(
+            coverageNote({
+                known_total: null,
+                known_meals: 0,
+                total_meals: 2,
+                coverage: 0,
+                complete: false,
+            }),
+        ).toBe("");
+    });
+});
+
+describe("nutrientCoveragePayload", () => {
+    const shape = z.array(NUTRIENT_COVERAGE_ITEM);
+
+    test("a partial nutrient carries its own denominator", () => {
+        const rows = nutrientCoveragePayload(
+            SODIUM_DAY,
+            goals({ max_sodium_mg: 2300 }),
+        );
+        expect(shape.safeParse(rows).success).toBe(true);
+        const sodium = rows.find((r) => r.nutrient === "sodium_mg");
+        expect(sodium).toEqual({
+            nutrient: "sodium_mg",
+            unit: "mg",
+            known_total: 1300,
+            known_meals: 2,
+            total_meals: 3,
+            coverage: 0.67,
+            complete: false,
+            target: 2300,
+            direction: "maximum",
+        });
+    });
+
+    test("0% coverage with a target reports a NULL total, never 0", () => {
+        const rows = nutrientCoveragePayload(
+            [meal({ id: "a" })],
+            goals({ min_potassium_mg: 3500 }),
+        );
+        const k = rows.find((r) => r.nutrient === "potassium_mg");
+        expect(k?.known_total).toBeNull();
+        expect(k?.known_meals).toBe(0);
+        expect(k?.complete).toBe(false);
+        expect(k?.direction).toBe("minimum");
+    });
+
+    test("nutrients with neither data nor a target are absent entirely", () => {
+        const rows = nutrientCoveragePayload([meal({ id: "a" })], null);
+        expect(rows).toEqual([]);
+    });
+
+    test("the two goal-less micronutrients still report coverage", () => {
+        const rows = nutrientCoveragePayload(
+            [meal({ id: "a", added_sugar_g: 12 })],
+            null,
+        );
+        const added = rows.find((r) => r.nutrient === "added_sugar_g");
+        expect(added?.known_total).toBe(12);
+        expect(added?.complete).toBe(true);
+        // No goal column exists for it, so it has no direction to declare.
+        expect(added?.direction).toBeNull();
+    });
+
+    test("coverage is computed over every meal in a multi-day range", () => {
+        const rows = nutrientCoveragePayload(
+            [
+                meal({
+                    id: "a",
+                    logged_at: "2026-07-26T12:00:00.000Z",
+                    iron_mg: 4,
+                }),
+                meal({
+                    id: "b",
+                    logged_at: "2026-07-27T12:00:00.000Z",
+                    iron_mg: 6,
+                }),
+                meal({ id: "c", logged_at: "2026-07-28T12:00:00.000Z" }),
+            ],
+            null,
+        );
+        const iron = rows.find((r) => r.nutrient === "iron_mg");
+        expect(iron?.known_total).toBe(10);
+        expect(iron?.known_meals).toBe(2);
+        expect(iron?.total_meals).toBe(3);
+        expect(iron?.coverage).toBe(0.67);
+        expect(iron?.complete).toBe(false);
+    });
+});
+
+describe("formatGoals lists micronutrient targets", () => {
+    test("only the ones actually set, with their direction", () => {
+        const out = formatGoals(
+            goals({ max_sodium_mg: 2300, min_vitamin_d_mcg: 20 }),
+            "kg",
+            null,
+        );
+        expect(out).toContain("- Sodium (max): 2300 mg");
+        expect(out).toContain("- Vitamin D (min): 20 mcg");
+        // Not a wall of "not set" rows for the eight the user never touched.
+        expect(out).not.toContain("Potassium");
+    });
+
+    test("says so once when none are set, so the feature stays discoverable", () => {
+        expect(formatGoals(goals(), "kg", null)).toContain(
+            "Micronutrient goals (saturated fat, sodium, potassium, cholesterol, calcium, iron, magnesium, vitamins A/C/D): none set",
+        );
+    });
+});
+
+// ---------- micronutrient goals and coverage, end to end ----------
+
+describe("set_nutrition_goals accepts micronutrient targets", () => {
+    test("stores a min and a max, and echoes both back", async () => {
+        await withTools(null, async (call) => {
+            const r = await call("set_nutrition_goals", {
+                max_sodium_mg: 2300,
+                min_potassium_mg: 3500,
+            });
+            expect(r.isError).toBeFalsy();
+            expect(db.goals?.max_sodium_mg).toBe(2300);
+            expect(db.goals?.min_potassium_mg).toBe(3500);
+            expect(textOf(r)).toContain("- Sodium (max): 2300 mg");
+            expect(textOf(r)).toContain("- Potassium (min): 3500 mg");
+        });
+    });
+
+    test("an omitted micronutrient target keeps its stored value", async () => {
+        await withTools(null, async (call) => {
+            await call("set_nutrition_goals", { max_sodium_mg: 2300 });
+            await call("set_nutrition_goals", { min_iron_mg: 18 });
+            // The upsert replaces the whole row, so a field the merge forgot
+            // would be silently cleared on the next unrelated save.
+            expect(db.goals?.max_sodium_mg).toBe(2300);
+            expect(db.goals?.min_iron_mg).toBe(18);
+        });
+    });
+
+    test("an explicit null clears one", async () => {
+        await withTools(null, async (call) => {
+            await call("set_nutrition_goals", { max_sodium_mg: 2300 });
+            await call("set_nutrition_goals", { max_sodium_mg: null });
+            expect(db.goals?.max_sodium_mg).toBeNull();
+        });
+    });
+
+    test("a negative target is refused", async () => {
+        await withTools(null, async (call) => {
+            const r = await call("set_nutrition_goals", {
+                max_sodium_mg: -1,
+            });
+            expect(r.isError).toBe(true);
+        });
+    });
+
+    test("a target above the column's precision is refused, not overflowed", async () => {
+        await withTools(null, async (call) => {
+            // numeric(7,2) — a Postgres "numeric field overflow" is not
+            // something a model should have to learn by hitting it.
+            expect(
+                (await call("set_nutrition_goals", { max_sodium_mg: 100_000 }))
+                    .isError,
+            ).toBe(true);
+            expect(
+                (
+                    await call("set_nutrition_goals", {
+                        max_saturated_fat_g: 10_000,
+                    })
+                ).isError,
+            ).toBe(true);
+        });
+    });
+});
+
+describe("get_goal_progress surfaces coverage", () => {
+    test("a partial sodium day is never reported as a complete total", async () => {
+        db.goals = goals({ max_sodium_mg: 2300 });
+        db.meals = [
+            meal({
+                id: "b",
+                logged_at: "2026-07-26T07:00:00.000Z",
+                sodium_mg: 600,
+            }),
+            meal({ id: "l", logged_at: "2026-07-26T12:00:00.000Z" }),
+            meal({
+                id: "d",
+                logged_at: "2026-07-26T19:00:00.000Z",
+                sodium_mg: 700,
+            }),
+        ];
+        await withTools(null, async (call) => {
+            const r = await call("get_goal_progress", { date: "2026-07-26" });
+            expect(r.isError).toBeFalsy();
+            const text = textOf(r);
+            expect(text).toContain("≥1300");
+            expect(text).toContain("recorded meals only, 2 of 3");
+            const cov = (
+                r.structuredContent as unknown as {
+                    nutrient_coverage: Array<Record<string, unknown>>;
+                }
+            ).nutrient_coverage;
+            expect(cov).toContainEqual({
+                nutrient: "sodium_mg",
+                unit: "mg",
+                known_total: 1300,
+                known_meals: 2,
+                total_meals: 3,
+                coverage: 0.67,
+                complete: false,
+                target: 2300,
+                direction: "maximum",
+            });
+        });
+    });
+
+    test("a day with no micronutrients at all emits an empty coverage list", async () => {
+        db.goals = null;
+        db.meals = [meal({ id: "a", logged_at: "2026-07-26T12:00:00.000Z" })];
+        await withTools(null, async (call) => {
+            const r = await call("get_goal_progress", { date: "2026-07-26" });
+            expect(r.isError).toBeFalsy();
+            // Empty, not absent: it is a declared outputSchema field.
+            expect(
+                (
+                    r.structuredContent as unknown as {
+                        nutrient_coverage: unknown[];
+                    }
+                ).nutrient_coverage,
+            ).toEqual([]);
+        });
+    });
+});
+
+describe("get_nutrition_summary surfaces range-wide coverage", () => {
+    test("coverage spans the whole range, across several days", async () => {
+        db.goals = null;
+        db.meals = [
+            meal({
+                id: "a",
+                logged_at: "2026-07-26T12:00:00.000Z",
+                calcium_mg: 200,
+            }),
+            meal({
+                id: "b",
+                logged_at: "2026-07-27T12:00:00.000Z",
+                calcium_mg: 300,
+            }),
+            meal({ id: "c", logged_at: "2026-07-28T12:00:00.000Z" }),
+        ];
+        await withTools(null, async (call) => {
+            const r = await call("get_nutrition_summary", {
+                start_date: "2026-07-26",
+                end_date: "2026-07-28",
+            });
+            expect(r.isError).toBeFalsy();
+            const cov = (
+                r.structuredContent as unknown as {
+                    nutrient_coverage: Array<Record<string, unknown>>;
+                }
+            ).nutrient_coverage;
+            const calcium = cov.find((c) => c.nutrient === "calcium_mg");
+            expect(calcium).toMatchObject({
+                known_total: 500,
+                known_meals: 2,
+                total_meals: 3,
+                complete: false,
+            });
+            // Per-day sections still qualify their own day's figure.
+            expect(textOf(r)).toContain("Calcium: 200 mg");
         });
     });
 });
