@@ -1798,7 +1798,56 @@ export const NUTRIENT_COVERAGE_ITEM = z.object({
     complete: z.boolean(),
     target: z.number().nullable(),
     direction: z.enum(["minimum", "maximum"]).nullable(),
+    /** The confidence behind `known_total`, folded from each contributing
+     * meal's nutrient_provenance entry for THIS nutrient: the single
+     * confidence when they agree, "mixed" when they disagree, and null when
+     * no contributing meal carries provenance for it at all.
+     *
+     * null is the honest default and must stay renderable: a widget shows no
+     * badge for it. Defaulting to "authoritative" instead would put a
+     * "measured" tick on a figure nothing vouches for, which is the same
+     * class of claim as showing 0 for an unrecorded nutrient — and this is
+     * the one the user is most likely to trust, because it looks like
+     * provenance rather than like data. */
+    confidence: z
+        .enum(["authoritative", "user_provided", "estimated", "mixed"])
+        .nullable(),
 });
+
+/**
+ * Fold the per-meal provenance for one nutrient into a single confidence for
+ * the day's total.
+ *
+ * Only meals that actually CONTRIBUTED a value are consulted — a meal with no
+ * sodium figure says nothing about how good the sodium total is, whatever
+ * its provenance for other nutrients.
+ *
+ * A contributing meal with NO provenance entry (every meal logged before this
+ * epic is in that state) counts as a disagreement, not as a meal to skip. If
+ * half the total is a label figure and half is unattributed, the total is not
+ * a label figure — badging it "measured" would vouch for grams nothing
+ * vouches for, and a provenance badge is the last thing a user would think to
+ * doubt. Unattributed throughout yields null, which renders no badge at all.
+ */
+export function foldConfidence(
+    meals: Meal[],
+    field: NutrientField,
+): "authoritative" | "user_provided" | "estimated" | "mixed" | null {
+    const seen = new Set<string>();
+    let unattributed = false;
+    for (const meal of meals) {
+        if (meal[field] == null) continue;
+        const entry = meal.nutrient_provenance?.[field];
+        if (!entry) {
+            unattributed = true;
+            continue;
+        }
+        seen.add(entry.confidence);
+    }
+    if (seen.size === 0) return null;
+    if (seen.size > 1 || unattributed) return "mixed";
+    return [...seen][0] as "authoritative" | "user_provided" | "estimated";
+}
 
 export function nutrientCoveragePayload(
     meals: Meal[],
@@ -1835,6 +1884,7 @@ export function nutrientCoveragePayload(
                     : g.direction === "ceiling"
                       ? "maximum"
                       : "minimum",
+            confidence: foldConfidence(meals, g.field),
         });
     }
     return rows;

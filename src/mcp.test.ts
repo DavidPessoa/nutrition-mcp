@@ -32,6 +32,7 @@ import {
     gateAlcohol,
     micronutrientProgressLines,
     nutrientCoveragePayload,
+    foldConfidence,
     coverageNote,
     NUTRIENT_COVERAGE_ITEM,
 } from "./mcp.js";
@@ -45,6 +46,7 @@ import { emptyNutrientValues, type FoodNutrition } from "./providers/types.js";
 import type {
     NutrientProvenance,
     NutrientProvenanceEntry,
+    NutrientConfidence,
 } from "./nutrients.js";
 import { DELETED_ACCOUNT_ANALYTICS_ID } from "./analytics.js";
 import { formatFoodResult, type FoodResult } from "./foods.js";
@@ -4395,6 +4397,7 @@ describe("nutrientCoveragePayload", () => {
             complete: false,
             target: 2300,
             direction: "maximum",
+            confidence: null,
         });
     });
 
@@ -4620,6 +4623,11 @@ describe("get_goal_progress surfaces coverage", () => {
                 complete: false,
                 target: 2300,
                 direction: "maximum",
+                // These fixture meals carry no nutrient_provenance, so
+                // nothing vouches for the total. null is what a widget needs
+                // to render no badge at all — defaulting to "authoritative"
+                // would put a "measured" tick on an unattributed figure.
+                confidence: null,
             });
         });
     });
@@ -4738,5 +4746,92 @@ describe("an empty string is not a zero on any write path", () => {
                     ?.sodium_mg,
             ).toBeUndefined();
         });
+    });
+});
+
+// ---------- confidence folded across a day ----------
+//
+// A widget badges a nutrient "measured" / "you said" / "estimated" from this
+// one field. Getting it wrong is worse than omitting it: a wrong badge looks
+// like provenance rather than like data, so it is the thing a user is most
+// likely to trust.
+describe("foldConfidence", () => {
+    const withProv = (
+        id: string,
+        sodium: number | null,
+        confidence: NutrientConfidence | null,
+    ) =>
+        meal({
+            id,
+            sodium_mg: sodium,
+            nutrient_provenance:
+                confidence == null
+                    ? null
+                    : {
+                          sodium_mg: {
+                              source: "nutrition_label",
+                              source_id: null,
+                              confidence,
+                          },
+                      },
+        }) as Meal;
+
+    test("agreeing meals fold to that one confidence", () => {
+        expect(
+            foldConfidence(
+                [
+                    withProv("a", 600, "authoritative"),
+                    withProv("b", 700, "authoritative"),
+                ],
+                "sodium_mg",
+            ),
+        ).toBe("authoritative");
+    });
+
+    test("disagreeing meals fold to mixed", () => {
+        expect(
+            foldConfidence(
+                [
+                    withProv("a", 600, "authoritative"),
+                    withProv("b", 700, "estimated"),
+                ],
+                "sodium_mg",
+            ),
+        ).toBe("mixed");
+    });
+
+    test("an unattributed contributing meal is mixed, never assumed", () => {
+        // Every meal logged before this epic has values and no provenance.
+        // Folding it in as "authoritative" would vouch for a figure nothing
+        // vouches for.
+        expect(
+            foldConfidence(
+                [withProv("a", 600, "authoritative"), withProv("b", 700, null)],
+                "sodium_mg",
+            ),
+        ).toBe("mixed");
+    });
+
+    test("no provenance anywhere yields null, not a default", () => {
+        expect(
+            foldConfidence(
+                [withProv("a", 600, null), withProv("b", 700, null)],
+                "sodium_mg",
+            ),
+        ).toBeNull();
+    });
+
+    test("a meal that recorded nothing does not vote", () => {
+        // A meal with no sodium figure says nothing about how good the
+        // sodium total is, whatever its provenance for other nutrients.
+        expect(
+            foldConfidence(
+                [
+                    withProv("a", 600, "authoritative"),
+                    withProv("b", null, "estimated"),
+                ],
+                "sodium_mg",
+            ),
+        ).toBe("authoritative");
     });
 });
