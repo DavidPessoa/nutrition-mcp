@@ -96,6 +96,7 @@ import {
 import { normalizeBarcode, lookupBarcode, formatFoodResult } from "./foods.js";
 import {
     NUTRIENT_FIELDS,
+    MICRONUTRIENT_FIELDS,
     type NutrientField,
     type NutrientSource,
 } from "./nutrients.js";
@@ -655,6 +656,23 @@ const MAX_MEALS_PER_USER = 200_000;
 // produces an identified per-row error instead of a Zod rejection that discards
 // the whole batch (and the structured report with it). z.coerce mirrors
 // log_meal, whose numbers are coerced because models emit "450" as a string.
+// A number that treats a BLANK STRING as "not recorded", not as zero.
+//
+// `z.coerce.number().parse("")` returns 0 — JavaScript's Number("") is 0, and
+// Zod coerces before it validates. Every mapper that emits an empty cell as
+// "" rather than null therefore writes a real, confident zero into a column
+// whose whole contract is that null and 0 mean different things. That is the
+// single failure this entire nutrient model exists to prevent, and it was
+// live on the macro fields below long before the micronutrients arrived.
+//
+// Blank in -> null out. An absent key stays absent. A real 0 stays 0.
+const blankSafeNumber = () =>
+    z.preprocess(
+        (value) =>
+            typeof value === "string" && value.trim() === "" ? null : value,
+        z.coerce.number().nullable(),
+    );
+
 const IMPORT_ROW_SCHEMA = z.object({
     source_line: z.coerce
         .number()
@@ -685,34 +703,62 @@ const IMPORT_ROW_SCHEMA = z.object({
         .describe(
             "breakfast, lunch, dinner or snack. Case-insensitive; unrecognized values become snack. Omit when the source has no meal column and it will be inferred from the time.",
         ),
-    calories: z.coerce.number().optional(),
-    protein_g: z.coerce.number().optional(),
-    carbs_g: z.coerce.number().optional(),
-    fat_g: z.coerce.number().optional(),
-    fiber_g: z.coerce.number().optional().describe("Dietary fiber in grams."),
-    sugar_g: z.coerce
-        .number()
+    calories: blankSafeNumber().optional(),
+    protein_g: blankSafeNumber().optional(),
+    carbs_g: blankSafeNumber().optional(),
+    fat_g: blankSafeNumber().optional(),
+    fiber_g: blankSafeNumber().optional().describe("Dietary fiber in grams."),
+    sugar_g: blankSafeNumber()
         .optional()
         .describe(
             "TOTAL sugars in grams, including sugar naturally present in fruit and milk — not added sugar. Map the export's 'Sugars' column straight across; do not try to subtract naturally occurring sugar.",
         ),
-    alcohol_g: z.coerce
-        .number()
+    alcohol_g: blankSafeNumber()
         .optional()
         .describe(
             "Grams of pure ethanol (NOT the volume of the drink and NOT its ABV). If the export gives a drink volume and strength instead, compute it: grams = millilitres x (ABV% / 100) x 0.789. Omit when the source has no alcohol column.",
         ),
-    caffeine_mg: z.coerce
-        .number()
+    caffeine_mg: blankSafeNumber()
         .optional()
         .describe(
             "Caffeine in MILLIGRAMS, not grams. Every export, label and guideline states caffeine in mg (a brewed coffee is about 95 mg, i.e. 0.095 g), so map an mg column straight across — and multiply by 1000 first if the source header says grams, or the whole history imports a thousand times too small. Omit when the source has no caffeine column.",
+        ),
+    // The twelve micronutrients. Deliberately WITHOUT the .min/.max that
+    // micronutrientInputSchema applies for log_meal: bounds live in
+    // validateRow so one bad cell is a per-row error instead of a Zod
+    // rejection that discards the whole batch and its report with it.
+    //
+    // Derived from MICRONUTRIENT_FIELDS rather than from MICRONUTRIENT_INPUTS,
+    // which is declared further down this file — referencing it here would be
+    // a temporal-dead-zone ReferenceError at module load, not a type error.
+    ...Object.fromEntries(
+        MICRONUTRIENT_FIELDS.map((field) => [
+            field,
+            blankSafeNumber()
+                .optional()
+                .describe(
+                    `${field}, in the unit its name states. Send it only from a real source — a label, a barcode or USDA lookup, or the user's own export — never estimated. A blank source cell must be sent as null or omitted, NEVER as 0: null means "not recorded" and 0 means the source said zero. If the column states a different unit, send the number as-is and name the unit in nutrient_units rather than converting it yourself.`,
+                ),
+        ]),
+    ),
+    nutrient_units: z
+        .record(z.string(), z.string())
+        .optional()
+        .describe(
+            'The unit a micronutrient column actually states, keyed by field name, when it differs from the unit in the field\'s own name — e.g. {"sodium_mg": "g"} for a "Sodium (g)" column. Only g, mg and mcg (and their long spellings) are accepted; an International Unit or % daily value column cannot be converted to a mass and must be left out of the import entirely rather than mapped to a field.',
+        ),
+    nutrient_provenance: z
+        .union([z.string(), z.record(z.string(), z.unknown())])
+        .nullable()
+        .optional()
+        .describe(
+            "The value of the 'nutrient_provenance' column when the file is an export from THIS server: JSON recording where each nutrient value came from. Pass the cell text through verbatim — it is what makes an export and re-import round trip lossless. Omit for files from other apps.",
         ),
     notes: z
         .string()
         .optional()
         .describe(
-            "Anything from the source worth keeping that has no column here (micronutrients, the original row text).",
+            "Anything from the source worth keeping that has no column here (the original row text).",
         ),
     client_row_id: z
         .string()
@@ -1225,6 +1271,19 @@ function assertPlausibleWeight(grams: number, unit: WeightUnit): void {
     );
 }
 
+/** A bounded nutrient number that treats a BLANK STRING as "not recorded".
+ * Same reasoning as blankSafeNumber above — `z.coerce.number().parse("")` is
+ * 0 — with the bounds log_meal and update_meal apply at the schema edge.
+ * Nullable because a blank must be able to mean null; for the eight
+ * pre-epic fields a null is then dropped by toMealNutrientInput rather than
+ * written, since those columns have no clear-to-null path. */
+const nutrientNumber = (max: number) =>
+    z.preprocess(
+        (value) =>
+            typeof value === "string" && value.trim() === "" ? null : value,
+        z.coerce.number().min(0).max(max).nullable(),
+    );
+
 // ---------- Micronutrients: shared input schema and write resolution ----------
 //
 // The twelve new fields (CONTRACT.md §1) are optional on every write path and
@@ -1282,8 +1341,11 @@ const MICRONUTRIENT_GUIDANCE =
 function micronutrientInputSchema(allowClear: boolean) {
     const shape: Record<string, z.ZodTypeAny> = {};
     for (const [field, max, description] of MICRONUTRIENT_INPUTS) {
-        const base = z.coerce.number().min(0).max(max);
-        shape[field] = (allowClear ? base.nullable() : base)
+        // Always nullable underneath (a blank string must be able to become
+        // null); `allowClear` only governs what the DESCRIPTION invites the
+        // caller to do, since a null on a non-clearing path is dropped rather
+        // than written.
+        shape[field] = nutrientNumber(max)
             .optional()
             .describe(
                 description +
@@ -1960,28 +2022,16 @@ export function registerTools(
                     ),
                 // Bounded in the schema, not the handler — see the MAX_*
                 // constants for why this tool differs from bulk_import_meals.
-                calories: z.coerce
-                    .number()
-                    .min(0)
-                    .max(MAX_CALORIES)
+                calories: nutrientNumber(MAX_CALORIES)
                     .optional()
                     .describe("Total calories"),
-                protein_g: z.coerce
-                    .number()
-                    .min(0)
-                    .max(MAX_MACRO_G)
+                protein_g: nutrientNumber(MAX_MACRO_G)
                     .optional()
                     .describe("Protein in grams"),
-                carbs_g: z.coerce
-                    .number()
-                    .min(0)
-                    .max(MAX_MACRO_G)
+                carbs_g: nutrientNumber(MAX_MACRO_G)
                     .optional()
                     .describe("Carbohydrates in grams"),
-                fat_g: z.coerce
-                    .number()
-                    .min(0)
-                    .max(MAX_MACRO_G)
+                fat_g: nutrientNumber(MAX_MACRO_G)
                     .optional()
                     .describe("Fat in grams"),
                 // Fiber and sugar carry reference anchors for the same reason
@@ -1989,34 +2039,22 @@ export function registerTools(
                 // effectively mandatory in practice, so the model needs a last
                 // resort that is better than skipping the field. See
                 // NUTRIENT_COVERAGE for why an omission costs the whole day.
-                fiber_g: z.coerce
-                    .number()
-                    .min(0)
-                    .max(MAX_MACRO_G)
+                fiber_g: nutrientNumber(MAX_MACRO_G)
                     .optional()
                     .describe(
                         "Dietary fiber in grams. Send this on every meal — treat it as mandatory alongside protein, carbs and fat, and estimate it rather than omitting it, because a missing value is not a zero and excludes the whole day from the user's fiber average and goal. Prefer a label or a barcode lookup, then a web search, then these anchors per 100 g: cooked lentils or beans 5-8 g, dry rolled oats 10 g, wholemeal bread 7 g, white bread 2.7 g, cooked wholewheat pasta 4 g (white 2 g), cooked brown rice 1.8 g (white 0.4 g), potato with skin 2 g, most vegetables 2-3 g, apple or pear with skin 2.4-3 g, banana 2.6 g, berries 5-7 g, almonds 12 g, chia 34 g. Meat, fish, eggs, dairy, oil and sugar contain none: send 0 there, do not omit the field.",
                     ),
-                sugar_g: z.coerce
-                    .number()
-                    .min(0)
-                    .max(MAX_MACRO_G)
+                sugar_g: nutrientNumber(MAX_MACRO_G)
                     .optional()
                     .describe(
                         "TOTAL sugars in grams — including sugar naturally present in fruit, milk and juice, not just added sugar. Report the whole figure a nutrition label or database gives for 'Sugars'; do not try to separate out added sugar. Send this on every meal, estimating rather than omitting it: a missing value is not a zero and drops the whole day out of the sugar average and limit. Anchors per 100 g when you have nothing better: milk 5 g, plain yogurt 4.7 g, fruit yogurt 12 g, apple 10 g, banana 12 g, orange 9 g, berries 5-10 g, dried dates 63 g, cola 10.6 g, orange juice 8.4 g, ketchup 22 g, milk chocolate 52 g, bread 3-5 g. Meat, fish, eggs, cheese, oil, rice, pasta and most vegetables are ~0: send 0 there, do not omit the field.",
                     ),
-                alcohol_g: z.coerce
-                    .number()
-                    .min(0)
-                    .max(MAX_ALCOHOL_G)
+                alcohol_g: nutrientNumber(MAX_ALCOHOL_G)
                     .optional()
                     .describe(
                         "Grams of pure ethanol — NOT the volume of the drink and NOT its ABV. Do not estimate this: compute it from the volume and strength, which the user can read off the bottle or the menu. grams = millilitres x (ABV% / 100) x 0.789. Worked examples: a 330 ml 5% beer = 330 x 0.05 x 0.789 = 13 g; a 150 ml glass of 13% wine = 15.4 g; a 44 ml (1.5 oz) shot of 40% spirit = 13.9 g. For US measures, 1 fl oz = 29.6 ml. Ask for the pour size and the ABV rather than guessing, and omit the field entirely for a non-alcoholic meal.",
                     ),
-                caffeine_mg: z.coerce
-                    .number()
-                    .min(0)
-                    .max(MAX_CAFFEINE_MG)
+                caffeine_mg: nutrientNumber(MAX_CAFFEINE_MG)
                     .optional()
                     .describe(
                         "Caffeine in MILLIGRAMS (mg) — this field is the one that is not in grams, and a value under 1 almost certainly means grams were sent by mistake. Typical amounts: a 240 ml brewed coffee 95 mg, a single espresso 63 mg, instant coffee 62 mg, black tea 47 mg, green tea 28 mg, a 355 ml cola 34 mg, a 250 ml energy drink 80 mg, decaf 2 mg. Scale them to what was actually drunk (a double espresso is 126 mg), and for a branded drink prefer the figure on the label or the chain's published nutrition. Caffeine adds no calories, so it never changes the kcal figure. Unlike fiber_g and sugar_g, this field is conditional, so decide it on every entry rather than skipping it by default: if the item is a caffeine source at all — coffee including decaf, tea, matcha, yerba mate, cola and other soft drinks, energy drinks, pre-workout, chocolate and cocoa, coffee ice cream, caffeine tablets — send a figure, searching the web for a branded drink whose label you do not know and falling back to the amounts above. Omit the field for anything that is not a caffeine source rather than sending 0 — a 0 records 'measured, and it was none', and one on a sandwich puts a caffeine row on the dashboard of a user who never drinks any.",
@@ -3201,65 +3239,41 @@ export function registerTools(
                 // Bounded in the schema for the same reason as log_meal, with
                 // the gram ceiling set by the numeric(6,2) goal columns rather
                 // than by what a plausible meal carries.
-                daily_calories: z.coerce
-                    .number()
-                    .min(0)
-                    .max(MAX_CALORIES)
+                daily_calories: nutrientNumber(MAX_CALORIES)
                     .nullable()
                     .optional()
                     .describe("Daily calorie target (kcal). Null to clear."),
-                daily_protein_g: z.coerce
-                    .number()
-                    .min(0)
-                    .max(MAX_GOAL_G)
+                daily_protein_g: nutrientNumber(MAX_GOAL_G)
                     .nullable()
                     .optional()
                     .describe("Daily protein target (grams). Null to clear."),
-                daily_carbs_g: z.coerce
-                    .number()
-                    .min(0)
-                    .max(MAX_GOAL_G)
+                daily_carbs_g: nutrientNumber(MAX_GOAL_G)
                     .nullable()
                     .optional()
                     .describe("Daily carbs target (grams). Null to clear."),
-                daily_fat_g: z.coerce
-                    .number()
-                    .min(0)
-                    .max(MAX_GOAL_G)
+                daily_fat_g: nutrientNumber(MAX_GOAL_G)
                     .nullable()
                     .optional()
                     .describe("Daily fat target (grams). Null to clear."),
-                daily_fiber_g: z.coerce
-                    .number()
-                    .min(0)
-                    .max(MAX_GOAL_G)
+                daily_fiber_g: nutrientNumber(MAX_GOAL_G)
                     .nullable()
                     .optional()
                     .describe(
                         "Daily fiber target (grams), treated as a minimum to reach. Null to clear.",
                     ),
-                daily_sugar_g: z.coerce
-                    .number()
-                    .min(0)
-                    .max(MAX_GOAL_G)
+                daily_sugar_g: nutrientNumber(MAX_GOAL_G)
                     .nullable()
                     .optional()
                     .describe(
                         "Daily TOTAL sugar limit (grams), treated as a maximum to stay under. Total sugars include sugar naturally present in fruit and milk, not only added sugar — say so when the user sets one, since public guidance figures usually refer to ADDED sugar and are therefore a much lower number. Null to clear.",
                     ),
-                daily_alcohol_g: z.coerce
-                    .number()
-                    .min(0)
-                    .max(MAX_GOAL_G)
+                daily_alcohol_g: nutrientNumber(MAX_GOAL_G)
                     .nullable()
                     .optional()
                     .describe(
                         "Daily alcohol limit in grams of pure ethanol, treated as a maximum to stay under. One US standard drink is 14 g, one UK unit is 7.9 g. Null to clear.",
                     ),
-                daily_caffeine_mg: z.coerce
-                    .number()
-                    .min(0)
-                    .max(MAX_GOAL_MG)
+                daily_caffeine_mg: nutrientNumber(MAX_GOAL_MG)
                     .nullable()
                     .optional()
                     .describe(
@@ -3635,38 +3649,26 @@ export function registerTools(
                     .enum(["breakfast", "lunch", "dinner", "snack"])
                     .optional(),
                 // Same bounds, and the same reasoning, as log_meal.
-                calories: z.coerce.number().min(0).max(MAX_CALORIES).optional(),
-                protein_g: z.coerce.number().min(0).max(MAX_MACRO_G).optional(),
-                carbs_g: z.coerce.number().min(0).max(MAX_MACRO_G).optional(),
-                fat_g: z.coerce.number().min(0).max(MAX_MACRO_G).optional(),
-                fiber_g: z.coerce
-                    .number()
-                    .min(0)
-                    .max(MAX_MACRO_G)
+                calories: nutrientNumber(MAX_CALORIES).optional(),
+                protein_g: nutrientNumber(MAX_MACRO_G).optional(),
+                carbs_g: nutrientNumber(MAX_MACRO_G).optional(),
+                fat_g: nutrientNumber(MAX_MACRO_G).optional(),
+                fiber_g: nutrientNumber(MAX_MACRO_G)
                     .optional()
                     .describe(
                         "Dietary fiber in grams. Every meal should carry one — pass it here for a meal logged without it, estimating from the ingredients if no label figure exists, and 0 for a food that genuinely has none (meat, fish, eggs, dairy, oil).",
                     ),
-                sugar_g: z.coerce
-                    .number()
-                    .min(0)
-                    .max(MAX_MACRO_G)
+                sugar_g: nutrientNumber(MAX_MACRO_G)
                     .optional()
                     .describe(
                         "TOTAL sugars in grams, including sugar naturally present in fruit and milk — not only added sugar. Every meal should carry one — pass it here for a meal logged without it, estimating if there is no label figure, and 0 for a food that genuinely has none.",
                     ),
-                alcohol_g: z.coerce
-                    .number()
-                    .min(0)
-                    .max(MAX_ALCOHOL_G)
+                alcohol_g: nutrientNumber(MAX_ALCOHOL_G)
                     .optional()
                     .describe(
                         "Grams of pure ethanol — NOT the drink's volume and NOT its ABV. Compute it rather than estimating: grams = millilitres x (ABV% / 100) x 0.789 (a 330 ml 5% beer = 13 g).",
                     ),
-                caffeine_mg: z.coerce
-                    .number()
-                    .min(0)
-                    .max(MAX_CAFFEINE_MG)
+                caffeine_mg: nutrientNumber(MAX_CAFFEINE_MG)
                     .optional()
                     .describe(
                         "Caffeine in MILLIGRAMS, not grams (a 240 ml brewed coffee is 95 mg, a single espresso 63 mg, black tea 47 mg, a 250 ml energy drink 80 mg). Adds no calories. Pass it only for a meal that is genuinely a caffeine source; a 0 here records 'measured, and it was none' and starts showing the user a caffeine row.",

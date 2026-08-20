@@ -4681,3 +4681,62 @@ describe("get_nutrition_summary surfaces range-wide coverage", () => {
         });
     });
 });
+
+// ---------- blank cells are not zeros ----------
+//
+// `z.coerce.number().parse("")` is 0: Number("") is 0 and Zod coerces before
+// it validates. Any mapper that emits an empty cell as "" rather than null
+// therefore wrote a confident zero into a column whose entire contract is
+// that null and 0 differ. This was live on the macro fields long before the
+// micronutrients arrived, which is why these tests cover both.
+describe("an empty string is not a zero on any write path", () => {
+    test("log_meal treats a blank macro as not recorded", async () => {
+        await withTools(null, async (call) => {
+            await call("log_meal", {
+                description: "Salad",
+                meal_type: "lunch",
+                calories: "",
+                fiber_g: "",
+                protein_g: "4",
+            });
+            const written = db.inserted[0]!;
+            expect(written.calories ?? null).toBeNull();
+            expect(written.fiber_g ?? null).toBeNull();
+            // A real numeric string still coerces — that is why z.coerce is
+            // here at all, since models emit "450" as often as 450.
+            expect(written.protein_g).toBe(4);
+        });
+    });
+
+    test("log_meal keeps a real zero as a zero", async () => {
+        await withTools(null, async (call) => {
+            await call("log_meal", {
+                description: "Ribeye steak",
+                meal_type: "dinner",
+                fiber_g: 0,
+                sugar_g: "0",
+            });
+            const written = db.inserted[0]!;
+            expect(written.fiber_g).toBe(0);
+            expect(written.sugar_g).toBe(0);
+        });
+    });
+
+    test("log_meal treats a blank micronutrient as not recorded", async () => {
+        await withTools(null, async (call) => {
+            await call("log_meal", {
+                description: "Crisps",
+                meal_type: "snack",
+                sodium_mg: "",
+                nutrient_source: "nutrition_label",
+            });
+            const written = db.inserted[0]!;
+            expect(written.sodium_mg ?? null).toBeNull();
+            // No value means nothing to attribute.
+            expect(
+                (written.nutrient_provenance as Record<string, unknown> | null)
+                    ?.sodium_mg,
+            ).toBeUndefined();
+        });
+    });
+});
