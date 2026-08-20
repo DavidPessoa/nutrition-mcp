@@ -18,7 +18,17 @@ import {
     type ImportRow,
     type ImportDeps,
 } from "./import.js";
+import { readFileSync } from "node:fs";
 import { dateInTz } from "./tz.js";
+import { MICRONUTRIENT_FIELDS, NUTRIENT_FIELDS } from "./nutrients.js";
+import { buildMealsCsv } from "./export.js";
+import {
+    parseCsv,
+    findColumn,
+    parseNumber,
+    isBlankCell,
+    resolveNutrientHeader,
+} from "./csv.js";
 
 const NOW = Date.parse("2026-07-25T12:00:00Z");
 const TZ = "Europe/Kyiv";
@@ -58,12 +68,18 @@ function makeStore(
                 logged_at: input.logged_at!,
                 meal_type: input.meal_type,
                 description: input.description,
-                calories: input.calories ?? null,
-                protein_g: input.protein_g ?? null,
-                carbs_g: input.carbs_g ?? null,
-                fat_g: input.fat_g ?? null,
                 notes: input.notes ?? null,
                 idempotency_key: key,
+                // Every nutrient field, written through the canonical list
+                // rather than by hand: the store has to be as lossless as the
+                // DB column set or an export round trip would "prove" nothing
+                // more than which fields this fake happened to copy. `?? null`
+                // is the DB's own behaviour — an absent key reads back as
+                // null, and neither ever becomes 0.
+                ...Object.fromEntries(
+                    NUTRIENT_FIELDS.map((f) => [f, input[f] ?? null]),
+                ),
+                nutrient_provenance: input.nutrient_provenance ?? null,
             } as Meal;
             byKey.set(key, meal);
             byId.set(meal.id, meal);
@@ -1416,5 +1432,512 @@ test("another user's meal id is not treated as already-present", async () => {
         deps,
     );
     expect(result.summary.created).toBe(1);
+    expect(inserted).toHaveLength(1);
+});
+
+// ---------- micronutrients ----------
+//
+// The whole point of the epic, at the layer where a blank cell can become a
+// zero. Every assertion below is really the same one asked twelve ways:
+// absent, null and 0 are three DIFFERENT facts and must stay that way.
+
+/** validateRow, unwrapped to the resolved MealInput (or thrown on failure). */
+function resolveInput(over: Partial<ImportRow>): MealInput {
+    const v = validateRow(
+        row({ source_line: 2, ...over }),
+        0,
+        {
+            tz: TZ,
+            nowMs: NOW,
+        },
+        undefined,
+    );
+    if (!v.ok)
+        throw new Error(`expected ok, got ${v.error.code}: ${v.error.message}`);
+    return v.resolved.input;
+}
+
+function resolveError(over: Partial<ImportRow>) {
+    const v = validateRow(
+        row({ source_line: 2, ...over }),
+        0,
+        {
+            tz: TZ,
+            nowMs: NOW,
+        },
+        undefined,
+    );
+    if (v.ok) throw new Error("expected a per-row error");
+    return v.error;
+}
+
+test("an absent micronutrient stays absent, an explicit null stays null, a 0 stays 0", () => {
+    const absent = resolveInput({});
+    for (const f of MICRONUTRIENT_FIELDS) expect(f in absent).toBe(false);
+
+    const explicit = resolveInput({ sodium_mg: null, iron_mg: 0 });
+    // null is WRITTEN as null (not omitted): insertMeal distinguishes an
+    // absent key from an explicit clear.
+    expect("sodium_mg" in explicit).toBe(true);
+    expect(explicit.sodium_mg).toBeNull();
+    // 0 is a real reading and must survive as 0, never collapse to null.
+    expect(explicit.iron_mg).toBe(0);
+    expect(explicit.calcium_mg).toBeUndefined();
+});
+
+test("every micronutrient carries a positive value through unchanged", () => {
+    const values: Record<string, number> = {};
+    MICRONUTRIENT_FIELDS.forEach((f, i) => (values[f] = i + 1.5));
+    const input = resolveInput(values as Partial<ImportRow>);
+    for (const f of MICRONUTRIENT_FIELDS) expect(input[f]).toBe(values[f]);
+});
+
+test("a negative, NaN or Infinite micronutrient is a per-row error, not a batch rejection", () => {
+    for (const bad of [-1, NaN, Infinity, -Infinity]) {
+        const err = resolveError({ sodium_mg: bad });
+        expect(err.field).toBe("sodium_mg");
+        expect(err.retryable).toBe(true);
+    }
+    // A zero is emphatically not in that set.
+    expect(resolveInput({ sodium_mg: 0 }).sodium_mg).toBe(0);
+});
+
+test("a declared unit is converted by nutrient-units, never by the importer", () => {
+    // Sodium (g): 2.3 g is 2300 mg, the canonical unit named in the field.
+    expect(
+        resolveInput({ sodium_mg: 2.3, nutrient_units: { sodium_mg: "g" } })
+            .sodium_mg,
+    ).toBe(2300);
+    // The long spellings and the folded micro sign resolve too.
+    expect(
+        resolveInput({
+            vitamin_d_mcg: 0.01,
+            nutrient_units: { vitamin_d_mcg: "Milligrams" },
+        }).vitamin_d_mcg,
+    ).toBe(10);
+    expect(
+        resolveInput({
+            vitamin_c_mg: 500,
+            nutrient_units: { vitamin_c_mg: "µg" },
+        }).vitamin_c_mg,
+    ).toBe(0.5);
+    // 0 converts to 0 under any factor; null is untouched by unit handling.
+    expect(
+        resolveInput({ sodium_mg: 0, nutrient_units: { sodium_mg: "g" } })
+            .sodium_mg,
+    ).toBe(0);
+    const cleared = resolveInput({
+        sodium_mg: null,
+        nutrient_units: { sodium_mg: "g" },
+    });
+    expect(cleared.sodium_mg).toBeNull();
+});
+
+test("an unconvertible unit is a visible error, never a fallback to canonical", () => {
+    // IU is the one that matters: read as mcg it is wrong by 3x-20x and looks
+    // entirely plausible.
+    for (const unit of ["IU", "% DV", "servings", "??"]) {
+        const err = resolveError({
+            vitamin_a_mcg: 500,
+            nutrient_units: { vitamin_a_mcg: unit },
+        });
+        expect(err.code).toBe("ambiguous_unit");
+        expect(err.field).toBe("vitamin_a_mcg");
+        expect(err.message).toContain(unit);
+    }
+    // A blank unit cell is "the column stated nothing", not an unknown unit:
+    // the canonical unit in the field's own name applies.
+    expect(
+        resolveInput({ sodium_mg: 5, nutrient_units: { sodium_mg: "  " } })
+            .sodium_mg,
+    ).toBe(5);
+});
+
+test("the ceiling is applied AFTER conversion, in the canonical unit", () => {
+    // 101 g of sodium is 101,000 mg: over the mg ceiling. Checking before
+    // conversion would have waved a 101 through and stored 101,000.
+    const err = resolveError({
+        sodium_mg: 101,
+        nutrient_units: { sodium_mg: "g" },
+    });
+    expect(err.field).toBe("sodium_mg");
+    expect(err.message).toContain("mg");
+    // Just under the ceiling still passes, converted.
+    expect(
+        resolveInput({ sodium_mg: 99, nutrient_units: { sodium_mg: "g" } })
+            .sodium_mg,
+    ).toBe(99_000);
+});
+
+test("unknown extra columns on a row are ignored, not fatal", () => {
+    const input = resolveInput({
+        sugar_alcohols_g: 4,
+        "Vitamin B12": 2.4,
+        __weird: null,
+    } as unknown as Partial<ImportRow>);
+    expect(input.sodium_mg).toBeUndefined();
+    expect(input.calories).toBe(300);
+    expect(Object.keys(input)).not.toContain("sugar_alcohols_g");
+});
+
+// ---------- provenance ----------
+
+test("micronutrient values the file said nothing about are stamped as an import", () => {
+    const input = resolveInput({
+        sodium_mg: 610,
+        iron_mg: 0,
+        calcium_mg: null,
+    });
+    expect(input.nutrient_provenance).toEqual({
+        sodium_mg: {
+            source: "import",
+            source_id: null,
+            confidence: "user_provided",
+        },
+        // A real 0 is a value and gets provenance...
+        iron_mg: {
+            source: "import",
+            source_id: null,
+            confidence: "user_provided",
+        },
+    });
+    // ...a null is not a value, so it is not stamped.
+    expect(input.nutrient_provenance!.calcium_mg).toBeUndefined();
+});
+
+test("a file with no micronutrient columns gains no provenance blob at all", () => {
+    // The pre-epic row must import exactly as it always did.
+    expect(resolveInput({}).nutrient_provenance).toBeUndefined();
+});
+
+test("provenance carried in the file wins over the import stamp", () => {
+    const carried = {
+        sodium_mg: {
+            source: "usda_fdc",
+            source_id: "fdc:173410",
+            confidence: "authoritative",
+        },
+    };
+    for (const cell of [JSON.stringify(carried), carried]) {
+        const input = resolveInput({
+            sodium_mg: 610,
+            potassium_mg: 200,
+            nutrient_provenance: cell as ImportRow["nutrient_provenance"],
+        });
+        expect(input.nutrient_provenance!.sodium_mg).toEqual(
+            carried.sodium_mg as never,
+        );
+        // A nutrient the file had no provenance for is still stamped.
+        expect(input.nutrient_provenance!.potassium_mg!.source).toBe("import");
+    }
+});
+
+test("an unreadable provenance cell costs the provenance, never the numbers", () => {
+    const v = validateRow(
+        row({
+            source_line: 2,
+            sodium_mg: 610,
+            nutrient_provenance: "{not json",
+        }),
+        0,
+        { tz: TZ, nowMs: NOW },
+        undefined,
+    );
+    expect(v.ok).toBe(true);
+    if (!v.ok) return;
+    expect(v.resolved.provenance_dropped).toBe(true);
+    expect(v.resolved.input.sodium_mg).toBe(610);
+    // Falls back to the import stamp rather than storing nothing.
+    expect(v.resolved.input.nutrient_provenance!.sodium_mg!.source).toBe(
+        "import",
+    );
+});
+
+test("a file with no provenance column imports fine and warns about none", async () => {
+    const { deps } = makeStore();
+    const result = await runImport(
+        args([row({ source_line: 2, sodium_mg: 610 })]),
+        deps,
+    );
+    expect(result.summary.created).toBe(1);
+    expect(result.warnings.join(" ")).not.toContain("provenance");
+});
+
+test("runImport warns once when provenance cells were dropped", async () => {
+    const { deps, inserted } = makeStore();
+    const result = await runImport(
+        args([
+            row({ source_line: 2, sodium_mg: 1, nutrient_provenance: "{{{" }),
+            row({ source_line: 3, sodium_mg: 2, nutrient_provenance: "{{{" }),
+        ]),
+        deps,
+    );
+    expect(result.summary.created).toBe(2);
+    expect(result.warnings.some((w) => w.includes("nutrient_provenance"))).toBe(
+        true,
+    );
+    expect(inserted.map((i) => i.sodium_mg)).toEqual([1, 2]);
+});
+
+// ---------- CSV -> rows -> import -> export -> re-import ----------
+//
+// The deliverable: a value written by an import must come back out of the
+// export and go back in unchanged, for every supported nutrient, with null
+// still null and 0 still 0. There is no server-side CSV->row mapper (the
+// widget maps in the browser, the model maps in the fallback path), so this
+// maps with the same exported csv.ts primitives both of those use.
+
+/** The Agent 7 fixture: complete, partial, blank, zero, mixed-unit, bad-unit
+ *  and unknown-extra columns in one file. */
+function readFixture(): string {
+    return readFileSync(
+        new URL("./fixtures/import/micronutrients.csv", import.meta.url),
+        "utf-8",
+    );
+}
+
+function mapCsvToRows(text: string): ImportRow[] {
+    const table = parseCsv(text);
+    const H = table.headers;
+    const col = (...aliases: string[]) => findColumn(H, aliases);
+    const idC = col("id");
+    const atC = col("logged_at", "date");
+    const tzC = col("timezone");
+    const typeC = col("meal_type", "meal");
+    const descC = col("description", "food");
+    const notesC = col("notes", "note");
+    const provC = col("nutrient_provenance");
+    const macroC: Record<string, number> = {
+        calories: col("calories"),
+        protein_g: col("protein_g", "protein"),
+        carbs_g: col("carbs_g", "carbohydrates_g", "carbs"),
+        fat_g: col("fat_g"),
+        fiber_g: col("fiber_g", "fiber"),
+        sugar_g: col("sugar_g", "sugar"),
+        alcohol_g: col("alcohol_g", "alcohol"),
+        caffeine_mg: col("caffeine_mg", "caffeine"),
+    };
+    // Micronutrient columns are found by resolving the HEADER, not by a fixed
+    // list, so a unit-qualified or foreign-language header maps itself.
+    const microC = H.map((h, i) => ({ i, m: resolveNutrientHeader(h) })).filter(
+        (x) => x.m !== null,
+    );
+
+    const cell = (r: string[], i: number) => (i < 0 ? undefined : r[i]);
+    return table.rows.map((r, n) => {
+        const out: Record<string, unknown> = {
+            source_line: table.sourceLines[n] ?? n + 2,
+        };
+        const put = (k: string, v: unknown) => {
+            if (v !== undefined && v !== "") out[k] = v;
+        };
+        put("source_id", cell(r, idC));
+        put("logged_at", cell(r, atC));
+        put("timezone", cell(r, tzC));
+        put("meal_type", cell(r, typeC));
+        put("description", cell(r, descC));
+        put("notes", cell(r, notesC));
+        put("nutrient_provenance", cell(r, provC));
+        for (const [field, i] of Object.entries(macroC)) {
+            const v = parseNumber(cell(r, i));
+            if (v !== null) out[field] = v;
+        }
+        const units: Record<string, string> = {};
+        for (const { i, m } of microC) {
+            const raw = cell(r, i);
+            if (raw === undefined) continue;
+            // A blank cell is an explicit "not recorded" — null, never 0, and
+            // never simply dropped, so the distinction survives the mapping.
+            if (isBlankCell(raw)) {
+                out[m!.field] = null;
+                continue;
+            }
+            if (m!.unit === null) continue; // IU / %DV: refuse, don't guess
+            out[m!.field] = parseNumber(raw);
+            units[m!.field] = m!.unit;
+        }
+        if (Object.keys(units).length > 0) out.nutrient_units = units;
+        return out as unknown as ImportRow;
+    });
+}
+
+test("the micronutrient fixture maps units and blanks exactly as the file states", () => {
+    const text = readFixture();
+    const rows = mapCsvToRows(text);
+    expect(rows).toHaveLength(4);
+
+    // Complete row: "Potassium (g)" 0.39 must be declared as grams so the
+    // server converts it; the importer, not the mapper, does the arithmetic.
+    expect(rows[0]!.potassium_mg).toBe(0.39);
+    expect(rows[0]!.nutrient_units!.potassium_mg).toBe("g");
+    expect(rows[0]!.nutrient_units!.sodium_mg).toBe("mg");
+    // A bare "Cholesterol"/"Calcium"/"Magnesium" header is read as mg.
+    expect(rows[0]!.nutrient_units!.cholesterol_mg).toBe("mg");
+    // "Vitamin A (IU)" is refused outright rather than read as micrograms.
+    expect("vitamin_a_mcg" in rows[0]!).toBe(false);
+    // "Sugar Alcohols (g)" and "Note" are unknown columns: silently ignored.
+    expect(Object.keys(rows[0]!)).not.toContain("sugar_alcohols_g");
+
+    // Partial row: blank cells arrive as null, NOT as 0 and not as absent.
+    expect(rows[1]!.potassium_mg).toBeNull();
+    expect(rows[1]!.calcium_mg).toBeNull();
+    expect(rows[1]!.sodium_mg).toBe(610);
+
+    // Explicit-zero row: every micronutrient is a real 0.
+    for (const f of MICRONUTRIENT_FIELDS) {
+        if (f === "vitamin_a_mcg") continue; // IU column, refused above
+        expect(rows[2]![f]).toBe(0);
+    }
+
+    // "n/a" and "-" are blank tokens, not values.
+    expect(rows[3]!.trans_fat_g).toBeNull();
+    expect(rows[3]!.added_sugar_g).toBeNull();
+    expect(rows[3]!.cholesterol_mg).toBeNull();
+    expect(rows[3]!.vitamin_c_mg).toBe(0);
+});
+
+test("the fixture imports with its units converted and its blanks preserved", async () => {
+    const text = readFixture();
+    const { deps, inserted } = makeStore();
+    const rows = mapCsvToRows(text);
+    const result = await runImport(args(rows), deps);
+    expect(result.summary.failed).toBe(0);
+    expect(result.summary.created).toBe(4);
+
+    // 0.39 g of potassium became 390 mg — converted once, by nutrient-units.
+    expect(inserted[0]!.potassium_mg).toBe(390);
+    expect(inserted[0]!.sodium_mg).toBe(180);
+    expect(inserted[1]!.potassium_mg).toBeNull();
+    // The zero row stored twelve real zeros, not twelve nulls.
+    expect(inserted[2]!.sodium_mg).toBe(0);
+    expect(inserted[2]!.iron_mg).toBe(0);
+    // ...and the null row stored nulls, not zeros.
+    expect(inserted[3]!.trans_fat_g).toBeNull();
+    expect(inserted[3]!.vitamin_c_mg).toBe(0);
+});
+
+test("round trip: import -> export -> re-import into a clean user is value-identical", async () => {
+    // One row per shape that has ever gone wrong: every field populated, every
+    // field explicitly zero, every field blank, and a mixture with carried
+    // provenance.
+    const populated: Record<string, unknown> = {};
+    const zeroed: Record<string, unknown> = {};
+    const blanked: Record<string, unknown> = {};
+    MICRONUTRIENT_FIELDS.forEach((f, i) => {
+        populated[f] = i + 0.25;
+        zeroed[f] = 0;
+        blanked[f] = null;
+    });
+
+    const first = makeStore();
+    const rows: ImportRow[] = [
+        row({
+            source_line: 2,
+            description: "Everything",
+            logged_at: "2026-01-15T08:30",
+            ...populated,
+        } as Partial<ImportRow> & { source_line: number }),
+        row({
+            source_line: 3,
+            description: "All zero",
+            logged_at: "2026-01-15T12:30",
+            meal_type: "lunch",
+            ...zeroed,
+        } as Partial<ImportRow> & { source_line: number }),
+        row({
+            source_line: 4,
+            description: "All blank",
+            logged_at: "2026-01-15T19:00",
+            meal_type: "dinner",
+            ...blanked,
+        } as Partial<ImportRow> & { source_line: number }),
+        row({
+            source_line: 5,
+            description: "Mixed, with a label's own provenance",
+            logged_at: "2026-01-16T09:00",
+            sodium_mg: 610,
+            calcium_mg: null,
+            iron_mg: 0,
+            alcohol_g: 14,
+            caffeine_mg: 95,
+            nutrient_provenance: JSON.stringify({
+                sodium_mg: {
+                    source: "nutrition_label",
+                    source_id: null,
+                    confidence: "authoritative",
+                },
+            }),
+        }),
+    ];
+
+    // 1. Dry run predicts exactly what the real run then does.
+    const dry = await runImport(args(rows, { dry_run: true }), first.deps);
+    expect(dry.summary.would_create).toBe(4);
+    expect(dry.summary.failed).toBe(0);
+    expect(first.inserted).toHaveLength(0);
+
+    const real = await runImport(args(rows), first.deps);
+    expect(real.summary.created).toBe(4);
+
+    // 2. Read back and export, exactly as export_all_data does.
+    const meals = [...first.byId.values()];
+    const csv1 = buildMealsCsv(meals, TZ);
+
+    // 3. Re-import that file into a CLEAN user: no ids in common, so nothing
+    //    dedupes by source_id and every row is written fresh.
+    const second = makeStore();
+    const reRows = mapCsvToRows(csv1);
+    const back = await runImport(args(reRows), second.deps);
+    expect(back.summary.failed).toBe(0);
+    expect(back.summary.created).toBe(4);
+
+    // 4. Compare by exporting the second user too. Everything but the meal id
+    //    must be byte-identical: values, units, nulls, zeros, timestamps, the
+    //    timezone column and the provenance JSON.
+    const csv2 = buildMealsCsv([...second.byId.values()], TZ);
+    const stripIds = (csv: string) => {
+        const t = parseCsv(csv, { keepTotalsRows: true });
+        const idIdx = findColumn(t.headers, ["id"]);
+        return [
+            t.headers.filter((_, i) => i !== idIdx).join("|"),
+            ...t.rows.map((r) => r.filter((_, i) => i !== idIdx).join("|")),
+        ].join("\n");
+    };
+    expect(stripIds(csv2)).toBe(stripIds(csv1));
+
+    // Spot-check the things a string comparison could hide if BOTH sides were
+    // wrong the same way.
+    const byDesc = (ms: typeof meals, d: string) =>
+        ms.find((m) => m.description === d)!;
+    const out = [...second.byId.values()];
+    MICRONUTRIENT_FIELDS.forEach((f, i) => {
+        expect(byDesc(out, "Everything")[f]).toBe(i + 0.25);
+        expect(byDesc(out, "All zero")[f]).toBe(0);
+        expect(byDesc(out, "All blank")[f]).toBeNull();
+    });
+    // The label's own provenance survived; it was NOT overwritten by the
+    // import stamp on the way back in.
+    const mixed = byDesc(out, "Mixed, with a label's own provenance");
+    expect(mixed.nutrient_provenance!.sodium_mg).toEqual({
+        source: "nutrition_label",
+        source_id: null,
+        confidence: "authoritative",
+    });
+    expect(mixed.nutrient_provenance!.iron_mg!.source).toBe("import");
+    expect(mixed.calcium_mg).toBeNull();
+    expect(mixed.alcohol_g).toBe(14);
+    expect(mixed.caffeine_mg).toBe(95);
+});
+
+test("re-importing the same export twice is a no-op for the SAME user", async () => {
+    // The id column, not the content digest, is what recognises a meal coming
+    // back in — the digests live in different namespaces and hash different
+    // renderings of logged_at.
+    const { deps, byId, inserted } = makeStore();
+    await runImport(args([row({ source_line: 2, sodium_mg: 610 })]), deps);
+    const csv = buildMealsCsv([...byId.values()], TZ);
+    const again = await runImport(args(mapCsvToRows(csv)), deps);
+    expect(again.summary.deduplicated).toBe(1);
+    expect(again.summary.created).toBe(0);
     expect(inserted).toHaveLength(1);
 });

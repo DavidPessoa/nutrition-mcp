@@ -435,8 +435,13 @@ function profile(overrides: Partial<Profile> = {}): Profile {
 const WATER_HEADER = "id,logged_at,timezone,amount_ml,notes";
 const WEIGHT_HEADER =
     "id,logged_at,timezone,weight_g,weight_display,weight_unit,notes";
+// Spelled out rather than rebuilt from MICRONUTRIENT_GOAL_FIELDS: a header
+// derived from the same list the builder derives from would agree with itself
+// no matter what either did. This is the literal file a user gets.
 const GOALS_HEADER =
-    "daily_calories,daily_protein_g,daily_carbs_g,daily_fat_g,daily_fiber_g,daily_sugar_g,daily_alcohol_g,daily_caffeine_mg,daily_water_ml,target_weight_g,updated_at,timezone";
+    "daily_calories,daily_protein_g,daily_carbs_g,daily_fat_g,daily_fiber_g,daily_sugar_g,daily_alcohol_g,daily_caffeine_mg,daily_water_ml,target_weight_g," +
+    "max_saturated_fat_g,max_sodium_mg,min_potassium_mg,max_cholesterol_mg,min_calcium_mg,min_iron_mg,min_magnesium_mg,min_vitamin_a_mcg,min_vitamin_c_mg,min_vitamin_d_mcg," +
+    "updated_at,timezone";
 const PROFILE_HEADER =
     "timezone,preferred_weight_unit,preferred_drink_unit,alcohol_tracking_enabled,widgets_enabled,created_at,updated_at";
 
@@ -598,8 +603,36 @@ test("goals.csv header and its single row have identical field counts", () => {
 });
 
 test("every goal value lands under its own header name", () => {
-    const f = fieldsByName(buildGoalsCsv(goals(), "Europe/Berlin"));
+    const f = fieldsByName(
+        buildGoalsCsv(
+            goals({
+                max_saturated_fat_g: 20,
+                max_sodium_mg: 2300,
+                min_potassium_mg: 3400,
+                max_cholesterol_mg: 300,
+                min_calcium_mg: 1000,
+                min_iron_mg: 0,
+                min_magnesium_mg: 420,
+                min_vitamin_a_mcg: 900,
+                min_vitamin_c_mg: 90,
+                min_vitamin_d_mcg: 20,
+            }),
+            "Europe/Berlin",
+        ),
+    );
     expect(f).toEqual({
+        // The ten micronutrient targets. A 0 is a real target ("no iron
+        // floor set" is null, and these are different facts).
+        max_saturated_fat_g: "20",
+        max_sodium_mg: "2300",
+        min_potassium_mg: "3400",
+        max_cholesterol_mg: "300",
+        min_calcium_mg: "1000",
+        min_iron_mg: "0",
+        min_magnesium_mg: "420",
+        min_vitamin_a_mcg: "900",
+        min_vitamin_c_mg: "90",
+        min_vitamin_d_mcg: "20",
         daily_calories: "2200",
         daily_protein_g: "150",
         daily_carbs_g: "220",

@@ -7,6 +7,7 @@ import {
     getNutritionGoals,
     getProfile,
     timezoneFromProfile,
+    MICRONUTRIENT_GOAL_FIELDS,
     type Meal,
     type NutritionGoals,
     type Profile,
@@ -256,6 +257,13 @@ const GOALS_CSV_COLUMNS = [
     "daily_caffeine_mg",
     "daily_water_ml",
     "target_weight_g",
+    // The ten micronutrient targets, spliced in from the canonical list rather
+    // than spelled out, so a target added to the model cannot be silently left
+    // out of the backup — which is exactly what happened to all ten of these
+    // when they were added to the goals table and not to this file. The names
+    // carry their direction (max_/min_) and their unit for the same reason
+    // every other column here does.
+    ...MICRONUTRIENT_GOAL_FIELDS.map(([goalField]) => goalField),
     "updated_at",
     "timezone",
 ] as const;
@@ -283,6 +291,11 @@ export function buildGoalsCsv(
                 csvEscape(goals.daily_caffeine_mg),
                 csvEscape(goals.daily_water_ml),
                 csvEscape(goals.target_weight_g),
+                // Same list, same order as the header above — the parallel
+                // arrays stay aligned because neither is hand-written.
+                ...MICRONUTRIENT_GOAL_FIELDS.map(([goalField]) =>
+                    csvEscape(goals[goalField]),
+                ),
                 csvEscape(formatLocalDateTime(goals.updated_at, tz)),
                 csvEscape(tz),
             ].join(","),
