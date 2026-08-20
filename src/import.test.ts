@@ -22,13 +22,8 @@ import { readFileSync } from "node:fs";
 import { dateInTz } from "./tz.js";
 import { MICRONUTRIENT_FIELDS, NUTRIENT_FIELDS } from "./nutrients.js";
 import { buildMealsCsv } from "./export.js";
-import {
-    parseCsv,
-    findColumn,
-    parseNumber,
-    findNutrientColumns,
-    readNutrientCells,
-} from "./csv.js";
+import { mapExportCsvToRows } from "./csv-export-map.js";
+import { parseCsv, findColumn } from "./csv.js";
 
 const NOW = Date.parse("2026-07-25T12:00:00Z");
 const TZ = "Europe/Kyiv";
@@ -1733,62 +1728,7 @@ function readFixture(): string {
     );
 }
 
-function mapCsvToRows(text: string): ImportRow[] {
-    const table = parseCsv(text);
-    const H = table.headers;
-    const col = (...aliases: string[]) => findColumn(H, aliases);
-    const idC = col("id");
-    const atC = col("logged_at", "date");
-    const tzC = col("timezone");
-    const typeC = col("meal_type", "meal");
-    const descC = col("description", "food");
-    const notesC = col("notes", "note");
-    const provC = col("nutrient_provenance");
-    const macroC: Record<string, number> = {
-        calories: col("calories"),
-        protein_g: col("protein_g", "protein"),
-        carbs_g: col("carbs_g", "carbohydrates_g", "carbs"),
-        fat_g: col("fat_g"),
-        fiber_g: col("fiber_g", "fiber"),
-        sugar_g: col("sugar_g", "sugar"),
-        alcohol_g: col("alcohol_g", "alcohol"),
-        caffeine_mg: col("caffeine_mg", "caffeine"),
-    };
-    // Micronutrient columns are found by resolving the HEADER, not by a fixed
-    // list, so a unit-qualified or foreign-language header maps itself. The
-    // same two csv.ts functions the import widget calls — the model fallback
-    // and the browser path must not be able to disagree about a file.
-    const microC = findNutrientColumns(H);
-
-    const cell = (r: string[], i: number) => (i < 0 ? undefined : r[i]);
-    return table.rows.map((r, n) => {
-        const out: Record<string, unknown> = {
-            source_line: table.sourceLines[n] ?? n + 2,
-        };
-        const put = (k: string, v: unknown) => {
-            if (v !== undefined && v !== "") out[k] = v;
-        };
-        put("source_id", cell(r, idC));
-        put("logged_at", cell(r, atC));
-        put("timezone", cell(r, tzC));
-        put("meal_type", cell(r, typeC));
-        put("description", cell(r, descC));
-        put("notes", cell(r, notesC));
-        put("nutrient_provenance", cell(r, provC));
-        for (const [field, i] of Object.entries(macroC)) {
-            const v = parseNumber(cell(r, i));
-            if (v !== null) out[field] = v;
-        }
-        // A blank cell is an explicit "not recorded" — null, never 0 and never
-        // dropped; an IU / %DV column is refused rather than guessed.
-        const micro = readNutrientCells(r, microC, table.decimalSeparator);
-        Object.assign(out, micro.values);
-        if (Object.keys(micro.units).length > 0)
-            out.nutrient_units = micro.units;
-        return out as unknown as ImportRow;
-    });
-}
-
+const mapCsvToRows = mapExportCsvToRows;
 test("the micronutrient fixture maps units and blanks exactly as the file states", () => {
     const text = readFixture();
     const rows = mapCsvToRows(text);
