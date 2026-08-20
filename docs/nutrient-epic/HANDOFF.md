@@ -1,37 +1,39 @@
 # Nutrient Accuracy & Micronutrient Expansion — Handoff
 
-**Branch:** `claude/nutrient-accuracy-d3e306` (git worktree; fast-forwarded
-from `claude/nutrient-accuracy-feature-985289`, which holds the same history)
-**Date:** 2026-08-19
-**Status:** Wave 1 and Wave 2 complete. Tree is GREEN, and everything is now
-COMMITTED. Next up: Agent 5 (resolution + MCP).
+**Branch:** `claude/nutrient-accuracy-d3e306` (git worktree)
+**Updated:** 2026-08-19
+**Status:** All eight builder tracks BUILT. Independent verification ran once and
+returned **FAIL** with three findings; two are fixed, one is open. The epic is
+NOT done. See "Where it actually stands".
 
-Read `docs/nutrient-epic/CONTRACT.md` FIRST. It is the canonical cross-agent
-contract — nutrient names, units, provenance shape, source precedence, file
-ownership, and the landmines. Do not re-derive any of it.
+Read `docs/nutrient-epic/CONTRACT.md` FIRST — names, units, provenance shape,
+source precedence, file ownership, landmines. Do not re-derive any of it.
+`FEATURE_REQUEST.md` (same directory) holds the per-agent acceptance criteria,
+the six E2E scenarios and the Definition of Done that CONTRACT deliberately
+does not duplicate.
 
 ---
 
-## START HERE (next session)
+## START HERE
 
 ### 1. Environment
 
-`bun` may not be installed at all on the machine you land on — the earlier
-sessions ran elsewhere. Check first:
+`bun` is **not installed on this machine** and is not on PATH. Every session
+must do this first or every command fails:
 
 ```bash
-bun --version || npm i bun --prefix /tmp/bun-host   # then PATH it
-export PATH="$HOME/.bun/bin:/tmp/bun-host/node_modules/.bin:$PATH"
+export PATH="/private/tmp/claude-501/-Users-davidparreira-Documents-Git-Personal-nutrition-mcp--claude-worktrees-nutrient-accuracy-d3e306/9081a337-d677-4dfe-9499-a8e59d6191ce/scratchpad/node_modules/.bin:$PATH"
+bun --version   # expect 1.3.14
 ```
 
-Installing into a scratch prefix keeps it out of the repo and off the user's
-global toolchain.
+If that scratchpad is gone, reinstall it somewhere outside the repo:
+`npm i bun --prefix /tmp/bun-host` then PATH `/tmp/bun-host/node_modules/.bin`.
+Do not install bun into the repo and do not add it to package.json.
 
-Working directory is the worktree, not the main checkout:
-
-```
-/Users/davidparreira/Documents/Git/nutrition-mcp/.claude/worktrees/nutrient-accuracy-feature-985289
-```
+`.env` exists, is gitignored, and holds a real `USDA_FDC_API_KEY` and
+`OFF_USER_AGENT`. Bun auto-loads it. **Never print the key or commit it.**
+There is **no** `SUPABASE_URL` / `SUPABASE_SECRET_KEY`, which is why every
+database-dependent gate below is unmet.
 
 Confirm the baseline before changing anything:
 
@@ -39,222 +41,225 @@ Confirm the baseline before changing anything:
 bun run format:check && bun run typecheck && bun test
 ```
 
-Expect: clean, clean, 870 pass. If that is not what you see, something drifted —
-diagnose before building on top of it.
+Expect clean, clean, **1013 pass** (30 files). Baseline before this epic was
+698 tests.
 
-### 2. The three documents in this directory
+### 2. Orchestration model that has been working
 
-| File                 | What it is                        | When to read                                                                                                                                                                           |
-| -------------------- | --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `FEATURE_REQUEST.md` | The original epic spec, verbatim  | Before Agents 5–9. It holds the per-agent acceptance criteria, the six E2E release scenarios, and the Definition of Done checklist that `CONTRACT.md` deliberately does not duplicate. |
-| `CONTRACT.md`        | The binding cross-agent decisions | ALWAYS, first. Names, units, provenance shape, precedence, file ownership, landmines.                                                                                                  |
-| `HANDOFF.md`         | This file — current state         | ALWAYS, second.                                                                                                                                                                        |
+You are the orchestrator. Delegate to subagents; you own git. Rules that
+earned their place:
 
-`CONTRACT.md` is a distillation, not a replacement. It settles the questions
-builders kept re-deriving; it does not contain the E2E scenarios, the goal
-field list, the CSV header aliases, or the UI hierarchy. Agents 6, 7 and 8 in
-particular need `FEATURE_REQUEST.md`.
-
-### 3. Immediate next actions, in order
-
-1. **Run `bun run validate:usda` as soon as a `USDA_FDC_API_KEY` exists.**
-   This is the one outstanding gate on Agent 4. The script CAPTURES real FDC
-   records over the synthetic fixtures in `src/fixtures/usda/` and compares
-   scaled values against independent arithmetic; the expected numbers in
-   `src/usda.test.ts` will need updating to match, and any mismatch there is
-   a finding, not a chore. Free key:
-   <https://fdc.nal.usda.gov/api-key-signup.html>.
-2. **Agent 5 (resolution + MCP).** The largest job — `src/mcp.ts` is 216 KB.
-   Use a strong model. It must implement the `SOURCE_PRECEDENCE` comparison
-   logic Agent 1 deliberately left out, and wire both providers
-   (`src/foods.ts`, `src/usda.ts`) behind it.
-3. Then Agents 6 and 7 (parallel), 8, and finally 9.
+- **One writer per file.** Give each agent an explicit file list and name the
+  files another agent currently holds. Two agents on `src/mcp.ts` (4,700
+  lines) is how a silent merge mistake happens.
+- **Subagents must not run git.** They leave changes in the working tree; you
+  inspect, run the gate, and commit selectively with `git add <paths>`.
+- **Builders do not verify their own work.** Every real bug in this epic was
+  found by an agent auditing someone else's code, and every one of them had
+  passed the builder's own suite first.
+- **A verifier that finds nothing is suspect.** Tell agents to report defects
+  rather than silently patch them, and to state what they tried when they
+  find nothing.
+- Agents have been cut off mid-run by session limits. Their partial work was
+  coherent and salvageable both times — inspect the tree and run the gate
+  before assuming anything is lost.
 
 ---
 
-## Tree state (verified, not assumed)
+## Where it actually stands
+
+### Commits on this branch (newest first)
 
 ```
-bun run format:check   PASS
-bun run typecheck      PASS  (src/ typechecks clean)
-bun test               PASS  870 / 870, 29 files
-bun run validate:off   PASS  (live, 2026-08-19)
-bun run validate:usda  NOT RUN — needs USDA_FDC_API_KEY
-```
-
-Baseline before this epic was 698 tests. Net +172.
-
-Everything is committed:
-
-```
-06b8052  feat(nutrients): canonical nutrient model, provenance and unit normalization
-01fec6d  docs(nutrient-epic): vendor the epic spec and add a START HERE guide
-7e3fd30  test(off): cover the micronutrient mapping with fixtures and live validation
+c721a15  fix(summaries): scale a micronutrient target to the range it is judged over
+cdfca38  fix(validation): stop the validators editing the evidence they validate
+9a2fb4a  feat(summaries): fold per-nutrient confidence into the coverage payload
+713fd79  feat(widgets): show micronutrients without letting a partial total look whole
+636f295  fix(import): an empty cell was becoming a real zero, and micros never arrived
+cad6774  fix(export): goals.csv was silently dropping every micronutrient goal
+b729637  fix(insights): a zero floor is not a target, and coverage counts calories
+69de2fd  feat(nutrients): coverage-aware summaries, micronutrient goals, import/export
+0ddc9df  feat(usda): read Atwater energy when a Foundation record has no 208
+bc3d350  fix(usda): validate against live FoodData Central, and stop losing to parens
+fb4f7c1  fix(nutrients): make the resolution result the only authority on a write
+b7ced28  feat(nutrients): source precedence and the expanded model through MCP
 e273f8e  feat(usda): FoodData Central provider for generic whole foods
+7e3fd30  test(off): cover the micronutrient mapping with fixtures and live validation
+06b8052  feat(nutrients): canonical nutrient model, provenance and unit normalization
 ```
 
----
+### UNCOMMITTED WORK IN THE TREE — read before you touch anything
 
-## Orchestration model
-
-The feature request specifies 10 agents. Agent 0 (orchestrator) pins the
-contract and integrates; Agents 1–8 build; Agent 9 independently verifies.
-Dependency order:
+An agent was fixing verification Finding 2 (below) when this session ended.
+Its work is in the working tree, **uncommitted and unreviewed**:
 
 ```
-1 schema ─┬─ 2 provider core ─┬─ 3 OFF ──┬─ 5 resolution+MCP ─┬─ 6 summaries ─┬─ 8 UI ─ 9 verify
-          │                   └─ 4 USDA ─┘                     └─ 7 import/exp ┘
+public/widgets/src/templates/import-meals.html
+src/csv.ts
+src/csv.test.ts
+src/widgets.test.ts
 ```
 
-Agents 1 and 2 were run in parallel by splitting what the spec called one module
-into two (`src/nutrients.ts` = model, `src/nutrient-units.ts` = conversion), so
-they never raced the same file. Keep that split.
+The tree was green (1013 pass) at the moment of handover, but that agent
+never filed a report, so nothing about its work has been reviewed. Read the
+diff, run the gate, judge it on its merits, finish or discard it. Do not
+assume it is complete.
+
+### Builder tracks
+
+| #   | Track              | State                                                                           |
+| --- | ------------------ | ------------------------------------------------------------------------------- |
+| 1   | schema + storage   | BUILT, verifier PASS                                                            |
+| 2   | units / conversion | BUILT, verifier PASS                                                            |
+| 3   | Open Food Facts    | BUILT, live-validated, verifier PASS (re-validated independently)               |
+| 4   | USDA FDC           | BUILT, live-validated, verifier PASS                                            |
+| 5   | resolution + MCP   | BUILT, PASS on log_meal/update_meal — **but see Finding 3**                     |
+| 6   | summaries + goals  | BUILT; verifier FAIL (Finding 1) → **fixed** in c721a15                         |
+| 7   | import / export    | BUILT server-side; verifier FAIL (Finding 2) → **fix in progress, uncommitted** |
+| 8   | widgets            | BUILT; rendered Finding 1's false verdict → **fixed** in c721a15                |
+| 9   | verification       | Ran once, returned FAIL. **Must run again** after the open findings close.      |
 
 ---
 
-## DONE
+## OPEN — what the next orchestrator must do
 
-### Agent 1 — schema and storage (COMPLETE, tests included)
+### 1. Finding 3 (MEDIUM-HIGH, NOT STARTED) — `bulk_import_meals` bypasses the resolution policy
 
-- `supabase/migrations/20260819120000_micronutrient_expansion.sql` — 12 nullable
-  `numeric` columns + `nutrient_provenance jsonb`, each `check (col >= 0)`.
-  **Not yet applied to any database.**
-- `src/nutrients.ts` (284 lines) — `NUTRIENT_FIELDS`, `MICRONUTRIENT_FIELDS`,
-  `ESTIMABLE_FIELDS`, `NUTRIENT_UNITS`, provenance types,
-  `parseNutrientProvenance`, `SOURCE_PRECEDENCE`, `isValidNutrientValue`,
-  `assertValidNutrientValue`.
-- `src/nutrients.test.ts` (478 lines, 44 tests).
-- `src/supabase.ts` — `Meal`/`MealInput` extended; new `normalizeMeal()` applied
-  at every read/write return point; validation before DB writes.
-- `src/supabase.test.ts` — +99 tests: full 7-case matrix (undefined/null/0/
-  positive/negative/NaN/Infinity) x 12 fields, round trips, clear-to-null,
-  provenance, and a frozen-digest regression test.
+`src/import.ts` never calls `resolveNutrientWrite` / `isForbiddenEstimate`.
+Two consequences, both verified by running `validateRow` directly:
 
-### Agent 2 — provider core and normalization (COMPLETE, tests included)
+- an **estimated micronutrient can be stored** through this path — exactly
+  what `log_meal` and `update_meal` refuse (CONTRACT §0.2);
+- the caller **chooses its own provenance**, so a model-invented value can
+  land at precedence 1 (`nutrition_label`, `authoritative`), outranking USDA
+  and a real user correction, and get a "measured" badge in the widget.
 
-- `src/nutrient-units.ts` (323 lines) — THE only module permitted to contain
-  unit/serving arithmetic. Mass ladder, `resolveServingValue` (the
-  no-double-scaling guard), `scaleNutrients` (null-preserving).
-- `src/nutrient-units.test.ts` (351 lines, 33 tests) incl. 5 hand-worked
-  real-world vectors.
-- `src/providers/types.ts` — `ServingBasis` discriminated union,
-  `ProviderNutrientValues`, `FoodNutrition`, `NutritionProvider`.
-- `src/providers/types.test.ts` (12 tests).
+`bulk_import_meals` is deliberately model-visible (`_meta.ui.visibility`
+includes `"model"` — CLAUDE.md explains why), so a model can call it directly
+with invented rows.
 
-### Agent 0 — integration (me)
+This is a genuine design tension, not just an oversight: an import is the
+user's own history, and trusting the file is what makes the export/re-import
+round trip lossless. Decide deliberately. The minimum the verifier asked for:
+refuse a provenance entry whose `source` is `model_estimate` on a
+micronutrient, and tighten the tool description so the model stops treating
+it as a general-purpose writer. Owns `src/import.ts` and the tool description
+in `src/mcp.ts`.
 
-- `validation/README.md` — documented ABSOLUTE tolerances (not percentage —
-  a percentage tolerance hides systematic unit/serving errors), credentials
-  table, evidence-record format, directory layout.
-- Fixed cross-cutting fixture breakage caused by the widened `Meal` and
-  `FoodResult` types in `export.test.ts`, `insights.test.ts`, `search.test.ts`,
-  `mcp.test.ts`, `foods.test.ts`.
+### 2. Re-run independent verification
 
----
+Findings 1, 4 and 5 are fixed and 2 is in progress, but **no verifier has
+seen any of those fixes**. Re-run a full adversarial pass once Finding 2 and
+Finding 3 close. Brief it with the three bugs already found in this epic as
+calibration — they are listed in "Bugs this epic actually found" below.
 
-### Agent 3 — Open Food Facts (COMPLETE, live-validated)
+### 3. Small, known, unfixed
 
-- `src/foods.ts` maps all 12 micronutrients, reading each product's own
-  `<key>_unit` rather than assuming grams, so an IU-reported vitamin A yields
-  `null` instead of a wrong number.
-- `src/fixtures/off/` — three REAL captured API responses (Nutella, Cheerios,
-  Chocapic) plus five synthetic edge fixtures, each carrying a `_note`.
-- `src/foods.test.ts` +11 tests: the sodium `0.0428 g -> 42.8 mg` false-zero
-  lock, explicit source zeros surviving as `0`, ambiguous units -> `null`,
-  per-serving vs per-100g basis, provenance, and the `toFoodNutrition`
-  adapter.
-- `scripts/validate-off.ts` + `validate:off`, `validation/open-food-facts/`.
-
-Verified live before writing anything: the hyphenated key spellings, the
-`<key>_unit` sibling convention, and that OFF stores every micronutrient in
-GRAMS regardless of the field's canonical unit. `validate:off` passed clean
-on 2026-08-19 across all three products.
-
-Not covered live: vitamin C (no sampled product reported it) and vitamin A
-in IU (ditto) — both are documented in `validation/open-food-facts/README.md`
-and covered deterministically by fixtures.
-
-### Agent 4 — USDA FoodData Central (BUILT, live validation OUTSTANDING)
-
-- `src/usda.ts` — `searchFoods`, `getFood`/`lookupFood`, `normalizeFdcFood`,
-  `readNutrients`, `resolveAmount`, `buildUsdaProvenance`. Cache stores the
-  RAW payload so the mapping can improve without waiting out the TTL.
-- `src/usda.test.ts` (18 tests), `src/fixtures/usda/` (5 fixtures),
-  `scripts/validate-usda.ts` + `validate:usda`, `USDA_FDC_API_KEY` in
-  `.env.example`, `validation/usda/README.md`.
-
-Response shapes came from USDA's published OpenAPI v3 spec (both the nested
-detail shape and the flat abridged search shape). Two deliberate refusals,
-both tested: energy is read ONLY from nutrient 208 with `unitName` KCAL (268
-is kJ — a 4x error that looks plausible), and vitamin A/D in IU (318, 324)
-are dropped rather than converted.
-
-**The fixtures are SYNTHETIC** — schema-shaped, placeholder numbers, each
-saying so in its own `_note`. No live FDC response has ever been checked
-against this mapping; DEMO_KEY was rate-limited and no key was available.
-This is the epic's one knowingly-unmet gate. See action 1 above.
-
-## NOT STARTED
-
-- **Agent 5** — resolution policy + MCP read/write. Owns `src/resolution.ts`
-  (new), `src/mcp.ts`, `src/mcp.test.ts`. Must implement the
-  `SOURCE_PRECEDENCE` comparison logic that Agent 1 deliberately left out.
-  This is the largest and hairiest job (`mcp.ts` is 216 KB) — use a strong model.
-- **Agent 6** — coverage-aware summaries + micronutrient goals. Owns
-  `src/insights.ts`. EXTEND the existing `PartialNutrient` / `dayCarries` /
-  `coveredSeries` primitives; do not build a parallel system. Goals need a
-  second migration for the `min_*`/`max_*` goal columns.
-- **Agent 7** — import/export. Owns `src/import.ts`, `src/export.ts`,
-  `src/csv.ts`. Note `meals.csv` must stay byte-compatible with the importer's
-  column aliases.
-- **Agent 8** — widgets. Owns `public/widgets/src/**`. Must visually distinguish
-  0 / not recorded / partial / complete / estimated / authoritative.
-- **Agent 9** — independent adversarial verification of everything.
+- `public/widgets/STYLE_GUIDE.md` (~line 763) documents the
+  `NUTRIENT_COVERAGE_ITEM` row shape and never mentions `target_days`.
+- `resolveNutrientWrite` treats `{field: undefined}` as an explicit clear.
+  No live path reaches it (`suppliedNutrients` filters `undefined` first) but
+  it is one refactor away from wiping stored values.
+- `scripts/validate-usda.ts` reads its "per 100 g (source)" column from the
+  app's own `normalizeFdcFood` output, so it validates the scaling arithmetic
+  only — the nutrient-number → field → unit mapping is compared against
+  itself. The verifier closed that gap by hand for three foods (see
+  `validation/usda/README.md`); the script is still weak.
+- OFF nutrient 539 (added sugars) has never appeared in a real payload;
+  `added_sugar_g` from USDA is mapped from the INFOODS tagname only.
 
 ---
 
-## LANDMINES (each already caused or nearly caused a real bug)
+## BLOCKED — needs a database, and nothing else will unblock it
+
+**All six E2E release scenarios, the clean-database migration test, and Agent
+1's real round-trip gate are formally UNMET**, and no amount of code work
+changes that. Every one of them writes a meal and reads it back.
+
+Two migrations have **never been applied to any database**:
+
+```
+supabase/migrations/20260819120000_micronutrient_expansion.sql   (12 columns + nutrient_provenance jsonb)
+supabase/migrations/20260819130000_micronutrient_goals.sql       (10 min_/max_ goal columns)
+```
+
+To unblock, put a **test** Supabase project (never production) in `.env`:
+
+```
+SUPABASE_URL=https://<project>.supabase.co
+SUPABASE_SECRET_KEY=<service key>
+```
+
+apply both migrations, then work through `validation/e2e/README.md`, which
+already lists the six scenarios and the evidence format. Do not record any of
+them as passed on the strength of unit tests — they exist precisely because
+unit tests cannot see a `numeric` column's precision or a jsonb round trip.
+
+What IS proven without a database, and re-verified independently today:
+
+```bash
+bun run validate:off     # 3 real barcodes, live, every value hand-derived
+bun run validate:usda    # 5 real FDC records, live, scaling checked outside the scaler
+```
+
+Both pass. `validate:usda --capture` refreshes fixtures; without the flag it
+leaves them alone (it used to rewrite the evidence it was validating).
+
+---
+
+## Bugs this epic actually found — use these to calibrate a verifier
+
+Each passed the builder's own test suite first. This is the calibre of defect
+to hunt for:
+
+1. **The resolution policy was decorative.** The write was built as
+   `{ ...args, ...resolved }`, so a REFUSED value was merely absent from the
+   overlay and the caller's original survived underneath it. A meal stored an
+   estimated 900 mg sodium and rendered "Sodium: 900 mg" five lines above
+   "(Not stored: sodium_mg)". On update it stored a rejected number while the
+   provenance still said `open_food_facts / authoritative` — a model-invented
+   figure labelled authoritative, which is worse than either half alone.
+2. **`z.coerce.number().parse("")` is `0`.** `Number("")` is 0 and Zod coerces
+   before validating, so a blank CSV cell became a confident zero — on fields
+   that had shipped months earlier.
+3. **A stored goal of `0` on a MINIMUM** leaked into structuredContent as a
+   real target the text output denied existed, and every progress ratio
+   divides by it.
+4. **A range total judged against a daily target** (Finding 1): three ordinary
+   days read as "over limit"; on a floor, a third of the target read as "met".
+5. **The import widget dropped every micronutrient** (Finding 2) while
+   `src/csv.ts` had a complete tested resolver inlined into that very widget,
+   referenced only from a test file.
+
+The pattern worth internalising: **the response text was reassuring while the
+row was wrong.** Assert on what reached storage, not on what the tool said.
+
+---
+
+## LANDMINES (unchanged, still true)
 
 1. **The frozen idempotency digest.** `mealIdempotencyKey` (`src/supabase.ts`)
    and `rowContentDigest` (`src/import.ts`) hash a POSITIONAL, deliberately
-   INCOMPLETE field array. **Never add a nutrient field to either.** Doing so
-   changes the derived key of every future write and orphans every stored
-   `auto:` key. Agent 1 respected this and there is now a regression test
-   locking it.
-2. **`null` != `0`, everywhere.** Missing must never become zero at any layer.
-   Assert null-stays-null SEPARATELY from numeric tolerance — "within 0.1 of
-   zero" must never pass for an unrecorded nutrient.
-3. **Widening a shared type breaks distant fixtures.** Both `Meal` and
-   `FoodResult` did this. Patch the shared factory, not each call site — and let
-   `bun run typecheck` adjudicate, because a pattern match will also hit
-   expected-CSV-row literals that only look like the type.
-4. **Cache backfill.** Any newly added field must be explicitly backfilled to
+   INCOMPLETE field array. **Never add a nutrient field to either.** Both
+   carry warning comments and regression tests.
+2. **`null` != `0`, everywhere.** Assert null-ness separately from numeric
+   tolerance — "within 0.1 of zero" must never pass for an unrecorded
+   nutrient.
+3. **Widening a shared type breaks distant fixtures.** Patch the shared
+   factory, not each call site, and let `bun run typecheck` adjudicate.
+4. **Cache backfill.** A newly added field must be explicitly backfilled to
    `null` in `getCachedFood`, or cached rows deserialize `undefined` and fail
    `.nullable()` structuredContent validation.
-5. **Vitamin A IU cannot be converted to µg RAE** (retinol vs β-carotene differ
-   ~12x). Agent 2 deliberately did not implement it. A source reporting IU must
-   leave `vitamin_a_mcg` null.
-6. **USDA energy appears as both kcal and kJ** under different nutrient numbers.
-   Never mistake one for the other.
-
----
-
-## Open decisions for the next session
-
-1. **`assertValidNutrientValue` scope.** Agent 1 wired it for the 12 new fields
-    - `caffeine_mg` only, NOT for calories/protein/carbs/fat/fiber/sugar/alcohol,
-      which are Zod-guarded at the `mcp.ts` boundary but unguarded if `supabase.ts`
-      is called directly (e.g. from `import.ts`). Decide whether to close that gap.
-2. **`updateMeal.nutrient_provenance` is full-replace, not per-key merge.**
-   Consistent with every other field, documented and tested. Confirm that is
-   what Agent 5 wants before building resolution on top of it.
-3. ~~Nothing is committed.~~ Resolved — all four commits are on the branch.
-4. **Live validation is partially done.** `validate:off` has passed against
-   real products. Still outstanding: `USDA_FDC_API_KEY` (Agent 4's gate),
-   and `SUPABASE_URL` / `SUPABASE_SECRET_KEY` pointing at a TEST project —
-   the migration `20260819120000_micronutrient_expansion.sql` has still never
-   been applied to any database, so Agent 1's round-trip gate and every E2E
-   scenario remain formally unmet.
-5. Agent 4's `resolveAmount` is the only scaling entry point callers should
-   use. If Agent 5 scales again on top of it, that is the double-scaling bug
-   the contract forbids.
+5. **Vitamin A/D in IU cannot be converted** to µg RAE / µg. Sources
+   reporting IU must leave the field null. Both OFF and USDA carry IU entries
+   beside the µg ones — this is real, not theoretical.
+6. **USDA energy** appears as 208 (kcal), 268 (kJ) and 957/958 (Atwater
+   kcal). Order is 208 → 957 → 958, and the unit is checked on every
+   candidate. 4 of 5 validated records carry the kJ entry too.
+7. **api.data.gov intermittently 400s any URL containing a parenthesis** —
+   `%28` fails as often as a literal `(`. USDA search therefore uses POST
+   with a JSON body. A test asserts no parenthesis reaches the URL.
+8. **`.nullable()` in Zod = REQUIRED** with `anyOf[type,null]`. A missing key
+   makes a widget render nothing, silently.
+9. **Widgets must re-report height** via `ui/notifications/size-changed` after
+   every re-render, including a toggle, or the host clips them.
