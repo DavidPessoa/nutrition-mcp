@@ -667,6 +667,8 @@ test("nutrientCoverage reports a partial total as partial", () => {
         known_total: 1300,
         known_meals: 2,
         total_meals: 3,
+        known_calories: 1000,
+        total_calories: 1500,
         coverage: 2 / 3,
         complete: false,
     });
@@ -693,9 +695,41 @@ test("nutrientCoverage: 100% coverage is complete", () => {
         known_total: 500,
         known_meals: 2,
         total_meals: 2,
+        known_calories: 1000,
+        total_calories: 1000,
         coverage: 1,
         complete: true,
     });
+});
+
+// "1 of 3 meals" is the same sentence whether the unrecorded meal was a black
+// coffee or the day's dinner, and those are not the same claim about how far
+// off `known_total` is. The calorie pair is what lets a consumer tell them
+// apart, so it has to track the SAME meals the count does.
+test("nutrientCoverage weighs coverage by calories as well as by meal count", () => {
+    const meals = [
+        meal("2026-08-01T08:00:00Z", { calories: 100, iron_mg: 2 }),
+        meal("2026-08-01T19:00:00Z", { calories: 900 }), // the big one is unknown
+    ];
+    const cov = nutrientCoverage(meals, "iron_mg");
+    expect(cov.known_meals).toBe(1);
+    expect(cov.total_meals).toBe(2);
+    // Half the meals, a tenth of the calories: the total is nearly worthless.
+    expect(cov.coverage).toBe(0.5);
+    expect(cov.known_calories).toBe(100);
+    expect(cov.total_calories).toBe(1000);
+    // An explicitly recorded 0 is a KNOWN meal here too — its calories count
+    // toward known_calories, or a fully measured day reads as partial.
+    const zeroed = nutrientCoverage(
+        [
+            meal("2026-08-01T08:00:00Z", { calories: 100, iron_mg: 0 }),
+            meal("2026-08-01T19:00:00Z", { calories: 900, iron_mg: 0 }),
+        ],
+        "iron_mg",
+    );
+    expect(zeroed.known_calories).toBe(1000);
+    expect(zeroed.total_calories).toBe(1000);
+    expect(zeroed.complete).toBe(true);
 });
 
 // THE SUBTLE ONE. A source that says "0 g trans fat" has MEASURED it. Treating
@@ -755,6 +789,8 @@ test("nutrientCoverage on no meals at all is not 'complete'", () => {
         known_total: null,
         known_meals: 0,
         total_meals: 0,
+        known_calories: 0,
+        total_calories: 0,
         coverage: 0,
         complete: false,
     });

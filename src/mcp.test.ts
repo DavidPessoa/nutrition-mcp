@@ -4267,6 +4267,23 @@ describe("micronutrientProgressLines", () => {
         );
     });
 
+    // A floor and a ceiling read OPPOSITELY on partial data: against a floor
+    // the unknown meal can only help ("2500 mg to go" overstates the gap),
+    // against a ceiling it can only hurt. Neither sentence may stand without
+    // the qualifier, and the ≥ has to survive both wordings.
+    test("a partial total is qualified against a floor too, not just a ceiling", () => {
+        const line = microLine(
+            micronutrientProgressLines(
+                [meal({ id: "a", potassium_mg: 1000 }), meal({ id: "b" })],
+                goals({ min_potassium_mg: 3500 }),
+            ),
+            "Potassium",
+        );
+        expect(line).toBe(
+            "Potassium: ≥1000 / 3500 mg (29%, 2500 mg to go) — recorded meals only, 1 of 2; the true total is higher",
+        );
+    });
+
     test("missing intake with a target says 'not recorded', never 0", () => {
         const lines = micronutrientProgressLines(
             [meal({ id: "a" })],
@@ -4336,6 +4353,8 @@ describe("coverageNote", () => {
                 known_total: 10,
                 known_meals: 2,
                 total_meals: 2,
+                known_calories: 800,
+                total_calories: 800,
                 coverage: 1,
                 complete: true,
             }),
@@ -4345,6 +4364,8 @@ describe("coverageNote", () => {
                 known_total: null,
                 known_meals: 0,
                 total_meals: 2,
+                known_calories: 0,
+                total_calories: 800,
                 coverage: 0,
                 complete: false,
             }),
@@ -4368,6 +4389,8 @@ describe("nutrientCoveragePayload", () => {
             known_total: 1300,
             known_meals: 2,
             total_meals: 3,
+            known_calories: 1400,
+            total_calories: 2100,
             coverage: 0.67,
             complete: false,
             target: 2300,
@@ -4385,6 +4408,50 @@ describe("nutrientCoveragePayload", () => {
         expect(k?.known_meals).toBe(0);
         expect(k?.complete).toBe(false);
         expect(k?.direction).toBe("minimum");
+    });
+
+    // The text output treats a 0 FLOOR as "unset" (hasActiveTarget), so the
+    // payload must too: emitting `target: 0` for a minimum handed the widget a
+    // target the text flatly denies exists, and one every ratio divides by. A
+    // 0 CEILING is the opposite case and stays a real target in both.
+    test("a zero minimum is not a target here either, but a zero maximum is", () => {
+        expect(
+            nutrientCoveragePayload(
+                [meal({ id: "a" })],
+                goals({ min_calcium_mg: 0 }),
+            ),
+        ).toEqual([]);
+        expect(
+            micronutrientProgressLines(
+                [meal({ id: "a" })],
+                goals({ min_calcium_mg: 0 }),
+            ),
+        ).toEqual([]);
+
+        const ceiling = nutrientCoveragePayload(
+            [meal({ id: "a" })],
+            goals({ max_sodium_mg: 0 }),
+        );
+        expect(ceiling.find((r) => r.nutrient === "sodium_mg")?.target).toBe(0);
+    });
+
+    test("coverage is reported by calories as well as by meal count", () => {
+        // Same "1 of 2" either way; the calorie pair is what says whether the
+        // unrecorded meal was a coffee or the dinner.
+        const rows = nutrientCoveragePayload(
+            [
+                meal({ id: "a", calories: 50, iron_mg: 1 }),
+                meal({ id: "b", calories: 950 }),
+            ],
+            null,
+        );
+        expect(rows.find((r) => r.nutrient === "iron_mg")).toMatchObject({
+            known_meals: 1,
+            total_meals: 2,
+            coverage: 0.5,
+            known_calories: 50,
+            total_calories: 1000,
+        });
     });
 
     test("nutrients with neither data nor a target are absent entirely", () => {
@@ -4547,6 +4614,8 @@ describe("get_goal_progress surfaces coverage", () => {
                 known_total: 1300,
                 known_meals: 2,
                 total_meals: 3,
+                known_calories: 1400,
+                total_calories: 2100,
                 coverage: 0.67,
                 complete: false,
                 target: 2300,

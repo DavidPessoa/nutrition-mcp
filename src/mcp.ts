@@ -1721,6 +1721,13 @@ export const NUTRIENT_COVERAGE_ITEM = z.object({
     known_total: z.number().nullable(),
     known_meals: z.number(),
     total_meals: z.number(),
+    /** The same question weighed by calories: how much of the day's intake
+     * the recorded meals account for. "2 of 3 meals" says nothing about
+     * whether the unrecorded one was a dinner or a black coffee, and that is
+     * the difference between a total that is nearly right and one that is
+     * half the story. */
+    known_calories: z.number(),
+    total_calories: z.number(),
     /** known_meals / total_meals, 0..1, rounded to two places. */
     coverage: z.number(),
     /** True only when every meal recorded a value. False means `known_total`
@@ -1738,7 +1745,13 @@ export function nutrientCoveragePayload(
     const rows: Array<z.infer<typeof NUTRIENT_COVERAGE_ITEM>> = [];
     for (const g of MICRONUTRIENT_SPECS) {
         const cov = nutrientCoverage(meals, g.field);
-        const target = g.column == null ? null : (goals?.[g.column] ?? null);
+        const stored = g.column == null ? null : (goals?.[g.column] ?? null);
+        // hasActiveTarget, not `!= null`: a stored 0 on a FLOOR is "unset"
+        // everywhere else in this file (a 0 mg calcium target is meaningless),
+        // and emitting it here as `target: 0` handed a widget a target the
+        // text output flatly denies exists — and one every progress ratio
+        // divides by. A 0 CEILING stays a real target, as it does in the text.
+        const target = hasActiveTarget(stored, g.direction) ? stored : null;
         if (cov.known_meals === 0 && target == null) continue;
         rows.push({
             nutrient: g.field,
@@ -1749,6 +1762,8 @@ export function nutrientCoveragePayload(
                     : Math.round(cov.known_total * 10) / 10,
             known_meals: cov.known_meals,
             total_meals: cov.total_meals,
+            known_calories: cov.known_calories,
+            total_calories: cov.total_calories,
             coverage: Math.round(cov.coverage * 100) / 100,
             complete: cov.complete,
             target,

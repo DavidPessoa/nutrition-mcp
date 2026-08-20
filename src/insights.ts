@@ -165,6 +165,19 @@ export interface NutrientCoverage {
     known_total: number | null;
     known_meals: number;
     total_meals: number;
+    /** The same coverage question weighed by CALORIES rather than by meal
+     * count, because "2 of 3 meals" hides which meals: a missing 900 kcal
+     * dinner and a missing 5 kcal black coffee are both "1 of 3" and are not
+     * remotely the same claim about how wrong `known_total` is.
+     *
+     * Calories are `?? 0` here, unlike every nutrient this module guards:
+     * calories predate the null-means-unknown rule, every other read path
+     * already sums them that way (see buildDailyBuckets), and a second
+     * convention for the same column would put two different day totals on
+     * screen. These two are a WEIGHT on the coverage figure, not an intake
+     * claim, so the older convention is the harmless one to keep. */
+    known_calories: number;
+    total_calories: number;
     /** known_meals / total_meals, 0 when there are no meals at all. */
     coverage: number;
     /** True only when every meal recorded a value — i.e. the total is the
@@ -178,17 +191,23 @@ export function nutrientCoverage(
 ): NutrientCoverage {
     let known = 0;
     let total: number | null = null;
+    let knownCalories = 0;
+    let totalCalories = 0;
     for (const m of meals) {
+        totalCalories += m.calories ?? 0;
         const v = m[nutrient];
         // `!= null` and not a truthiness check: a recorded 0 is a measurement.
         if (v == null) continue;
         known++;
+        knownCalories += m.calories ?? 0;
         total = (total ?? 0) + v;
     }
     return {
         known_total: total,
         known_meals: known,
         total_meals: meals.length,
+        known_calories: knownCalories,
+        total_calories: totalCalories,
         coverage: meals.length > 0 ? known / meals.length : 0,
         complete: meals.length > 0 && known === meals.length,
     };
