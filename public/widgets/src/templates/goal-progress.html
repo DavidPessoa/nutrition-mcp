@@ -31,6 +31,8 @@
 
             /*@include shared/macros.css@*/
 
+            /*@include shared/micros.css@*/
+
             /* Weight — a standing metric (latest overall vs target), not a
                per-day total, so it sits below the strip rather than in it. The
                row reuses the strip's own idiom (.wrow / .wlab / .dot / .wnum /
@@ -127,6 +129,105 @@
                     caffeine_mg: 470,
                     water_ml: 2100,
                 },
+                // Per-micronutrient coverage for THIS day, one row per
+                // nutrient the user has data or a target for (see
+                // nutrientCoveragePayload in src/mcp.ts). Deliberately shows
+                // every state the section has to keep apart: complete,
+                // partial, a measured zero, a target with nothing recorded
+                // against it, and rows with no target at all.
+                nutrient_coverage: [
+                    {
+                        // Partial: recorded on 3 of the day's 5 meals, so the
+                        // total is a floor and the "under limit" verdict is
+                        // NOT allowed to go green.
+                        nutrient: "sodium_mg",
+                        unit: "mg",
+                        known_total: 1780,
+                        known_meals: 3,
+                        total_meals: 5,
+                        known_calories: 1320,
+                        total_calories: 1990,
+                        coverage: 0.6,
+                        complete: false,
+                        target: 2300,
+                        direction: "maximum",
+                    },
+                    {
+                        // Over its limit on partial coverage — a conclusion
+                        // the missing meals cannot undo, so it IS coloured.
+                        nutrient: "saturated_fat_g",
+                        unit: "g",
+                        known_total: 24.5,
+                        known_meals: 4,
+                        total_meals: 5,
+                        known_calories: 1980,
+                        total_calories: 1990,
+                        coverage: 0.8,
+                        complete: false,
+                        target: 20,
+                        direction: "maximum",
+                    },
+                    {
+                        // Complete, and the floor is met.
+                        nutrient: "potassium_mg",
+                        unit: "mg",
+                        known_total: 3620,
+                        known_meals: 5,
+                        total_meals: 5,
+                        known_calories: 1990,
+                        total_calories: 1990,
+                        coverage: 1,
+                        complete: true,
+                        target: 3500,
+                        direction: "minimum",
+                    },
+                    {
+                        // A MEASURED zero: every meal reported none. Reads
+                        // "0" with "measured 0" beside it — the state the
+                        // row below must not be confused with.
+                        nutrient: "trans_fat_g",
+                        unit: "g",
+                        known_total: 0,
+                        known_meals: 5,
+                        total_meals: 5,
+                        known_calories: 1990,
+                        total_calories: 1990,
+                        coverage: 1,
+                        complete: true,
+                        target: null,
+                        direction: null,
+                    },
+                    {
+                        // NOT RECORDED: a target is set and nothing was
+                        // logged against it. An em dash, never "0 mg".
+                        nutrient: "iron_mg",
+                        unit: "mg",
+                        known_total: null,
+                        known_meals: 0,
+                        total_meals: 5,
+                        known_calories: 0,
+                        total_calories: 1990,
+                        coverage: 0,
+                        complete: false,
+                        target: 18,
+                        direction: "minimum",
+                    },
+                    {
+                        // Complete but short of its floor — dim, not red:
+                        // missing a target is not an error state.
+                        nutrient: "vitamin_c_mg",
+                        unit: "mg",
+                        known_total: 42.5,
+                        known_meals: 5,
+                        total_meals: 5,
+                        known_calories: 1990,
+                        total_calories: 1990,
+                        coverage: 1,
+                        complete: true,
+                        target: 90,
+                        direction: "minimum",
+                    },
+                ],
                 weight: {
                     current: 78.4,
                     target: 75,
@@ -224,6 +325,8 @@
             }
 
             /*@include shared/macros.js@*/
+
+            /*@include shared/micros.js@*/
 
             const MONTHS = [
                 "Jan",
@@ -394,6 +497,7 @@
               <div class="pmeta">${meta}</div>
             </div>
             ${panel}
+            ${microSection(data.nutrient_coverage)}
             ${weightRow(w)}
           </div>`;
             }

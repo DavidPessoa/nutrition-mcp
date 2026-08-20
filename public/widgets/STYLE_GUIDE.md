@@ -21,8 +21,9 @@ duplicated: it is assembled from partials at server startup (`src/widgets.ts`,
 warmed in `src/index.ts`). Nothing generated is committed.
 
 - **Sources** live in `public/widgets/src/`: shared partials in `shared/`
-  (`tokens.css`, `base.css`, `ring.css`, `macros.css`, `trend.css`, `seg.css`,
-  `form.css`, `table.css`, `macros.js`, `bridge.js`) and one template per widget
+  (`tokens.css`, `base.css`, `ring.css`, `macros.css`, `micros.css`, `trend.css`,
+  `seg.css`, `form.css`, `table.css`, `macros.js`, `micros.js`, `bridge.js`) and one
+  template per widget
   in `templates/`.
 - **Include marker** — a partial is inlined with a comment that is valid CSS _and_
   JS, so a template still parses on its own:
@@ -735,6 +736,82 @@ series would make four breached limit bars indistinguishable from each other.
 
 To restyle any of this, edit the shared partials once — every widget picks it up on
 next assembly.
+
+## 4b. Component: the micronutrient section (`microSection` — `shared/micros.*`)
+
+The twelve micronutrients, as one collapsible section a widget drops **below**
+the macro strip inside the same `.panel` — calories and macros first,
+micronutrients grouped underneath. `nutrition-summary` and `goal-progress` use
+it; they are the two tools whose payload carries `nutrient_coverage`.
+
+```js
+${macroPanel(...)}
+${microSection(data.nutrient_coverage)}
+```
+
+`microSection(rows, opts)` returns `""` when `rows` is empty or absent, so a
+user with no micronutrient data sees the widget exactly as it was before this
+existed. `opts` is `{ openUpTo?: number (default 5), title?: string }` — a list
+longer than `openUpTo` starts collapsed, and the summary line still names what
+is inside (`7 tracked · 2 partial · 1 not recorded · 1 over limit`, the last in
+`--over`).
+
+### It is data-driven, not a MACROS entry
+
+The strip lays out by `role` over a `vals` object of day totals. A
+micronutrient is not in `TOTALS_ITEM` at all: it arrives as its own array of
+`NUTRIENT_COVERAGE_ITEM` rows (`nutrientCoveragePayload` in `src/mcp.ts`), each
+carrying its own coverage denominator. So the section renders one row per
+payload row, with **no key list anywhere in it** — even the labels are derived
+from the field names (`vitamin_a_mcg` → "Vitamin A"). A thirteenth
+micronutrient added server-side appears here with no widget change.
+
+### The six states, and how each looks
+
+| state             | figure          | bar                    | tag                                                     |
+| ----------------- | --------------- | ---------------------- | ------------------------------------------------------- |
+| **not recorded**  | `—` (em dash)   | empty, **dashed** rail | `not recorded`, dashed pill                             |
+| **a measured 0**  | `0` full weight | solid rail             | `measured 0 · all N meals`                              |
+| **partial**       | `≥1,780`        | **hatched** fill       | `recorded meals only · 3 of 5 · 66% of calories`, amber |
+| **complete**      | `3,620`         | solid fill             | `all N meals`                                           |
+| **estimated**     | —               | —                      | `~ estimated` badge in `--warn`                         |
+| **authoritative** | —               | —                      | `✓ measured` badge in `--accent`                        |
+
+The zero/not-recorded pair is the one the epic exists for: they must never be
+the same picture, which is why the unrecorded row gets a different **glyph
+class** and a different **rail style**, not merely a dimmer number. The last
+two come from an optional `confidence` on the row; when the payload does not
+state one, **no badge is rendered** rather than a guessed one.
+
+### The colour rule: a conclusion must survive the missing meals
+
+`known_total` is a FLOOR on the real intake. So `microVerdict()` may colour a
+verdict only when growing that total cannot make it false:
+
+- ceiling **exceeded** → still exceeded → `--over`, at any coverage;
+- floor **reached** → still reached → `--accent`, at any coverage;
+- **under** a ceiling, or **short** of a floor, on partial coverage → neutral
+  grey, and the sentence gains "so far".
+
+That is what makes a green "under your sodium limit" structurally unreachable
+on incomplete coverage — `tone-ok` on a ceiling requires `complete` — rather
+than a styling choice someone can undo. `src/widgets.test.ts` pins it.
+
+### No new series colours
+
+The strip's convention (keep the series colour, flag state on the figure)
+assumes each metric has a hue distinguishing it from three neighbours. Twelve
+micronutrients have no such hues and inventing twelve would produce exactly the
+wall this section is meant to avoid — so a micro row's one colour **is** its
+state, per the rule above.
+
+### `<details>`, not a hand-rolled toggle
+
+Keyboard-accessible and exposed to assistive tech for free, and it needs no JS
+under the deny-all CSP. Opening it changes the document height, which the
+bridge's `ResizeObserver` already re-reports as `ui/notifications/size-changed`
+— so the host grows the iframe instead of clipping the list. Verified in the
+harness: 392 → 523 px when the section expands.
 
 ## 5. Component: hand-built SVG chart (`.chart`)
 
