@@ -1,10 +1,12 @@
 # Nutrient Accuracy & Micronutrient Expansion — Handoff
 
 **Branch:** `claude/nutrient-accuracy-d3e306` (git worktree)
-**Updated:** 2026-08-19
+**Updated:** 2026-08-20
 **Status:** All eight builder tracks BUILT. Independent verification ran once and
-returned **FAIL** with three findings; two are fixed, one is open. The epic is
-NOT done. See "Where it actually stands".
+returned **FAIL** with three findings; **all three are now fixed, none has been
+re-verified**. The epic is NOT done: the one thing still owed on the code is a
+second independent verification pass, and every database-dependent gate remains
+BLOCKED. See "Where it actually stands".
 
 **Working tree is CLEAN.** Everything is committed; nothing is half-finished.
 
@@ -43,7 +45,7 @@ Confirm the baseline before changing anything:
 bun run format:check && bun run typecheck && bun test
 ```
 
-Expect clean, clean, **1013 pass** (30 files). Baseline before this epic was
+Expect clean, clean, **1015 pass** (30 files). Baseline before this epic was
 698 tests.
 
 ### 2. Orchestration model that has been working
@@ -73,6 +75,7 @@ earned their place:
 ### Commits on this branch (newest first)
 
 ```
+2327c36  fix(import): the importer refused nothing, and a row chose its own provenance
 a161298  fix(import): the widget was dropping every micronutrient it could already read
 2f592fc  docs(nutrient-epic): hand over with the verification failure stated plainly
 c721a15  fix(summaries): scale a micronutrient target to the range it is judged over
@@ -100,7 +103,7 @@ e273f8e  feat(usda): FoodData Central provider for generic whole foods
 | 2   | units / conversion | BUILT, verifier PASS                                                       |
 | 3   | Open Food Facts    | BUILT, live-validated, verifier PASS (re-validated independently)          |
 | 4   | USDA FDC           | BUILT, live-validated, verifier PASS                                       |
-| 5   | resolution + MCP   | BUILT, PASS on log_meal/update_meal — **but see Finding 3**                |
+| 5   | resolution + MCP   | BUILT, PASS on log_meal/update_meal; Finding 3 → **fixed** in 2327c36      |
 | 6   | summaries + goals  | BUILT; verifier FAIL (Finding 1) → **fixed** in c721a15                    |
 | 7   | import / export    | BUILT; verifier FAIL (Finding 2) → **fixed** in a161298                    |
 | 8   | widgets            | BUILT; rendered Finding 1's false verdict → **fixed** in c721a15           |
@@ -110,32 +113,38 @@ e273f8e  feat(usda): FoodData Central provider for generic whole foods
 
 ## OPEN — what the next orchestrator must do
 
-### 1. Finding 3 (MEDIUM-HIGH, NOT STARTED) — `bulk_import_meals` bypasses the resolution policy
+### 1. Finding 3 — CLOSED in 2327c36, and the residual is deliberate
 
-`src/import.ts` never calls `resolveNutrientWrite` / `isForbiddenEstimate`.
-Two consequences, both verified by running `validateRow` directly:
+`bulk_import_meals` consulted no part of the resolution policy. It now refuses
+the one thing CONTRACT §0.2 refuses everywhere else: a micronutrient whose row
+declares it `model_estimate` is **not stored** — absent rather than null, so the
+column is untouched rather than claimed to be a measured zero — and the count is
+reported in the batch warnings instead of vanishing. A genuine export loses
+nothing, because `log_meal` refuses to store such a value in the first place, so
+no exported micronutrient can carry that source.
 
-- an **estimated micronutrient can be stored** through this path — exactly
-  what `log_meal` and `update_meal` refuse (CONTRACT §0.2);
-- the caller **chooses its own provenance**, so a model-invented value can
-  land at precedence 1 (`nutrition_label`, `authoritative`), outranking USDA
-  and a real user correction, and get a "measured" badge in the widget.
+**The other half was left open on purpose.** A row claiming a source that
+outranks `import` (`nutrition_label`, `usda_fdc`) is still honoured, so a model
+that states a source it knows to be false can still land an invented value at
+precedence 1. Clamping it was tried and reverted within the hour: it breaks the
+export/re-import round trip, which is the whole reason the importer trusts the
+file, and it failed the round-trip test immediately (a synthetic non-uuid meal
+id made every gate on `source_id` misfire — the gate was also coupling two
+unrelated things). Nothing in a row distinguishes a real restore from an
+invented claim; there is no signal to gate on. The boundary is therefore carried
+by the tool description, which now says outright that this is a restore path,
+that every value must be transcribed from the file, that a micronutrient must
+never be estimated here, and that `nutrient_provenance` must never be composed —
+`log_meal` is the honest path and it refuses.
 
-`bulk_import_meals` is deliberately model-visible (`_meta.ui.visibility`
-includes `"model"` — CLAUDE.md explains why), so a model can call it directly
-with invented rows.
-
-This is a genuine design tension, not just an oversight: an import is the
-user's own history, and trusting the file is what makes the export/re-import
-round trip lossless. Decide deliberately. The minimum the verifier asked for:
-refuse a provenance entry whose `source` is `model_estimate` on a
-micronutrient, and tighten the tool description so the model stops treating
-it as a general-purpose writer. Owns `src/import.ts` and the tool description
-in `src/mcp.ts`.
+If a future verifier wants that hole closed anyway, the only shapes that do not
+cost the round trip are a per-account "imports may not claim authoritative
+sources" preference, or a distinct tool for restores that the model cannot see.
+Both are larger than this epic.
 
 ### 2. Re-run independent verification
 
-Findings 1, 2, 4 and 5 are fixed, but **no verifier has seen any of those
+Findings 1, 2 and 3 are fixed, but **no verifier has seen any of those
 fixes** — they were written by the same builders whose work failed. Re-run a
 full adversarial pass once Finding 3 closes. Attack the range-scaling shape
 (`target_days`) and the widget's new browser-side CSV mapper hardest; both
@@ -144,8 +153,6 @@ calibration — they are listed in "Bugs this epic actually found" below.
 
 ### 3. Small, known, unfixed
 
-- `public/widgets/STYLE_GUIDE.md` (~line 763) documents the
-  `NUTRIENT_COVERAGE_ITEM` row shape and never mentions `target_days`.
 - The import widget's height re-report after its now-wider preview table was
   NOT verified in a real host iframe — `bun run harness`'s sandboxed iframe is
   blocked by a browser client policy in this environment. The sizing path

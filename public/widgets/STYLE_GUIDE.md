@@ -766,6 +766,13 @@ payload row, with **no key list anywhere in it** — even the labels are derived
 from the field names (`vitamin_a_mcg` → "Vitamin A"). A thirteenth
 micronutrient added server-side appears here with no widget change.
 
+`target` on such a row is **already scaled to the range**: the server sends the
+daily goal times `target_days` (the number of days the summary covers), so
+`known_total` vs `target` is a like-for-like comparison at any range length and
+the widget must never re-scale it. `target_days` is used for one thing only —
+the caption says "over N days" when N > 1, because a 3-day 6,900 mg ceiling
+reads as an absurdly generous daily one otherwise.
+
 ### The six states, and how each looks
 
 | state             | figure          | bar                    | tag                                                     |
