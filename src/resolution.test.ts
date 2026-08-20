@@ -245,15 +245,26 @@ describe("clearing and untouched fields", () => {
         expect(resolved.provenance!.sodium_mg!.source).toBe("open_food_facts");
     });
 
-    test("undefined is not the same as null", () => {
+    test("undefined is absent, not a clear", () => {
         const resolved = resolveNutrientWrite(prior, {
             values: { sodium_mg: undefined },
             source: "user_provided",
         });
-        // Present-but-undefined is treated as an explicit clear, since the
-        // key was supplied. This is why callers must build the incoming
-        // values object from fields the caller actually sent.
-        expect(resolved.values.sodium_mg).toBeNull();
+        // `{sodium_mg: undefined}` reads as present to `in` but means nothing
+        // was supplied — spreading an object with optional keys produces it
+        // routinely. It must leave the stored value and its attribution
+        // alone; only a real null clears (CONTRACT §0.1). Every live call
+        // site filters undefined out first, so this is the guard on the next
+        // one rather than a behaviour anything depends on today.
+        expect("sodium_mg" in resolved.values).toBe(false);
+        expect(resolved.provenance!.sodium_mg!.source).toBe("open_food_facts");
+        // A real null still clears, value and attribution together.
+        const cleared = resolveNutrientWrite(prior, {
+            values: { sodium_mg: null },
+            source: "user_provided",
+        });
+        expect(cleared.values.sodium_mg).toBeNull();
+        expect(cleared.provenance?.sodium_mg).toBeUndefined();
     });
 
     test("a fresh insert with nothing attributable yields null provenance", () => {

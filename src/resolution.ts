@@ -118,6 +118,14 @@ export function resolveNutrientWrite(
 
     for (const field of NUTRIENT_FIELDS) {
         if (!(field in incoming.values)) continue;
+        // `{sodium_mg: undefined}` reads as present to `in` but means nothing
+        // was supplied — a spread of an object with optional keys produces it
+        // routinely. Treated as ABSENT, not as the explicit null that clears a
+        // stored value: CONTRACT §0.1 makes that distinction load-bearing, and
+        // only a real `null` is a caller saying "this is not known". Every
+        // current call site filters undefined out before it gets here; this is
+        // the guard that keeps the next one from wiping stored nutrients.
+        if (incoming.values[field] === undefined) continue;
         const value = incoming.values[field] ?? null;
 
         // Clearing is always the caller's prerogative — an explicit null is a
