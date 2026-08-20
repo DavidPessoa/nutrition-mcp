@@ -35,9 +35,11 @@ import {
     MICRONUTRIENT_FIELDS,
     NUTRIENT_UNITS,
     parseNutrientProvenance,
+    type NutrientField,
     type NutrientProvenance,
 } from "./nutrients.js";
 import { convertNutrientValue } from "./nutrient-units.js";
+import { isForbiddenEstimate } from "./resolution.js";
 
 export type MealType = MealInput["meal_type"];
 
@@ -221,6 +223,10 @@ export interface ResolvedRow {
      *  be read, so the numbers were kept and the provenance discarded. Drives
      *  an aggregate warning; not part of the tool's output schema. */
     provenance_dropped: boolean;
+    /** Internal: micronutrients this row declared as `model_estimate` and so
+     *  were NOT stored, mirroring the refusal log_meal/update_meal already
+     *  make (CONTRACT §0.2). Drives an aggregate warning. */
+    estimates_rejected: NutrientField[];
 }
 
 export type RowValidation =
@@ -879,6 +885,38 @@ export function validateRow(
         if (provenance === null && !provenanceDropped) provenanceDropped = true;
     }
 
+    // ---- The resolution policy on a path that used to trust the file
+    // completely. `bulk_import_meals` is visible to the model (CLAUDE.md says
+    // why), so "the file" can be a model that invented the rows, and a row
+    // chooses its own provenance.
+    //
+    // One refusal, the same one log_meal and update_meal make (CONTRACT §0.2):
+    // a micronutrient the row declares `model_estimate` is NOT stored. Nothing
+    // is lost from a genuine export — those tools refuse to store such a value
+    // in the first place, so no exported micronutrient can carry that source.
+    //
+    // What is deliberately NOT refused: a row claiming a source that outranks
+    // `import` (`nutrition_label`, `usda_fdc`). Honouring it is what makes the
+    // export/re-import round trip lossless, and nothing in a row distinguishes
+    // a genuine restore from an invented claim — there is no signal to gate on.
+    // So the import trusts the file, as it always has, and the tool
+    // description tells the model this is a restore path and not a writer.
+    // A model that wants to launder an invented micronutrient must state a
+    // source it knows to be false; log_meal remains the honest path, and
+    // refuses.
+    const estimatesRejected: NutrientField[] = [];
+    if (provenance) {
+        for (const field of MICRONUTRIENT_FIELDS) {
+            const entry = provenance[field];
+            if (!entry) continue;
+            if (isForbiddenEstimate(field, entry.source)) {
+                delete provenance[field];
+                delete micros[field];
+                estimatesRejected.push(field);
+            }
+        }
+    }
+
     const input: MealInput = {
         description,
         meal_type: mealType,
@@ -954,6 +992,7 @@ export function validateRow(
             logged_at_used_row_timezone:
                 usedRowTimezone && ts.value.usedProfileTimezone,
             provenance_dropped: provenanceDropped,
+            estimates_rejected: estimatesRejected,
         },
     };
 }
@@ -1353,6 +1392,15 @@ export async function runImport(
     if (provenanceDropped > 0) {
         warnings.push(
             `${provenanceDropped} row(s) had a nutrient_provenance value that could not be read; the nutrient values were imported and only the source information was dropped.`,
+        );
+    }
+    const estimatesRejected = okRows.reduce(
+        (n, v) => n + v.resolved.estimates_rejected.length,
+        0,
+    );
+    if (estimatesRejected > 0) {
+        warnings.push(
+            `${estimatesRejected} micronutrient value(s) were declared as model estimates and were NOT stored; an estimated micronutrient cannot be told apart from a measured one, so only calories and macros may be estimated.`,
         );
     }
     const bareDates = okRows.filter(

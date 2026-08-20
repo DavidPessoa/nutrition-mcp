@@ -1632,6 +1632,43 @@ test("provenance carried in the file wins over the import stamp", () => {
     }
 });
 
+test("a micronutrient declared as a model estimate is not stored", () => {
+    // The refusal log_meal and update_meal make (CONTRACT §0.2), on the one
+    // write path that used to trust the file completely.
+    const v = validateRow(
+        row({
+            source_line: 2,
+            sodium_mg: 900,
+            iron_mg: 8,
+            calories: 500,
+            nutrient_provenance: JSON.stringify({
+                sodium_mg: {
+                    source: "model_estimate",
+                    source_id: null,
+                    confidence: "estimated",
+                },
+            }),
+        }),
+        0,
+        { tz: TZ, nowMs: NOW },
+        undefined,
+    );
+    expect(v.ok).toBe(true);
+    if (!v.ok) return;
+    expect(v.resolved.estimates_rejected).toEqual(["sodium_mg"]);
+    // Absent, NOT null: an absent key leaves the column untouched, and null
+    // would be a claim that the nutrient was measured as nothing.
+    expect("sodium_mg" in v.resolved.input).toBe(false);
+    expect(v.resolved.input.nutrient_provenance!.sodium_mg).toBeUndefined();
+    // Everything else in the row survives, including the other micronutrient
+    // and the estimable macros.
+    expect(v.resolved.input.iron_mg).toBe(8);
+    expect(v.resolved.input.nutrient_provenance!.iron_mg!.source).toBe(
+        "import",
+    );
+    expect(v.resolved.input.calories).toBe(500);
+});
+
 test("an unreadable provenance cell costs the provenance, never the numbers", () => {
     const v = validateRow(
         row({
@@ -1918,6 +1955,29 @@ test("round trip: import -> export -> re-import into a clean user is value-ident
     expect(mixed.calcium_mg).toBeNull();
     expect(mixed.alcohol_g).toBe(14);
     expect(mixed.caffeine_mg).toBe(95);
+});
+
+test("the refused estimate is reported, not silently dropped", async () => {
+    const { deps, inserted } = makeStore();
+    const out = await runImport(
+        args([
+            row({
+                source_line: 2,
+                sodium_mg: 900,
+                nutrient_provenance: JSON.stringify({
+                    sodium_mg: {
+                        source: "model_estimate",
+                        source_id: null,
+                        confidence: "estimated",
+                    },
+                }),
+            }),
+        ]),
+        deps,
+    );
+    expect(out.summary.created).toBe(1);
+    expect(inserted[0]!.sodium_mg).toBeUndefined();
+    expect(out.warnings.some((w) => w.includes("NOT stored"))).toBe(true);
 });
 
 test("re-importing the same export twice is a no-op for the SAME user", async () => {
