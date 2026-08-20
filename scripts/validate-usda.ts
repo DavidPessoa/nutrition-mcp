@@ -70,6 +70,9 @@ if (!process.env.USDA_FDC_API_KEY) {
     process.exit(1);
 }
 
+// Opt-in fixture capture; see the call site below for why it is not default.
+const capture = process.argv.includes("--capture");
+
 let failures = 0;
 const report: string[] = [
     "# USDA FoodData Central live validation",
@@ -118,12 +121,20 @@ for (const { slug, query, grams, prefer } of FOODS) {
         console.log("  FAIL  detail fetch returned nothing");
         continue;
     }
-    // Capture the real record so `bun test` stops asserting against
-    // placeholder numbers.
-    await Bun.write(
-        `src/fixtures/usda/${slug}.json`,
-        JSON.stringify(payload, null, 4) + "\n",
-    );
+    // Capture the real record over the committed fixture — ONLY when asked.
+    //
+    // This used to run on every validation, which meant the act of verifying
+    // rewrote the very fixtures the deterministic tests assert against: a
+    // validator that silently edits the evidence. It also made a routine
+    // `validate:usda` produce a dirty working tree of unrelated-looking
+    // fixture churn, since USDA does not return object keys in a stable
+    // order. Capture is now an explicit request: `bun run validate:usda --capture`.
+    if (capture) {
+        await Bun.write(
+            `src/fixtures/usda/${slug}.json`,
+            JSON.stringify(payload, null, 4) + "\n",
+        );
+    }
 
     const food = normalizeFdcFood(payload);
     if (!food) {
@@ -184,7 +195,9 @@ await Bun.write("validation/usda/live-report.md", report.join("\n"));
 console.log(
     `\n${failures === 0 ? "PASS" : `FAIL — ${failures} mismatch(es)`}` +
         "  report: validation/usda/live-report.md" +
-        "\nCaptured records written to src/fixtures/usda/ — review the diff," +
-        "\nthen update the expected values in src/usda.test.ts to match.",
+        (capture
+            ? "\nCaptured records written to src/fixtures/usda/ — review the diff," +
+              "\nthen update the expected values in src/usda.test.ts to match."
+            : "\n(Fixtures untouched. Pass --capture to refresh them from these records.)"),
 );
 process.exit(failures === 0 ? 0 : 1);
