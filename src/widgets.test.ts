@@ -400,3 +400,174 @@ test.each(["nutrition-summary", "goal-progress"])(
         expect(html).toContain(".mic-row");
     },
 );
+
+// ---------------------------------------------------------------------------
+// The import widget's own mapping path (public/widgets/src/templates/import-meals.html).
+//
+// The rows this widget posts to bulk_import_meals are built entirely inside the
+// assembled document, so nothing outside it could see that all twelve
+// micronutrients and every provenance cell were being dropped — the server
+// accepted them, the CSV module could resolve them, and the browser mapper
+// simply never asked. So the document is evaluated here the way the iframe
+// runs it (no host: window.parent === window) with a DOM stub, and driven
+// through a real file: file -> buildRows -> the rows that would be sent.
+// ---------------------------------------------------------------------------
+
+async function importWidget() {
+    const html = await getWidgetHtml("import-meals");
+    const script = html.slice(
+        html.indexOf("<script>") + "<script>".length,
+        html.indexOf("</script>"),
+    );
+    // render() bails on a missing #root, so a stub that owns up to having no
+    // elements is all the DOM this needs.
+    const doc = {
+        getElementById: () => null,
+        querySelectorAll: () => [],
+        documentElement: { style: {}, setAttribute() {} },
+        body: {},
+        createElement: () => ({ style: {} }),
+        addEventListener() {},
+    };
+    const win: Record<string, unknown> = {
+        addEventListener() {},
+        innerWidth: 400,
+    };
+    win.parent = win; // no host -> the standalone path, no postMessage
+    const factory = new Function(
+        "window",
+        "document",
+        "ResizeObserver",
+        `${script}\nreturn { S, loadFile, buildRows, microColumns, microRefused, microAssumed, mapStep, previewStep };`,
+    );
+    return factory(win, doc, undefined) as {
+        S: { rows: Record<string, unknown>[]; micro: unknown[]; step: string };
+        loadFile: (f: unknown) => Promise<void>;
+        buildRows: () => void;
+        microColumns: () => { header: string; unit: string | null }[];
+        microRefused: () => { header: string }[];
+        microAssumed: () => { header: string }[];
+        mapStep: () => string;
+        previewStep: () => string;
+    };
+}
+
+/** Feed the widget a CSV exactly as the file input does. */
+async function widgetRows(csv: string) {
+    const w = await importWidget();
+    const bytes = new TextEncoder().encode(csv);
+    await w.loadFile({
+        name: "export.csv",
+        arrayBuffer: async () => bytes.buffer,
+    });
+    w.buildRows();
+    return w;
+}
+
+const MICRO_FIXTURE = await Bun.file(
+    "./src/fixtures/import/micronutrients.csv",
+).text();
+
+test("the widget maps micronutrient columns into the rows it sends", async () => {
+    const w = await widgetRows(MICRO_FIXTURE);
+    expect(w.S.rows).toHaveLength(4);
+    const first = w.S.rows[0]!;
+
+    // Values travel in the FILE's unit with the unit named alongside, so the
+    // conversion happens once, server-side: 0.39 g of potassium is still 0.39.
+    expect(first.potassium_mg).toBe(0.39);
+    expect(first.sodium_mg).toBe(180);
+    expect(first.nutrient_units).toMatchObject({
+        potassium_mg: "g",
+        sodium_mg: "mg",
+        cholesterol_mg: "mg", // bare header, canonical unit assumed
+        vitamin_d_mcg: "mcg",
+    });
+
+    // "Vitamin A (IU)" is not sent under any unit.
+    expect("vitamin_a_mcg" in first).toBe(false);
+    expect((first.nutrient_units as Record<string, string>).vitamin_a_mcg).toBe(
+        undefined,
+    );
+
+    // Blank vs zero survives the browser: null is "not recorded", 0 is a
+    // measurement, and neither becomes the other.
+    expect(w.S.rows[1]!.potassium_mg).toBeNull();
+    expect(w.S.rows[2]!.iron_mg).toBe(0);
+    expect(w.S.rows[3]!.trans_fat_g).toBeNull();
+});
+
+test("the widget passes our export's nutrient_provenance through verbatim", async () => {
+    const prov = JSON.stringify({
+        sodium_mg: {
+            source: "nutrition_label",
+            source_id: null,
+            confidence: "authoritative",
+        },
+    });
+    const csv = [
+        "id,logged_at,timezone,meal_type,description,calories,sodium_mg,nutrient_provenance",
+        `11111111-1111-4111-8111-111111111111,2026-07-01 08:30:00,Europe/Kyiv,breakfast,Toast,320,610,"${prov.replace(/"/g, '""')}"`,
+    ].join("\n");
+    const w = await widgetRows(csv);
+    const r = w.S.rows[0]!;
+    // Verbatim: re-deriving it here would replace the label's own claim with
+    // "import" and silently downgrade every restored meal.
+    expect(r.nutrient_provenance).toBe(prov);
+    expect(r.source_id).toBe("11111111-1111-4111-8111-111111111111");
+    expect(r.timezone).toBe("Europe/Kyiv");
+    expect(r.sodium_mg).toBe(610);
+});
+
+test("a file with no micronutrient columns is sent exactly as before", async () => {
+    const csv = [
+        "Date,Meal,Food,Calories,Protein (g),Carbohydrates (g),Fat (g)",
+        "2026-07-01,Breakfast,Oatmeal,320,12,54,6",
+    ].join("\n");
+    const w = await widgetRows(csv);
+    expect(w.S.micro).toEqual([]);
+    // No nutrient key, and — the part that matters for an untouched import —
+    // no nutrient_units either, which would otherwise be an empty object on
+    // every row of every foreign export.
+    const sent = JSON.parse(JSON.stringify(w.S.rows[0]));
+    expect(Object.keys(sent).sort()).toEqual([
+        "calories",
+        "carbs_g",
+        "description",
+        "fat_g",
+        "logged_at",
+        "meal_type",
+        "protein_g",
+        "source_line",
+    ]);
+});
+
+test("the widget says which units it assumed and which columns it refused", async () => {
+    const w = await widgetRows(MICRO_FIXTURE);
+    expect(w.microColumns().map((c) => c.header)).toContain("Sodium (mg)");
+    expect(w.microAssumed().map((c) => c.header)).toEqual([
+        "Saturated Fat",
+        "Trans Fat",
+        "Cholesterol",
+        "Calcium",
+        "Magnesium",
+    ]);
+    expect(w.microRefused().map((c) => c.header)).toEqual(["Vitamin A (IU)"]);
+
+    const map = w.mapStep();
+    // The assumption is stated, not silent...
+    expect(map).toContain("Stating no unit, so read as g: Saturated Fat");
+    expect(map).toContain("mg: Cholesterol, Calcium, Magnesium");
+    // ...and the refusal explains itself instead of leaving a blank column.
+    expect(map).toContain("Vitamin A (IU) will not be imported");
+    expect(map).toContain("those values are in IU");
+
+    // And the preview — the screen the user confirms — shows the values, so
+    // nothing is written that was never displayed. The column header carries
+    // the unit the column is actually in.
+    const preview = w.previewStep();
+    expect(preview).toContain("Potassium (g)");
+    expect(preview).toContain("Vitamin C (mg)");
+    expect(preview).toContain("Saturated fat (g)");
+    expect(preview).toContain("0.39");
+});

@@ -1112,3 +1112,112 @@ export function parseUnitToken(
     const key = normalizeHeader(raw);
     return UNIT_TOKENS[key] ?? null;
 }
+
+// ---------- micronutrient columns -> row values ----------
+//
+// The two functions below are the whole browser-side micronutrient mapper. They
+// live here, next to the resolver, because BOTH callers that map a file to
+// import rows need identical behaviour and neither can import anything: the
+// import widget gets this module spliced in by `@inlinets` (CLAUDE.md), and the
+// model-facing fallback path is mirrored in src/import.test.ts. The widget
+// having its own copy is exactly how twelve nutrients went missing from the
+// widget path while the server happily accepted them.
+
+export interface NutrientColumn {
+    /** Column index in `headers`. */
+    index: number;
+    /** The header text verbatim, for showing the user what was recognised. */
+    header: string;
+    /** Canonical field, e.g. "sodium_mg". */
+    field: string;
+    /** The unit the values are in, or null when it cannot be converted. */
+    unit: CsvNutrientUnit | null;
+    /** False when the header stated no unit and the canonical one was assumed. */
+    unitStated: boolean;
+    /** The refused unit token ("iu", "dv", …) when `unit` is null. */
+    unsupportedUnit: string | null;
+    /**
+     * True when an earlier column already claimed this field, so this one is
+     * NOT read. Kept in the list rather than dropped so the UI can say which
+     * of two competing columns won.
+     */
+    duplicate: boolean;
+}
+
+/**
+ * Resolve every micronutrient column in a header row.
+ *
+ * Returned in header order. When one field has several columns, the first with
+ * a convertible unit wins and the rest are flagged `duplicate` — so a file
+ * carrying both "Vitamin A (IU)" and "Vitamin A (mcg)" reads the micrograms
+ * however they are ordered, rather than refusing the nutrient because the
+ * unusable column came first.
+ */
+export function findNutrientColumns(headers: string[]): NutrientColumn[] {
+    const all: NutrientColumn[] = [];
+    for (let i = 0; i < headers.length; i++) {
+        const m = resolveNutrientHeader(headers[i]!);
+        if (m === null) continue;
+        all.push({
+            index: i,
+            header: headers[i]!,
+            field: m.field,
+            unit: m.unit,
+            unitStated: m.unit === null ? true : m.unitStated,
+            unsupportedUnit: m.unit === null ? m.unsupportedUnit : null,
+            duplicate: false,
+        });
+    }
+    // Convertible columns claim their field first, so an IU column is demoted
+    // to a duplicate whenever a usable column for the same nutrient exists
+    // anywhere in the file — and its refusal is then not worth mentioning.
+    const claimed = new Set<string>();
+    for (const pass of [true, false]) {
+        for (const c of all) {
+            if ((c.unit !== null) !== pass) continue;
+            if (claimed.has(c.field)) c.duplicate = true;
+            else claimed.add(c.field);
+        }
+    }
+    return all;
+}
+
+export interface NutrientCells {
+    /** field -> value, or null for a cell that states "not recorded". */
+    values: Record<string, number | null>;
+    /** field -> the unit its value is in, for the values that have one. */
+    units: Record<string, CsvNutrientUnit>;
+}
+
+/**
+ * Read one row's micronutrient cells.
+ *
+ * Three outcomes per column, and the distinction between them is the point:
+ *   - a blank-ish cell is `null` — "not recorded", never 0 and never absent
+ *   - a value is passed through UNCONVERTED with its stated unit alongside, so
+ *     the arithmetic happens once, server-side (CONTRACT §0.5)
+ *   - an IU / %DV column contributes nothing at all, so the nutrient stays
+ *     unrecorded rather than being off by a factor of 3 to 20
+ */
+export function readNutrientCells(
+    row: string[],
+    columns: NutrientColumn[],
+    decimalSeparator: DecimalSeparator = ".",
+): NutrientCells {
+    const values: Record<string, number | null> = {};
+    const units: Record<string, CsvNutrientUnit> = {};
+    for (const c of columns) {
+        if (c.duplicate || c.unit === null) continue;
+        const raw = row[c.index];
+        if (raw === undefined) continue;
+        if (isBlankCell(raw)) {
+            values[c.field] = null;
+            continue;
+        }
+        const v = parseNumber(raw, decimalSeparator);
+        if (v === null) continue;
+        values[c.field] = v;
+        units[c.field] = c.unit;
+    }
+    return { values, units };
+}

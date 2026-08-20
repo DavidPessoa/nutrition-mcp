@@ -6,6 +6,8 @@ import type { Meal } from "./supabase.js";
 import {
     MICRONUTRIENT_HEADER_ALIASES,
     resolveNutrientHeader,
+    findNutrientColumns,
+    readNutrientCells,
     parseUnitToken,
     parseCsv,
     decodeBytes,
@@ -1156,4 +1158,98 @@ test("the exported meals.csv micronutrient headers resolve back to their own fie
             unitStated: true,
         });
     }
+});
+
+// ---------- micronutrient columns -> row values ----------
+//
+// findNutrientColumns/readNutrientCells ARE the browser-side mapper: the import
+// widget calls exactly these (src/widgets.test.ts drives the assembled document
+// to prove it), so a case pinned here is pinned for the widget path too.
+
+test("findNutrientColumns resolves a whole header row, in order", () => {
+    const cols = findNutrientColumns([
+        "Date",
+        "Food",
+        "Sodium (mg)",
+        "Potassium (g)",
+        "Cholesterol",
+        "Vitamin A (IU)",
+        "Sugar Alcohols (g)",
+    ]);
+    expect(cols.map((c) => [c.index, c.field, c.unit])).toEqual([
+        [2, "sodium_mg", "mg"],
+        [3, "potassium_mg", "g"],
+        [4, "cholesterol_mg", "mg"],
+        [5, "vitamin_a_mcg", null],
+    ]);
+    // A bare header assumed its unit; a qualified one did not. The flag is the
+    // only way the UI can say "read as mg" before anything is written.
+    expect(cols[2]!.unitStated).toBe(false);
+    expect(cols[0]!.unitStated).toBe(true);
+    expect(cols[3]!.unsupportedUnit).toBe("iu");
+});
+
+test("a convertible column wins over an IU one for the same nutrient", () => {
+    // Either order: the mcg column is read and the IU one is a duplicate, so
+    // the refusal is not worth reporting because it cost nothing.
+    for (const headers of [
+        ["Vitamin A (IU)", "Vitamin A (mcg)"],
+        ["Vitamin A (mcg)", "Vitamin A (IU)"],
+    ]) {
+        const cols = findNutrientColumns(headers);
+        const used = cols.filter((c) => !c.duplicate && c.unit !== null);
+        expect(used).toHaveLength(1);
+        expect(used[0]!.header).toBe("Vitamin A (mcg)");
+        expect(cols.filter((c) => c.duplicate)).toHaveLength(1);
+    }
+});
+
+test("a second column for the same nutrient is ignored, not summed", () => {
+    const cols = findNutrientColumns(["Sodium (mg)", "sodium_mg"]);
+    expect(cols[1]!.duplicate).toBe(true);
+    const { values } = readNutrientCells(["10", "999"], cols);
+    expect(values).toEqual({ sodium_mg: 10 });
+});
+
+test("readNutrientCells keeps values in the file's unit and names that unit", () => {
+    const cols = findNutrientColumns(["Sodium (mg)", "Potassium (g)"]);
+    // No arithmetic here on purpose: 0.39 stays 0.39 and travels with "g".
+    expect(readNutrientCells(["180", "0.39"], cols)).toEqual({
+        values: { sodium_mg: 180, potassium_mg: 0.39 },
+        units: { sodium_mg: "mg", potassium_mg: "g" },
+    });
+});
+
+test("a blank cell is null, a zero is zero, an IU column is neither", () => {
+    const cols = findNutrientColumns([
+        "Sodium",
+        "Iron",
+        "Calcium",
+        "Vitamin A (IU)",
+    ]);
+    const { values, units } = readNutrientCells(["", "0", "n/a", "500"], cols);
+    expect(values.sodium_mg).toBeNull();
+    expect(values.iron_mg).toBe(0);
+    expect(values.calcium_mg).toBeNull();
+    // Not null and not 500: the nutrient stays unrecorded rather than being
+    // recorded wrong by a factor nobody can recover.
+    expect("vitamin_a_mcg" in values).toBe(false);
+    // A null carries no unit — there is no value for a unit to qualify.
+    expect(units).toEqual({ iron_mg: "mg" });
+});
+
+test("a European decimal comma is honoured for micronutrients too", () => {
+    const cols = findNutrientColumns(["Natrium (mg)"]);
+    expect(readNutrientCells(["1.234,5"], cols, ",").values.sodium_mg).toBe(
+        1234.5,
+    );
+});
+
+test("a file with no micronutrient columns yields nothing at all", () => {
+    const cols = findNutrientColumns(["Date", "Food", "Calories", "Fat (g)"]);
+    expect(cols).toEqual([]);
+    expect(readNutrientCells(["a", "b", "c", "d"], cols)).toEqual({
+        values: {},
+        units: {},
+    });
 });

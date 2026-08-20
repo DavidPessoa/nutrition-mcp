@@ -26,8 +26,8 @@ import {
     parseCsv,
     findColumn,
     parseNumber,
-    isBlankCell,
-    resolveNutrientHeader,
+    findNutrientColumns,
+    readNutrientCells,
 } from "./csv.js";
 
 const NOW = Date.parse("2026-07-25T12:00:00Z");
@@ -1718,10 +1718,10 @@ function mapCsvToRows(text: string): ImportRow[] {
         caffeine_mg: col("caffeine_mg", "caffeine"),
     };
     // Micronutrient columns are found by resolving the HEADER, not by a fixed
-    // list, so a unit-qualified or foreign-language header maps itself.
-    const microC = H.map((h, i) => ({ i, m: resolveNutrientHeader(h) })).filter(
-        (x) => x.m !== null,
-    );
+    // list, so a unit-qualified or foreign-language header maps itself. The
+    // same two csv.ts functions the import widget calls — the model fallback
+    // and the browser path must not be able to disagree about a file.
+    const microC = findNutrientColumns(H);
 
     const cell = (r: string[], i: number) => (i < 0 ? undefined : r[i]);
     return table.rows.map((r, n) => {
@@ -1742,21 +1742,12 @@ function mapCsvToRows(text: string): ImportRow[] {
             const v = parseNumber(cell(r, i));
             if (v !== null) out[field] = v;
         }
-        const units: Record<string, string> = {};
-        for (const { i, m } of microC) {
-            const raw = cell(r, i);
-            if (raw === undefined) continue;
-            // A blank cell is an explicit "not recorded" — null, never 0, and
-            // never simply dropped, so the distinction survives the mapping.
-            if (isBlankCell(raw)) {
-                out[m!.field] = null;
-                continue;
-            }
-            if (m!.unit === null) continue; // IU / %DV: refuse, don't guess
-            out[m!.field] = parseNumber(raw);
-            units[m!.field] = m!.unit;
-        }
-        if (Object.keys(units).length > 0) out.nutrient_units = units;
+        // A blank cell is an explicit "not recorded" — null, never 0 and never
+        // dropped; an IU / %DV column is refused rather than guessed.
+        const micro = readNutrientCells(r, microC, table.decimalSeparator);
+        Object.assign(out, micro.values);
+        if (Object.keys(micro.units).length > 0)
+            out.nutrient_units = micro.units;
         return out as unknown as ImportRow;
     });
 }
