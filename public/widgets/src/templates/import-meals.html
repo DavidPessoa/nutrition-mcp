@@ -285,6 +285,14 @@
                     "lebensmittel",
                 ],
                 meal_type: ["meal", "meal_type", "type", "group", "mahlzeit"],
+                // The kJ spellings are here, not only in sniffEnergyUnit's
+                // KJ_HEADER_RE: without them "Energy (kJ)" — the standard
+                // header of every kilojoule export — auto-mapped to nothing,
+                // so every row was sent with NO calories at all AND
+                // expected_total_kcal was omitted, which silently disabled the
+                // server-side control total that would have caught the loss.
+                // sniffEnergyUnit already reports "kj" for each of them, so the
+                // conversion and its preview light up with no other change.
                 calories: [
                     "calories",
                     "energy_kcal",
@@ -292,6 +300,11 @@
                     "kcal",
                     "calories_kcal",
                     "kalorien",
+                    "energy_kj",
+                    "kj",
+                    "kilojoules",
+                    "energie",
+                    "energie_kj",
                 ],
                 protein_g: ["protein_g", "protein", "eiweiss"],
                 carbs_g: [

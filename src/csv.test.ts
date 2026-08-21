@@ -1253,3 +1253,191 @@ test("a file with no micronutrient columns yields nothing at all", () => {
         units: {},
     });
 });
+
+// ---------- the ten defects an independent verifier confirmed ----------
+//
+// Every one of these passed the builder's own suite first, and each is written
+// as the input that produced the wrong number rather than as a unit assertion
+// about the function that produced it.
+
+test("a percent-of-daily-value column is refused, not read as a mass", () => {
+    // 20 %DV of iron was stored as 20 mg — over twice the adult RDA — because
+    // normalizeHeader deleted the "%" before any unsupported-unit check ran.
+    for (const header of [
+        "Iron (%)",
+        "Sodium %",
+        "Iron (% DV)",
+        "Iron (%DV)",
+    ]) {
+        const m = resolveNutrientHeader(header);
+        expect(m).not.toBeNull();
+        expect(m!.unit).toBeNull();
+        expect(normalizeHeader(header)).toContain("pct");
+    }
+    // The field is still recognised, so the refusal can name the nutrient.
+    expect(resolveNutrientHeader("Iron (%)")!.field).toBe("iron_mg");
+    // "% DV" reports the unit the header actually states.
+    expect(
+        (
+            resolveNutrientHeader("Vitamin C (% DV)") as {
+                unsupportedUnit: string;
+            }
+        ).unsupportedUnit,
+    ).toBe("dv");
+});
+
+test("a percent column does not outrank the real mass column", () => {
+    // Header order used to decide this, so "Iron (%)" claimed iron_mg and the
+    // true 3.6 mg was discarded as a duplicate.
+    const cols = findNutrientColumns(["Date", "Food", "Iron (%)", "Iron (mg)"]);
+    const usable = cols.filter((c) => !c.duplicate && c.unit !== null);
+    expect(usable).toHaveLength(1);
+    expect(usable[0]!.header).toBe("Iron (mg)");
+    expect(
+        readNutrientCells(["2026-07-18", "Steak", "20", "3.6"], cols),
+    ).toEqual({
+        values: { iron_mg: 3.6 },
+        units: { iron_mg: "mg" },
+    });
+});
+
+test("a percent-of-energy macro column does not auto-map to grams", () => {
+    // A 600 kcal bowl was recorded as 30 g protein / 45 g carbs / 25 g fat.
+    const headers = ["Calories", "Protein (%)", "Carbs (%)", "Fat (%)"];
+    expect(findColumn(headers, ["protein_g", "protein"])).toBe(-1);
+    expect(findColumn(headers, ["carbs_g", "carbs"])).toBe(-1);
+    expect(findColumn(headers, ["fat_g", "fat"])).toBe(-1);
+    // The gram spellings still map.
+    expect(findColumn(["Protein (g)"], ["protein_g", "protein"])).toBe(0);
+});
+
+test("USDA's own nutrient spellings resolve, qualifier on either side", () => {
+    const cases: [string, string, string | null][] = [
+        ["Vitamin A, RAE (mcg)", "vitamin_a_mcg", "mcg"],
+        ["Vitamin A (mcg RAE)", "vitamin_a_mcg", "mcg"],
+        ["Sodium total (mg)", "sodium_mg", "mg"],
+        ["Calcium, total (mg)", "calcium_mg", "mg"],
+        ["Fatty acids, total saturated (g)", "saturated_fat_g", "g"],
+        ["Fatty acids, total trans (g)", "trans_fat_g", "g"],
+        ["Fat, saturated (g)", "saturated_fat_g", "g"],
+        ["Calcium, Ca (mg)", "calcium_mg", "mg"],
+        ["Iron, Fe (mg)", "iron_mg", "mg"],
+        ["Potassium, K (mg)", "potassium_mg", "mg"],
+        ["Magnesium, Mg (mg)", "magnesium_mg", "mg"],
+        ["Sodium, Na (mg)", "sodium_mg", "mg"],
+        ["Vitamin C, total ascorbic acid (mg)", "vitamin_c_mg", "mg"],
+        ["Vitamin D (D2 + D3) (mcg)", "vitamin_d_mcg", "mcg"],
+    ];
+    for (const [header, field, unit] of cases) {
+        const m = resolveNutrientHeader(header);
+        expect(m === null ? header : "ok").toBe("ok");
+        expect([header, m!.field, m!.unit]).toEqual([header, field, unit]);
+    }
+    // The IU refusal survives the looping peel, on both spellings.
+    for (const header of ["Vitamin D (IU)", "Vitamin A, RAE (IU)"]) {
+        expect([header, resolveNutrientHeader(header)!.unit]).toEqual([
+            header,
+            null,
+        ]);
+    }
+});
+
+test("a thousands separator is not evidence of a decimal comma", () => {
+    // Sniffed as comma-decimal, this file read 12.5 g protein as 125 and
+    // 1,240 mg sodium as 1.24.
+    const rows = [
+        ["2026-07-18", "Soup", "250", "12.5", "1,240", "1,100"],
+        ["2026-07-18", "Chips", "300", "3", "1,050", "1,200"],
+        ["2026-07-19", "Stew", "400", "20", "2,300", "1,400"],
+    ];
+    expect(sniffDecimalSeparator(rows, "\t")).toBe(".");
+    expect(parseNumber("1,240", ".")).toBe(1240);
+    expect(parseNumber("12.5", ".")).toBe(12.5);
+    // A genuine comma-decimal file is still recognised.
+    expect(
+        sniffDecimalSeparator(
+            [
+                ["Soup", "12,5", "1,8"],
+                ["Stew", "20,25", "3,4"],
+            ],
+            ";",
+        ),
+    ).toBe(",");
+    // And a dot thousands group no longer votes for the dot either.
+    expect(
+        sniffDecimalSeparator(
+            [
+                ["Soup", "1.240", "12,5"],
+                ["Stew", "1.100", "3,4"],
+            ],
+            ";",
+        ),
+    ).toBe(",");
+});
+
+test("a totals row is recognised when the date column comes first", () => {
+    // MyFitnessPal and Cronometer both lead with a date or an id, so this row
+    // was imported as an extra 200 kcal meal and the day was double-counted.
+    expect(isTotalsRow(["2026-07-18", "", "Total", "200"])).toBe(true);
+    expect(isTotalsRow(["", "Totals:", "", "1800"])).toBe(true);
+    // A fully populated meal row is never a totals row, whatever it is called.
+    expect(isTotalsRow(["2026-07-18", "lunch", "Total Cereal", "200"])).toBe(
+        false,
+    );
+    expect(isTotalsRow(["2026-07-18", "lunch", "Total", "200"])).toBe(false);
+    expect(isTotalsRow(["", "", "", ""])).toBe(false);
+});
+
+test("a quoted field survives whitespace before the quote", () => {
+    // `, "Beans, baked", 250` split into two corrupted fields: the description
+    // was truncated to `"Beans` and the 250 kcal was lost.
+    const t = parseCsv('Date,Food,Calories\n2026-07-18, "Beans, baked", 250\n');
+    expect(t.rows[0]).toEqual(["2026-07-18", "Beans, baked", "250"]);
+    expect(parseNumber(t.rows[0]![2])).toBe(250);
+    // Escaped quotes and unquoted fields are unaffected.
+    expect(parseCsv('a,b\n1, "say ""hi""" ,3\n').rows[0]![1]).toBe('say "hi"');
+});
+
+test("a censored value is not a definite one", () => {
+    // "<1" became a confident 1, ">2000" a confident 2000.
+    expect(parseNumber("<1")).toBeNull();
+    expect(parseNumber(">2000")).toBeNull();
+    expect(parseNumber("< 0.5")).toBeNull();
+    // Ordinary values, including negatives and unit noise, still parse.
+    expect(parseNumber("1.5 mg")).toBe(1.5);
+    expect(parseNumber("-2")).toBe(-2);
+});
+
+test("an Energy (kJ) column is a calories column", () => {
+    // Without the kJ spellings the column mapped to nothing, so every row was
+    // sent with no calories AND expected_total_kcal was omitted, disabling the
+    // server-side control total that would have caught the loss.
+    const aliases = [
+        "calories",
+        "energy_kcal",
+        "energy",
+        "kcal",
+        "calories_kcal",
+        "kalorien",
+        "energy_kj",
+        "kj",
+        "kilojoules",
+        "energie",
+        "energie_kj",
+    ];
+    for (const header of [
+        "Energy (kJ)",
+        "Energy kJ",
+        "energy_kj",
+        "kJ",
+        "Kilojoules",
+        "Energie (kJ)",
+    ]) {
+        expect([header, findColumn([header], aliases)]).toEqual([header, 0]);
+        expect([header, sniffEnergyUnit(header, [1046])]).toEqual([
+            header,
+            "kj",
+        ]);
+    }
+    expect(toKcal(1046, "kj")).toBe(250);
+});

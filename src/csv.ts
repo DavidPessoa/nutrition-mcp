@@ -147,6 +147,17 @@ export function sniffDelimiter(text: string): Delimiter {
  * delimiter is not itself a comma. Getting this wrong scales every macro by
  * 1000x while still producing valid-looking numbers.
  */
+// A separator followed by EXACTLY three digits is ambiguous — "1,240" is a
+// thousands group in a dot-decimal file and a decimal in a comma-decimal one —
+// so it votes for neither. Counting it as evidence is what let a dot-decimal
+// export with thousands-separated micronutrients be read as comma-decimal,
+// after which every decimal was multiplied by 10 (12.5 g protein -> 125) and
+// every thousands number divided by 1000 (1,240 mg sodium -> 1.24). Unlike the
+// date format and the energy unit, this sniff has no user-facing control, so
+// being undecided and falling back to the dot default beats guessing.
+const DECIMAL_EVIDENCE_COMMA = /^-?\d+,(\d{1,2}|\d{4,})$/;
+const DECIMAL_EVIDENCE_DOT = /^-?\d+\.(\d{1,2}|\d{4,})$/;
+
 export function sniffDecimalSeparator(
     rows: string[][],
     delimiter: Delimiter,
@@ -157,8 +168,8 @@ export function sniffDecimalSeparator(
     for (const row of rows.slice(0, 50)) {
         for (const cell of row) {
             const v = cell.trim();
-            if (/^-?\d+,\d+$/.test(v)) commaDecimals++;
-            else if (/^-?\d+\.\d+$/.test(v)) dotDecimals++;
+            if (DECIMAL_EVIDENCE_COMMA.test(v)) commaDecimals++;
+            else if (DECIMAL_EVIDENCE_DOT.test(v)) dotDecimals++;
         }
     }
     return commaDecimals > dotDecimals ? "," : ".";
@@ -263,7 +274,13 @@ function tokenize(text: string, delimiter: string): RawRow[] {
             continue;
         }
 
-        if (ch === '"' && field === "") {
+        // A quote opens a quoted field even with whitespace before it. Real
+        // files write `, "Beans, baked", 250`; requiring the quote to be the
+        // very first character split that into two corrupted fields, truncated
+        // the description to `"Beans` and lost the 250 kcal entirely, behind a
+        // generic "different number of columns" warning.
+        if (ch === '"' && field.trim() === "") {
+            field = "";
             inQuotes = true;
             sawAnyChar = true;
             continue;
@@ -406,12 +423,24 @@ export function isBlankRow(fields: string[]): boolean {
     return fields.every((f) => f.trim() === "");
 }
 
-/** A totals/average row: an aggregate label with no other identifying text. */
+/**
+ * A totals/average row: an aggregate label, in ANY column, on a row that also
+ * leaves at least one cell empty.
+ *
+ * Testing only the first non-empty cell missed every export this actually
+ * matters for: MyFitnessPal and Cronometer both lead with a date or an id, so
+ * "2026-07-18,,Total,200" was imported as an extra 200 kcal meal and the day
+ * was double-counted. The empty-cell condition is what keeps a genuine meal
+ * from being swallowed — an aggregate row never fills the identifying columns,
+ * a real row generally does — and a skipped row is counted and reported, so the
+ * remaining risk is visible rather than silent.
+ */
 export function isTotalsRow(fields: string[]): boolean {
-    const firstNonEmpty = fields.find((f) => f.trim() !== "");
-    if (firstNonEmpty === undefined) return false;
-    const v = firstNonEmpty.trim().toLowerCase().replace(/:$/, "");
-    return TOTALS_ROW_PREFIXES.includes(v);
+    if (!fields.some((f) => f.trim() === "")) return false;
+    return fields.some((f) => {
+        const v = f.trim().toLowerCase().replace(/:$/, "");
+        return v !== "" && TOTALS_ROW_PREFIXES.includes(v);
+    });
 }
 
 /** Whether a cell means "no value" rather than a value. */
@@ -440,6 +469,12 @@ export function normalizeHeader(header: string): string {
             .replace(/[\u0300-\u036f]/g, "")
             .replace(/ß/g, "ss")
             .replace(/\(([^)]*)\)/g, " $1 ")
+            // "%" must survive as a WORD, because the a-z sweep below would
+            // otherwise delete it and leave "Iron (%)" as the bare key "iron" —
+            // a percent-of-daily-value column then read as milligrams, with 20
+            // %DV of iron stored as 20 mg. "pct" is already an unsupported unit
+            // token, so spelling it out is what lets the refusal fire.
+            .replace(/%/g, " pct ")
             .replace(/[^a-z0-9]+/g, " ")
             .trim()
             .replace(/\s+/g, "_")
@@ -456,6 +491,11 @@ export function parseNumber(
 ): number | null {
     if (isBlankCell(raw)) return null;
     let v = raw!.trim();
+
+    // "<1" and ">2000" are statements that the value is NOT known, and the
+    // strip below would turn them into a confident 1 and 2000. Null is the
+    // same answer a blank cell gets, which is what they mean.
+    if (/[<>]/.test(v)) return null;
 
     // Strip currency-ish and unit noise but keep sign, digits and separators.
     v = v.replace(/[^0-9,.\-+eE]/g, "");
@@ -956,10 +996,15 @@ const QUALIFIER_TOKENS = new Set(["rae", "re", "total"]);
  * normalizeHeader produces ("Gesättigte Fettsäuren" -> gesattigte_fettsauren).
  */
 export const MICRONUTRIENT_HEADER_ALIASES: Record<string, string[]> = {
+    // The `fatty_acids_*` and `<nutrient>_<symbol>` spellings are USDA
+    // FoodData Central's own nutrient names, which appear verbatim in a
+    // FoodData Central CSV export and in anything built on one.
     saturated_fat_g: [
         "saturated_fat",
         "sat_fat",
         "saturated",
+        "fatty_acids_saturated",
+        "fat_saturated",
         "saturated_fats",
         "saturated_fatty_acids",
         "gesattigte_fettsauren",
@@ -970,6 +1015,8 @@ export const MICRONUTRIENT_HEADER_ALIASES: Record<string, string[]> = {
         "trans_fat",
         "trans_fats",
         "trans",
+        "fatty_acids_trans",
+        "fat_trans",
         "trans_fatty_acids",
         "transfett",
         "transfette",
@@ -988,18 +1035,28 @@ export const MICRONUTRIENT_HEADER_ALIASES: Record<string, string[]> = {
         "zugesetzter_zucker",
         "azucares_anadidos",
     ],
-    sodium_mg: ["sodium", "natrium", "sodio"],
-    potassium_mg: ["potassium", "kalium", "potasio"],
+    sodium_mg: ["sodium", "sodium_na", "natrium", "sodio"],
+    potassium_mg: ["potassium", "potassium_k", "kalium", "potasio"],
     cholesterol_mg: ["cholesterol", "cholesterin", "colesterol"],
-    calcium_mg: ["calcium", "kalzium", "calcio"],
-    iron_mg: ["iron", "eisen", "hierro", "fer", "ferro"],
-    magnesium_mg: ["magnesium", "magnesio"],
+    calcium_mg: ["calcium", "calcium_ca", "kalzium", "calcio"],
+    iron_mg: ["iron", "iron_fe", "eisen", "hierro", "fer", "ferro"],
+    // "magnesium_mg" is the element-symbol spelling ("Magnesium, Mg"), not the
+    // field name: the unit peel takes one unit token, so "Magnesium, Mg (mg)"
+    // arrives here with the symbol still attached.
+    magnesium_mg: ["magnesium", "magnesium_mg", "magnesio"],
     vitamin_a_mcg: ["vitamin_a", "vit_a", "vitamina_a"],
-    vitamin_c_mg: ["vitamin_c", "vit_c", "ascorbic_acid", "vitamina_c"],
+    vitamin_c_mg: [
+        "vitamin_c",
+        "vit_c",
+        "ascorbic_acid",
+        "vitamin_c_ascorbic_acid",
+        "vitamina_c",
+    ],
     vitamin_d_mcg: [
         "vitamin_d",
         "vit_d",
         "vitamin_d3",
+        "vitamin_d_d2_d3",
         "vitamina_d",
         "calciferol",
     ],
@@ -1066,26 +1123,50 @@ export function resolveNutrientHeader(
     if (key === "") return null;
 
     let tokens = key.split("_");
-    // Peel trailing qualifiers ("mcg RAE" -> the unit is "mcg").
-    while (
-        tokens.length > 1 &&
-        QUALIFIER_TOKENS.has(tokens[tokens.length - 1]!)
-    )
-        tokens = tokens.slice(0, -1);
-
-    const last = tokens[tokens.length - 1]!;
     let unit: CsvNutrientUnit | null = null;
     let unsupported: string | null = null;
-    if (tokens.length > 1 && UNIT_TOKENS[last] !== undefined) {
-        unit = UNIT_TOKENS[last]!;
-        tokens = tokens.slice(0, -1);
-    } else if (tokens.length > 1 && UNSUPPORTED_UNIT_TOKENS.has(last)) {
-        unsupported = last;
-        tokens = tokens.slice(0, -1);
+
+    // One loop, because a qualifier can sit on EITHER side of the unit.
+    // "Vitamin A (mcg RAE)" puts it inside; "Vitamin A, RAE (mcg)" — USDA's own
+    // spelling — puts it outside, and peeling qualifiers once before the unit
+    // left "vitamin_a_rae", which matched nothing and was dropped with no
+    // notice at all. Looping also keeps "Vitamin C (% DV)" refused now that "%"
+    // survives normalization as its own "pct" token: both tokens peel, and the
+    // field underneath is still recognised, which is what makes the refusal
+    // explainable instead of silent.
+    while (tokens.length > 1) {
+        const last = tokens[tokens.length - 1]!;
+        if (QUALIFIER_TOKENS.has(last)) {
+            tokens = tokens.slice(0, -1);
+            continue;
+        }
+        if (unit === null && UNIT_TOKENS[last] !== undefined) {
+            unit = UNIT_TOKENS[last]!;
+            tokens = tokens.slice(0, -1);
+            continue;
+        }
+        if (UNSUPPORTED_UNIT_TOKENS.has(last)) {
+            // Keep the FIRST one seen — it is the outermost, and so the one the
+            // header actually states ("% DV" reports "dv", not "pct").
+            unsupported ??= last;
+            tokens = tokens.slice(0, -1);
+            continue;
+        }
+        break;
     }
 
-    // A "% DV" header normalizes to e.g. "vitamin_c_dv"; "Vitamin C (% DV)"
-    // to "vitamin_c_dv" as well, since normalizeHeader drops the "%".
+    // A qualifier can also sit INSIDE the name, which is where USDA puts it:
+    // "Fatty acids, total saturated", "Vitamin C, total ascorbic acid",
+    // "Calcium, total". Dropping it anywhere rather than listing every
+    // permutation as an alias is what keeps that whole family mapping. It
+    // cannot collide with a real nutrient: "Total Sugars" and "Total Fat"
+    // reduce to "sugars" and "fat", neither of which is a micronutrient alias
+    // (total sugars is its own macro field, deliberately not listed here).
+    if (tokens.length > 1) {
+        const kept = tokens.filter((t) => !QUALIFIER_TOKENS.has(t));
+        if (kept.length > 0) tokens = kept;
+    }
+
     const field = ALIAS_TO_FIELD.get(tokens.join("_"));
     if (field === undefined) return null;
 

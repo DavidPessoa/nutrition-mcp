@@ -60,24 +60,42 @@ function initWidget(config) {
             null
         );
     }
-    // Render, then append a small persistent note at the bottom explaining that
-    // widget display is a user setting. render() replaces #root wholesale, so
-    // the footer is re-appended after every paint. Skipped when a widget
-    // deliberately renders nothing (e.g. meal-logged with no goals) so an empty
-    // widget stays empty and the host collapses it.
-    function paint(data) {
-        config.render(data);
-        painted = true;
+    // A small persistent note that widget display is a user setting.
+    //
+    // It is a SIBLING of #root, not a child, and created at most once. As a
+    // child it was appended inside paint() and therefore wiped by the next
+    // `#root.innerHTML = …`, which is how every interactive widget re-renders —
+    // so it survived exactly until the user touched anything (picked a file,
+    // switched the 7/14/30 toggle) and never came back. Putting it outside the
+    // element that gets replaced means no re-render can lose it and no widget
+    // has to remember to re-add it.
+    //
+    // Removed again when the widget deliberately renders nothing (meal-logged
+    // with no goals), so an empty widget stays empty and the host collapses it.
+    const FOOT_ID = "wfoot";
+    function paintFooter() {
         const el = root();
-        if (!el || el.innerHTML.trim() === "") return;
+        const empty = !el || el.innerHTML.trim() === "";
+        const existing = document.getElementById(FOOT_ID);
+        if (empty) {
+            existing?.remove();
+            return;
+        }
+        if (existing) return;
         const foot = document.createElement("div");
+        foot.id = FOOT_ID;
         foot.textContent =
             "You can enable or disable these widgets anytime — just ask to update your settings.";
         foot.style.cssText =
             "margin-top:14px;padding-top:10px;" +
             "border-top:1px solid var(--panel-border);" +
             "font-size:11px;line-height:1.4;color:var(--text-dim);text-align:center;";
-        el.appendChild(foot);
+        el.parentNode.insertBefore(foot, el.nextSibling);
+    }
+    function paint(data) {
+        config.render(data);
+        painted = true;
+        paintFooter();
     }
     function show(payload) {
         const data = config.coerce(payload);
