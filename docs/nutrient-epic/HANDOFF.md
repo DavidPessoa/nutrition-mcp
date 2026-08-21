@@ -156,12 +156,31 @@ cost the round trip are a per-account "imports may not claim authoritative
 sources" preference, or a distinct tool for restores that the model cannot see.
 Both are larger than this epic.
 
-### 2. Verifier B's report — 10 CONFIRMED defects in the CSV mapper, NONE FIXED
+### 2. Verifier B's report — 10 CONFIRMED defects in the CSV mapper, ALL FIXED, NONE RE-VERIFIED
+
+**Status update (session 3):** all ten are fixed in ccd3a22, each with a
+regression test written as the input that produced the wrong number. The list
+below is kept verbatim as the record of what was wrong and why, because the
+fixes are NOT independently verified: a re-verification pass was launched
+against the fixed code and killed before it reported anything. Re-run it, and
+brief it to attack the nine fixes themselves — the interior-qualifier strip, the
+looping unit peel, the three-digit decimal rule and the totals-row heuristic all
+widened behaviour and could plausibly have broken a header or a row that used to
+work.
+
+Also landed in session 3: `bun run e2e:nutrients --test-project`
+(scripts/e2e-nutrients.ts), which runs all six release scenarios through the
+real MCP tool surface. It has never been executed — there is still no test
+database — so expect to fix something on its first real run.
+
+ORIGINAL REPORT (all ten now fixed):
 
 Verification was re-run as five independent adversarial passes. **Only one
 finished** (the browser-side CSV mapper); the other four — summaries/coverage,
 the import write path, providers/units, and the MCP tool surface — were killed
-mid-run when the session ended and produced nothing. Re-run those four.
+mid-run and produced nothing. They were launched a second time in session 3 and
+killed again, still with nothing. Those four areas have never been
+independently verified at all.
 
 The one that finished came back FAIL with ten confirmed defects, every one
 reproduced by driving the REAL assembled widget. Nothing below is fixed. They
