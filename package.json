@@ -37,7 +37,8 @@
         "depersonalize": "bun run scripts/depersonalize.ts",
         "generate-oauth-creds": "echo \"OAUTH_CLIENT_ID=$(openssl rand -hex 16)\" && echo \"OAUTH_CLIENT_SECRET=$(openssl rand -hex 32)\"",
         "validate:off": "bun run scripts/validate-off.ts",
-        "validate:usda": "bun run scripts/validate-usda.ts"
+        "validate:usda": "bun run scripts/validate-usda.ts",
+        "e2e:nutrients": "bun run scripts/e2e-nutrients.ts"
     },
     "dependencies": {
         "@modelcontextprotocol/sdk": "^1.29.0",
