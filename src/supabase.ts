@@ -4,6 +4,13 @@ import { decodeEscapeSequences } from "./normalize.js";
 import { isWeightUnit, toStoredInteger, type WeightUnit } from "./units.js";
 import { isDrinkUnit, type DrinkUnit } from "./alcohol.js";
 import { escapeLikePattern, tokenizeQuery } from "./search.js";
+import {
+    NUTRIENT_FIELDS,
+    MICRONUTRIENT_FIELDS,
+    assertValidNutrientValue,
+    parseNutrientProvenance,
+    type NutrientProvenance,
+} from "./nutrients.js";
 
 let supabase: SupabaseClient;
 
@@ -119,6 +126,29 @@ export interface Meal {
     // all stated in mg, so the unit rides in the name at every layer.
     // Contributes no energy: never feed this into a kcal derivation.
     caffeine_mg: number | null;
+    // ---- Micronutrients (CONTRACT §1). All twelve are nullable numeric,
+    // never model-estimated (CONTRACT §0.2), and the unit rides in the name
+    // exactly as caffeine_mg's does — see the micronutrient_expansion
+    // migration for the full reasoning. added_sugar_g is its own figure and
+    // is never derived from sugar_g (which stays TOTAL sugars).
+    saturated_fat_g: number | null;
+    trans_fat_g: number | null;
+    added_sugar_g: number | null;
+    sodium_mg: number | null;
+    potassium_mg: number | null;
+    cholesterol_mg: number | null;
+    calcium_mg: number | null;
+    iron_mg: number | null;
+    magnesium_mg: number | null;
+    // µg RAE (retinol activity equivalents) — see NUTRIENT_UNITS.
+    vitamin_a_mcg: number | null;
+    vitamin_c_mg: number | null;
+    vitamin_d_mcg: number | null;
+    // Per-nutrient source/confidence, keyed by NutrientField — CONTRACT §2.
+    // Always parsed defensively (see normalizeMeal / parseNutrientProvenance)
+    // so hand-edited or pre-this-code JSON degrades to null instead of
+    // propagating garbage.
+    nutrient_provenance: NutrientProvenance | null;
     notes: string | null;
     idempotency_key: string | null;
 }
@@ -135,6 +165,22 @@ export interface MealInput {
     alcohol_g?: number;
     // Milligrams — see Meal.caffeine_mg.
     caffeine_mg?: number;
+    // ---- Micronutrients — see Meal above. Nullable (not just optional) so
+    // updateMeal's `fields.x !== undefined` idiom can distinguish "not
+    // supplied" from "explicitly clear this field back to null".
+    saturated_fat_g?: number | null;
+    trans_fat_g?: number | null;
+    added_sugar_g?: number | null;
+    sodium_mg?: number | null;
+    potassium_mg?: number | null;
+    cholesterol_mg?: number | null;
+    calcium_mg?: number | null;
+    iron_mg?: number | null;
+    magnesium_mg?: number | null;
+    vitamin_a_mcg?: number | null;
+    vitamin_c_mg?: number | null;
+    vitamin_d_mcg?: number | null;
+    nutrient_provenance?: NutrientProvenance | null;
     logged_at?: string;
     notes?: string;
     idempotency_key?: string;
@@ -143,6 +189,35 @@ export interface MealInput {
 export interface MealInsertResult {
     meal: Meal;
     deduplicated: boolean;
+}
+
+/**
+ * Normalizes a raw `meals` row (whatever PostgREST/Supabase handed back) into
+ * a Meal: every field in NUTRIENT_FIELDS is backfilled to `null` when absent,
+ * and nutrient_provenance is run through parseNutrientProvenance.
+ *
+ * After this migration ships, `select("*")` always returns every column with
+ * an explicit `null` for an unset one — Postgres never "omits" a column value
+ * from a row. This exists anyway, for two reasons: (1) defense for any
+ * present or future caller that selects an explicit column list instead of
+ * `"*"` and so genuinely can produce an object missing these keys, and (2) to
+ * make CONTRACT §7's backward-compatibility guarantee ("existing meals must
+ * stay valid and expose new fields as null") an explicit, tested property of
+ * this module rather than an implicit consequence of how Postgres happens to
+ * behave today. Mirrors the cache backfill in src/foods.ts:getCachedFood,
+ * which exists for the same reason on a column that genuinely can go missing
+ * (a JSON blob cached before a field existed).
+ *
+ * Exported so src/supabase.test.ts can exercise the "old row" case directly
+ * without standing up a fake Supabase client.
+ */
+export function normalizeMeal(row: Record<string, unknown>): Meal {
+    const meal: Record<string, unknown> = { ...row };
+    for (const field of NUTRIENT_FIELDS) {
+        meal[field] = (meal[field] as number | null | undefined) ?? null;
+    }
+    meal.nutrient_provenance = parseNutrientProvenance(row.nutrient_provenance);
+    return meal as unknown as Meal;
 }
 
 /**
@@ -250,6 +325,16 @@ export async function insertMeal(
             ? input
             : { ...input, calories: toStoredInteger(input.calories) };
 
+    // Reject a defined-but-illegal micronutrient value (negative, NaN,
+    // Infinity) before it reaches supabase-js's JSON encoding — see
+    // assertValidNutrientValue for why the DB's own check constraint cannot
+    // be trusted to catch this on its own. caffeine_mg is included alongside
+    // the twelve new fields since it shares the same failure mode and had no
+    // TS-level guard either.
+    for (const field of [...MICRONUTRIENT_FIELDS, "caffeine_mg"] as const) {
+        assertValidNutrientValue(field, meal[field]);
+    }
+
     // Resolve logged_at once so the digest and the persisted row agree.
     const loggedAt = meal.logged_at ?? new Date().toISOString();
     // Always populate the key: use the client's if given, otherwise derive a
@@ -264,7 +349,7 @@ export async function insertMeal(
         .eq("idempotency_key", idempotencyKey)
         .maybeSingle();
     if (selErr) throw new Error(`Failed to look up meal: ${selErr.message}`);
-    if (existing) return { meal: existing as Meal, deduplicated: true };
+    if (existing) return { meal: normalizeMeal(existing), deduplicated: true };
 
     const { data, error } = await sb
         .from("meals")
@@ -280,6 +365,19 @@ export async function insertMeal(
             sugar_g: meal.sugar_g ?? null,
             alcohol_g: meal.alcohol_g ?? null,
             caffeine_mg: meal.caffeine_mg ?? null,
+            saturated_fat_g: meal.saturated_fat_g ?? null,
+            trans_fat_g: meal.trans_fat_g ?? null,
+            added_sugar_g: meal.added_sugar_g ?? null,
+            sodium_mg: meal.sodium_mg ?? null,
+            potassium_mg: meal.potassium_mg ?? null,
+            cholesterol_mg: meal.cholesterol_mg ?? null,
+            calcium_mg: meal.calcium_mg ?? null,
+            iron_mg: meal.iron_mg ?? null,
+            magnesium_mg: meal.magnesium_mg ?? null,
+            vitamin_a_mcg: meal.vitamin_a_mcg ?? null,
+            vitamin_c_mg: meal.vitamin_c_mg ?? null,
+            vitamin_d_mcg: meal.vitamin_d_mcg ?? null,
+            nutrient_provenance: meal.nutrient_provenance ?? null,
             logged_at: loggedAt,
             notes:
                 meal.notes != null ? decodeEscapeSequences(meal.notes) : null,
@@ -302,11 +400,36 @@ export async function insertMeal(
                 throw new Error(
                     `Failed to resolve idempotent meal: ${raceErr.message}`,
                 );
-            if (existing) return { meal: existing as Meal, deduplicated: true };
+            if (existing)
+                return { meal: normalizeMeal(existing), deduplicated: true };
         }
         throw new Error(`Failed to insert meal: ${error.message}`);
     }
-    return { meal: data as Meal, deduplicated: false };
+    return { meal: normalizeMeal(data), deduplicated: false };
+}
+
+/**
+ * One meal by id, scoped to its owner. Returns null when the meal does not
+ * exist or belongs to someone else — the two are deliberately
+ * indistinguishable to the caller.
+ *
+ * Added for the nutrient resolution policy (src/resolution.ts): deciding
+ * whether an incoming value may overwrite a stored one requires knowing what
+ * is stored AND where it came from, and `updateMeal`'s own internal select
+ * happens after that decision has to be made.
+ */
+export async function getMealById(
+    userId: string,
+    id: string,
+): Promise<Meal | null> {
+    const { data, error } = await getSupabase()
+        .from("meals")
+        .select("*")
+        .eq("id", id)
+        .eq("user_id", userId)
+        .maybeSingle();
+    if (error) throw new Error(`Failed to get meal: ${error.message}`);
+    return data ? normalizeMeal(data as Record<string, unknown>) : null;
 }
 
 export async function getMealsByDate(
@@ -326,7 +449,7 @@ export async function getMealsByDate(
         .order("logged_at", { ascending: true });
 
     if (error) throw new Error(`Failed to get meals: ${error.message}`);
-    return (data as Meal[]) ?? [];
+    return ((data as Record<string, unknown>[]) ?? []).map(normalizeMeal);
 }
 
 export async function getMealsInRange(
@@ -347,7 +470,7 @@ export async function getMealsInRange(
         .order("logged_at", { ascending: true });
 
     if (error) throw new Error(`Failed to get meals: ${error.message}`);
-    return (data as Meal[]) ?? [];
+    return ((data as Record<string, unknown>[]) ?? []).map(normalizeMeal);
 }
 
 /**
@@ -471,7 +594,7 @@ export async function getAllMeals(userId: string): Promise<Meal[]> {
             .range(from, to);
 
         if (error) throw new Error(`Failed to get meals: ${error.message}`);
-        return (data as Meal[]) ?? [];
+        return ((data as Record<string, unknown>[]) ?? []).map(normalizeMeal);
     });
 
     if (meals.length < expected) {
@@ -521,7 +644,8 @@ export async function searchMeals(
         if (error) {
             throw new Error(`Failed to search meals: ${error.message}`);
         }
-        for (const meal of (data as Meal[]) ?? []) {
+        for (const row of (data as Record<string, unknown>[]) ?? []) {
+            const meal = normalizeMeal(row);
             if (!seen.has(meal.id)) {
                 seen.add(meal.id);
                 merged.push(meal);
@@ -562,6 +686,16 @@ export async function updateMeal(
     if (selErr) throw new Error(`Failed to update meal: ${selErr.message}`);
     if (!existing) throw new Error("Failed to update meal: meal not found");
 
+    // Same guard as insertMeal, and for the same reason: a defined-but-
+    // illegal value must be rejected here, before supabase-js JSON-encodes
+    // it away into a silent `null`. Only fields actually PASSED are checked
+    // — `undefined` (not supplied) is already skipped inside
+    // assertValidNutrientValue, and an explicit `null` (clear the field) is
+    // legal and skipped too.
+    for (const field of [...MICRONUTRIENT_FIELDS, "caffeine_mg"] as const) {
+        assertValidNutrientValue(field, fields[field]);
+    }
+
     const update: Record<string, unknown> = {};
     if (fields.description !== undefined)
         update.description = decodeEscapeSequences(fields.description);
@@ -577,6 +711,39 @@ export async function updateMeal(
     if (fields.alcohol_g !== undefined) update.alcohol_g = fields.alcohol_g;
     if (fields.caffeine_mg !== undefined)
         update.caffeine_mg = fields.caffeine_mg;
+    // Micronutrients — each `!== undefined` check (not `!= null`) is what
+    // lets a caller pass an explicit `null` to CLEAR a field back to
+    // "unknown" while omitting the key entirely leaves the stored value
+    // untouched. Same idiom as every field above.
+    if (fields.saturated_fat_g !== undefined)
+        update.saturated_fat_g = fields.saturated_fat_g;
+    if (fields.trans_fat_g !== undefined)
+        update.trans_fat_g = fields.trans_fat_g;
+    if (fields.added_sugar_g !== undefined)
+        update.added_sugar_g = fields.added_sugar_g;
+    if (fields.sodium_mg !== undefined) update.sodium_mg = fields.sodium_mg;
+    if (fields.potassium_mg !== undefined)
+        update.potassium_mg = fields.potassium_mg;
+    if (fields.cholesterol_mg !== undefined)
+        update.cholesterol_mg = fields.cholesterol_mg;
+    if (fields.calcium_mg !== undefined) update.calcium_mg = fields.calcium_mg;
+    if (fields.iron_mg !== undefined) update.iron_mg = fields.iron_mg;
+    if (fields.magnesium_mg !== undefined)
+        update.magnesium_mg = fields.magnesium_mg;
+    if (fields.vitamin_a_mcg !== undefined)
+        update.vitamin_a_mcg = fields.vitamin_a_mcg;
+    if (fields.vitamin_c_mg !== undefined)
+        update.vitamin_c_mg = fields.vitamin_c_mg;
+    if (fields.vitamin_d_mcg !== undefined)
+        update.vitamin_d_mcg = fields.vitamin_d_mcg;
+    // Full replace, not a per-key merge: whatever object the caller passes
+    // becomes the new stored value (including `null` to clear it entirely).
+    // A caller that wants to change one nutrient's provenance while keeping
+    // the rest must read the existing meal, merge client-side, and pass the
+    // merged object — this function stays a thin plumbing layer, matching
+    // every other field here.
+    if (fields.nutrient_provenance !== undefined)
+        update.nutrient_provenance = fields.nutrient_provenance;
     if (fields.logged_at !== undefined) update.logged_at = fields.logged_at;
     if (fields.notes !== undefined)
         update.notes =
@@ -584,7 +751,11 @@ export async function updateMeal(
                 ? decodeEscapeSequences(fields.notes)
                 : fields.notes;
 
-    const newKey = updatedMealIdempotencyKey(userId, existing as Meal, fields);
+    const newKey = updatedMealIdempotencyKey(
+        userId,
+        normalizeMeal(existing),
+        fields,
+    );
     if (newKey !== null) update.idempotency_key = newKey;
 
     const { data, error } = await sb
@@ -596,7 +767,7 @@ export async function updateMeal(
         .single();
 
     if (error) throw new Error(`Failed to update meal: ${error.message}`);
-    return data as Meal;
+    return normalizeMeal(data);
 }
 
 // ---------- Profiles ----------
@@ -758,7 +929,42 @@ export async function upsertProfile(
 
 // ---------- Nutrition goals ----------
 
-export interface NutritionGoals {
+/** The micronutrient goal columns, paired with the `meals` column each one
+ * scores. ONE list, iterated by every layer — the Zod schema, the merge in
+ * set_nutrition_goals, the goal echo, the progress lines and the structured
+ * payload — because ten fields x five hand-written copies is how the caffeine
+ * limit came to be stored, listed, and then quietly ignored on the progress
+ * line it was set for.
+ *
+ * The direction is IN THE NAME (`min_` / `max_`), so no layer has to look it
+ * up and no second table can disagree with this one. See the migration
+ * 20260819130000_micronutrient_goals.sql for why.
+ *
+ * Ten of the twelve micronutrients, matching the epic's list. `trans_fat_g`
+ * and `added_sugar_g` are recorded and summarized like the rest but have no
+ * goal column: no target anyone sets is meaningful for trans fat (the answer
+ * is "as little as possible"), and added sugar's ceiling is already served by
+ * the shipped `daily_sugar_g`. Adding either later is one migration and one
+ * row here. */
+export const MICRONUTRIENT_GOAL_FIELDS = [
+    ["max_saturated_fat_g", "saturated_fat_g"],
+    ["max_sodium_mg", "sodium_mg"],
+    ["min_potassium_mg", "potassium_mg"],
+    ["max_cholesterol_mg", "cholesterol_mg"],
+    ["min_calcium_mg", "calcium_mg"],
+    ["min_iron_mg", "iron_mg"],
+    ["min_magnesium_mg", "magnesium_mg"],
+    ["min_vitamin_a_mcg", "vitamin_a_mcg"],
+    ["min_vitamin_c_mg", "vitamin_c_mg"],
+    ["min_vitamin_d_mcg", "vitamin_d_mcg"],
+] as const;
+
+export type MicronutrientGoalField =
+    (typeof MICRONUTRIENT_GOAL_FIELDS)[number][0];
+
+type MicronutrientGoals = Record<MicronutrientGoalField, number | null>;
+
+export interface NutritionGoals extends MicronutrientGoals {
     user_id: string;
     daily_calories: number | null;
     daily_protein_g: number | null;
@@ -777,7 +983,9 @@ export interface NutritionGoals {
     updated_at: string;
 }
 
-export interface NutritionGoalsInput {
+export interface NutritionGoalsInput extends Partial<
+    Record<MicronutrientGoalField, number | null>
+> {
     daily_calories?: number | null;
     daily_protein_g?: number | null;
     daily_carbs_g?: number | null;
@@ -819,6 +1027,11 @@ export async function upsertNutritionGoals(
                         ? null
                         : toStoredInteger(input.daily_water_ml),
                 target_weight_g: input.target_weight_g ?? null,
+                // Every micronutrient goal, written explicitly from the one
+                // list. An upsert replaces the whole row, so a column omitted
+                // here would be silently cleared on every save — which is why
+                // this is derived rather than hand-listed.
+                ...micronutrientGoalColumns(input),
                 updated_at: new Date().toISOString(),
             },
             { onConflict: "user_id" },
@@ -827,7 +1040,33 @@ export async function upsertNutritionGoals(
         .single();
 
     if (error) throw new Error(`Failed to save goals: ${error.message}`);
-    return data as NutritionGoals;
+    return normalizeNutritionGoals(data);
+}
+
+function micronutrientGoalColumns(
+    input: NutritionGoalsInput,
+): Record<string, number | null> {
+    const out: Record<string, number | null> = {};
+    for (const [column] of MICRONUTRIENT_GOAL_FIELDS)
+        out[column] = input[column] ?? null;
+    return out;
+}
+
+/** Backfill the micronutrient goal columns to explicit NULL.
+ *
+ * The same treatment `getCachedFood` gives newly added food-cache keys, and
+ * for the same reason: a goals row written before this migration deserializes
+ * with those keys ABSENT, and `undefined` fails a `.nullable()` structured
+ * payload where `null` passes. It also matters for the merge in
+ * set_nutrition_goals, which distinguishes "field omitted by the caller" from
+ * "field explicitly cleared" — reading an absent column back as undefined
+ * would make an unset goal indistinguishable from an unmentioned one. */
+function normalizeNutritionGoals(raw: unknown): NutritionGoals {
+    const row = raw as Record<string, unknown>;
+    const out = { ...row } as Record<string, unknown>;
+    for (const [column] of MICRONUTRIENT_GOAL_FIELDS)
+        out[column] = (row[column] as number | null | undefined) ?? null;
+    return out as unknown as NutritionGoals;
 }
 
 export async function getNutritionGoals(
@@ -840,7 +1079,7 @@ export async function getNutritionGoals(
         .maybeSingle();
 
     if (error) throw new Error(`Failed to get goals: ${error.message}`);
-    return (data as NutritionGoals | null) ?? null;
+    return data == null ? null : normalizeNutritionGoals(data);
 }
 
 // ---------- Water log ----------

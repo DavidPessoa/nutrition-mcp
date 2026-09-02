@@ -34,9 +34,13 @@ import {
     upsertProfile,
     getProfile,
     countMeals,
+    getMealById,
     existingIdempotencyKeys,
     existingMealIds,
+    MICRONUTRIENT_GOAL_FIELDS,
+    type MicronutrientGoalField,
     type Meal,
+    type MealInput,
     type NutritionGoals,
     type WaterEntry,
     type WeightEntry,
@@ -60,8 +64,11 @@ import {
     computeWeightTrend,
     dayCarries,
     coveredDailyAverage,
+    nutrientCoverage,
+    type PartialNutrient,
     dateDiffDays,
     type DailyBucket,
+    type NutrientCoverage,
 } from "./insights.js";
 import {
     toGrams,
@@ -87,7 +94,25 @@ import {
     type BulkImportArgs,
 } from "./import.js";
 import { normalizeBarcode, lookupBarcode, formatFoodResult } from "./foods.js";
+import {
+    NUTRIENT_FIELDS,
+    MICRONUTRIENT_FIELDS,
+    type NutrientField,
+    type NutrientSource,
+} from "./nutrients.js";
+import type { NutrientValues } from "./nutrient-units.js";
+import {
+    resolveNutrientWrite,
+    resolutionNote,
+    type NutrientResolution,
+} from "./resolution.js";
 import { formatMealSearchResults } from "./search.js";
+import {
+    searchFoods as searchUsdaFoods,
+    lookupFood as lookupUsdaFood,
+    resolveAmount as resolveUsdaAmount,
+    UsdaConfigError,
+} from "./usda.js";
 import { getWidgetHtml } from "./widgets.js";
 
 // MCP Apps UI (https://blog.modelcontextprotocol.io/posts/2026-01-26-mcp-apps/):
@@ -631,6 +656,23 @@ const MAX_MEALS_PER_USER = 200_000;
 // produces an identified per-row error instead of a Zod rejection that discards
 // the whole batch (and the structured report with it). z.coerce mirrors
 // log_meal, whose numbers are coerced because models emit "450" as a string.
+// A number that treats a BLANK STRING as "not recorded", not as zero.
+//
+// `z.coerce.number().parse("")` returns 0 — JavaScript's Number("") is 0, and
+// Zod coerces before it validates. Every mapper that emits an empty cell as
+// "" rather than null therefore writes a real, confident zero into a column
+// whose whole contract is that null and 0 mean different things. That is the
+// single failure this entire nutrient model exists to prevent, and it was
+// live on the macro fields below long before the micronutrients arrived.
+//
+// Blank in -> null out. An absent key stays absent. A real 0 stays 0.
+const blankSafeNumber = () =>
+    z.preprocess(
+        (value) =>
+            typeof value === "string" && value.trim() === "" ? null : value,
+        z.coerce.number().nullable(),
+    );
+
 const IMPORT_ROW_SCHEMA = z.object({
     source_line: z.coerce
         .number()
@@ -661,34 +703,62 @@ const IMPORT_ROW_SCHEMA = z.object({
         .describe(
             "breakfast, lunch, dinner or snack. Case-insensitive; unrecognized values become snack. Omit when the source has no meal column and it will be inferred from the time.",
         ),
-    calories: z.coerce.number().optional(),
-    protein_g: z.coerce.number().optional(),
-    carbs_g: z.coerce.number().optional(),
-    fat_g: z.coerce.number().optional(),
-    fiber_g: z.coerce.number().optional().describe("Dietary fiber in grams."),
-    sugar_g: z.coerce
-        .number()
+    calories: blankSafeNumber().optional(),
+    protein_g: blankSafeNumber().optional(),
+    carbs_g: blankSafeNumber().optional(),
+    fat_g: blankSafeNumber().optional(),
+    fiber_g: blankSafeNumber().optional().describe("Dietary fiber in grams."),
+    sugar_g: blankSafeNumber()
         .optional()
         .describe(
             "TOTAL sugars in grams, including sugar naturally present in fruit and milk — not added sugar. Map the export's 'Sugars' column straight across; do not try to subtract naturally occurring sugar.",
         ),
-    alcohol_g: z.coerce
-        .number()
+    alcohol_g: blankSafeNumber()
         .optional()
         .describe(
             "Grams of pure ethanol (NOT the volume of the drink and NOT its ABV). If the export gives a drink volume and strength instead, compute it: grams = millilitres x (ABV% / 100) x 0.789. Omit when the source has no alcohol column.",
         ),
-    caffeine_mg: z.coerce
-        .number()
+    caffeine_mg: blankSafeNumber()
         .optional()
         .describe(
             "Caffeine in MILLIGRAMS, not grams. Every export, label and guideline states caffeine in mg (a brewed coffee is about 95 mg, i.e. 0.095 g), so map an mg column straight across — and multiply by 1000 first if the source header says grams, or the whole history imports a thousand times too small. Omit when the source has no caffeine column.",
+        ),
+    // The twelve micronutrients. Deliberately WITHOUT the .min/.max that
+    // micronutrientInputSchema applies for log_meal: bounds live in
+    // validateRow so one bad cell is a per-row error instead of a Zod
+    // rejection that discards the whole batch and its report with it.
+    //
+    // Derived from MICRONUTRIENT_FIELDS rather than from MICRONUTRIENT_INPUTS,
+    // which is declared further down this file — referencing it here would be
+    // a temporal-dead-zone ReferenceError at module load, not a type error.
+    ...Object.fromEntries(
+        MICRONUTRIENT_FIELDS.map((field) => [
+            field,
+            blankSafeNumber()
+                .optional()
+                .describe(
+                    `${field}, in the unit its name states. Send it only from a real source — a label, a barcode or USDA lookup, or the user's own export — never estimated. A blank source cell must be sent as null or omitted, NEVER as 0: null means "not recorded" and 0 means the source said zero. If the column states a different unit, send the number as-is and name the unit in nutrient_units rather than converting it yourself.`,
+                ),
+        ]),
+    ),
+    nutrient_units: z
+        .record(z.string(), z.string())
+        .optional()
+        .describe(
+            'The unit a micronutrient column actually states, keyed by field name, when it differs from the unit in the field\'s own name — e.g. {"sodium_mg": "g"} for a "Sodium (g)" column. Only g, mg and mcg (and their long spellings) are accepted; an International Unit or % daily value column cannot be converted to a mass and must be left out of the import entirely rather than mapped to a field.',
+        ),
+    nutrient_provenance: z
+        .union([z.string(), z.record(z.string(), z.unknown())])
+        .nullable()
+        .optional()
+        .describe(
+            "The value of the 'nutrient_provenance' column when the file is an export from THIS server: JSON recording where each nutrient value came from. Pass the cell text through verbatim — it is what makes an export and re-import round trip lossless. Omit for files from other apps, and never compose one yourself: it declares where a number came from, and stating a source the file did not state mislabels an unverified value as measured.",
         ),
     notes: z
         .string()
         .optional()
         .describe(
-            "Anything from the source worth keeping that has no column here (micronutrients, the original row text).",
+            "Anything from the source worth keeping that has no column here (the original row text).",
         ),
     client_row_id: z
         .string()
@@ -1064,6 +1134,24 @@ export function formatGoals(
     parts.push(
         `- Target weight: ${goals.target_weight_g != null ? formatWeight(goals.target_weight_g, weightUnit) : "not set"}`,
     );
+    // Micronutrient goals: only the ones actually SET are listed, unlike the
+    // macros above. Ten "not set" rows on every goal echo would bury the
+    // targets the user does have; the model learns these exist from
+    // set_nutrition_goals' own field list instead. One pointer line covers the
+    // empty case so the capability is never invisible.
+    const micros = MICRONUTRIENT_GOALS.filter((g) =>
+        hasActiveTarget(goals[g.column], g.direction),
+    ).map(
+        (g) =>
+            `- ${g.label} (${g.direction === "ceiling" ? "max" : "min"}): ${goals[g.column]}${g.unit}`,
+    );
+    parts.push(
+        ...(micros.length > 0
+            ? micros
+            : [
+                  "- Micronutrient goals (saturated fat, sodium, potassium, cholesterol, calcium, iron, magnesium, vitamins A/C/D): none set",
+              ]),
+    );
     return parts.join("\n");
 }
 
@@ -1183,6 +1271,703 @@ function assertPlausibleWeight(grams: number, unit: WeightUnit): void {
     );
 }
 
+/** A bounded nutrient number that treats a BLANK STRING as "not recorded".
+ * Same reasoning as blankSafeNumber above — `z.coerce.number().parse("")` is
+ * 0 — with the bounds log_meal and update_meal apply at the schema edge.
+ * Nullable because a blank must be able to mean null; for the eight
+ * pre-epic fields a null is then dropped by toMealNutrientInput rather than
+ * written, since those columns have no clear-to-null path. */
+const nutrientNumber = (max: number) =>
+    z.preprocess(
+        (value) =>
+            typeof value === "string" && value.trim() === "" ? null : value,
+        z.coerce.number().min(0).max(max).nullable(),
+    );
+
+// ---------- Micronutrients: shared input schema and write resolution ----------
+//
+// The twelve new fields (CONTRACT.md §1) are optional on every write path and
+// stay that way: the model must never be forced to supply a micronutrient,
+// because the only way it could satisfy such a requirement is by inventing
+// one. What the schema DOES do is give each field its unit in the name and a
+// bound, and give the caller a way to say where the numbers came from.
+//
+// Bounds are generous per-unit ceilings rather than nutrition-specific
+// limits: their job is to catch a unit mix-up or a stray parse, not to
+// adjudicate what a plausible sodium figure is.
+const MAX_MICRO_MG = 100_000; // 100 g of anything measured in mg
+const MAX_MICRO_MCG = 100_000_000; // 100 g of anything measured in mcg
+
+const MICRONUTRIENT_INPUTS: ReadonlyArray<
+    readonly [NutrientField, number, string]
+> = [
+    [
+        "saturated_fat_g",
+        MAX_MACRO_G,
+        "Saturated fat in grams. From a label, a barcode lookup or USDA — not estimated.",
+    ],
+    [
+        "trans_fat_g",
+        MAX_MACRO_G,
+        "Trans fat in grams. A label reporting '0 g trans fat' is a real zero and should be sent as 0.",
+    ],
+    [
+        "added_sugar_g",
+        MAX_MACRO_G,
+        "ADDED sugars in grams — a separate figure from sugar_g (total sugars), never derived from it.",
+    ],
+    ["sodium_mg", MAX_MICRO_MG, "Sodium in milligrams."],
+    ["potassium_mg", MAX_MICRO_MG, "Potassium in milligrams."],
+    ["cholesterol_mg", MAX_MICRO_MG, "Cholesterol in milligrams."],
+    ["calcium_mg", MAX_MICRO_MG, "Calcium in milligrams."],
+    ["iron_mg", MAX_MICRO_MG, "Iron in milligrams."],
+    ["magnesium_mg", MAX_MICRO_MG, "Magnesium in milligrams."],
+    [
+        "vitamin_a_mcg",
+        MAX_MICRO_MCG,
+        "Vitamin A in micrograms RAE. A label reporting IU cannot be converted — omit the field rather than guessing.",
+    ],
+    ["vitamin_c_mg", MAX_MICRO_MG, "Vitamin C in milligrams."],
+    ["vitamin_d_mcg", MAX_MICRO_MCG, "Vitamin D in micrograms."],
+];
+
+const MICRONUTRIENT_GUIDANCE =
+    "\n\nMICRONUTRIENTS (sodium, potassium, cholesterol, calcium, iron, magnesium, saturated/trans fat, added sugar, vitamins A/C/D) are OPTIONAL and must NEVER be estimated. Send them only when they come from a real source — a nutrition label the user is reading, a lookup_barcode result, a lookup_food (USDA) result, or published restaurant nutrition — and say which with nutrient_source. A micronutrient you estimate is rejected by the server, not stored: a missing micronutrient is correct, an invented one is not. Calories, protein, carbs, fat, fiber and sugar MAY be estimated; that is what nutrient_source='model_estimate' (the default) records.";
+
+/** The twelve micronutrient fields as Zod inputs. `allowClear` adds
+ * `.nullable()` for update paths, where an explicit null is how the caller
+ * says "this was wrong, it is not actually known" — distinct from omitting
+ * the field, which leaves the stored value alone. */
+function micronutrientInputSchema(allowClear: boolean) {
+    const shape: Record<string, z.ZodTypeAny> = {};
+    for (const [field, max, description] of MICRONUTRIENT_INPUTS) {
+        // Always nullable underneath (a blank string must be able to become
+        // null); `allowClear` only governs what the DESCRIPTION invites the
+        // caller to do, since a null on a non-clearing path is dropped rather
+        // than written.
+        shape[field] = nutrientNumber(max)
+            .optional()
+            .describe(
+                description +
+                    (allowClear
+                        ? " Pass null to clear a value that turned out not to be known."
+                        : ""),
+            );
+    }
+    return shape;
+}
+
+/** Where this write's numbers came from, and which of them the model made up
+ * anyway. Two fields rather than a per-nutrient map: the model has to fill
+ * this in on every call, and a map is both more to get wrong and more to
+ * ignore. A genuinely mixed meal is expressible because `estimated_fields`
+ * carves the estimated ones back out of the sourced write. */
+const NUTRIENT_SOURCE_INPUTS = {
+    nutrient_source: z
+        .enum([
+            "nutrition_label",
+            "open_food_facts",
+            "usda_fdc",
+            "restaurant_published",
+            "user_provided",
+            "model_estimate",
+        ])
+        .optional()
+        .describe(
+            "Where these nutrient values came from. Defaults to 'model_estimate'. Use 'nutrition_label' when the user read a package label to you, 'open_food_facts' after lookup_barcode, 'usda_fdc' after lookup_food, 'restaurant_published' for a chain's published nutrition, 'user_provided' when the user states a value themselves. This decides whether micronutrients are stored at all, and protects better-sourced values from being overwritten by worse ones.",
+        ),
+    nutrient_source_id: z
+        .string()
+        .max(255)
+        .optional()
+        .describe(
+            "Identifier of the specific record the values came from — the 'off:<barcode>' or 'fdc:<id>' line a lookup returned. Recorded per nutrient so a figure can be traced back later.",
+        ),
+    estimated_fields: z
+        .array(z.string())
+        .optional()
+        .describe(
+            "Fields on THIS call that you estimated rather than read from the source named in nutrient_source. Use it for the common mixed case: a barcode gave the macros but had no fiber figure, so you estimated fiber — pass nutrient_source='open_food_facts' and estimated_fields=['fiber_g']. Estimated micronutrients are still rejected.",
+        ),
+    override_existing: z
+        .boolean()
+        .optional()
+        .describe(
+            "Set true ONLY when the user explicitly corrects a value that is already stored from a better source. Without it, a lower-quality value cannot overwrite a higher-quality one.",
+        ),
+};
+
+/** Pull the nutrient fields a caller actually supplied out of a flat tool
+ * argument object. A key present with `undefined` is treated as absent —
+ * Zod's `.optional()` produces exactly that for a field the model omitted,
+ * and treating it as an explicit clear would wipe stored values on every
+ * partial update. */
+function suppliedNutrients(args: Record<string, unknown>): NutrientValues {
+    const values: NutrientValues = {};
+    for (const field of NUTRIENT_FIELDS) {
+        if (!(field in args)) continue;
+        const value = args[field];
+        if (value === undefined) continue;
+        values[field] = value as number | null;
+    }
+    return values;
+}
+
+/**
+ * Run a write through the resolution policy (src/resolution.ts) in two
+ * passes: the sourced fields first, then the ones the caller admitted to
+ * estimating. The second pass sees the first pass's result as prior state,
+ * so an estimate can fill a field the source had nothing for but can never
+ * overwrite one the source just established — inside a single call, without
+ * the caller having to sequence anything.
+ */
+function resolveMealNutrients(
+    prior: Meal | null,
+    args: Record<string, unknown>,
+): NutrientResolution {
+    const supplied = suppliedNutrients(args);
+    const estimated = new Set(
+        (Array.isArray(args.estimated_fields)
+            ? args.estimated_fields
+            : []) as string[],
+    );
+    const source = (args.nutrient_source ?? "model_estimate") as NutrientSource;
+    const sourceId = (args.nutrient_source_id as string | undefined) ?? null;
+    const override = args.override_existing === true;
+
+    const sourcedValues: NutrientValues = {};
+    const estimatedValues: NutrientValues = {};
+    for (const [field, value] of Object.entries(supplied) as Array<
+        [NutrientField, number | null]
+    >) {
+        if (estimated.has(field) && source !== "model_estimate") {
+            estimatedValues[field] = value;
+        } else {
+            sourcedValues[field] = value;
+        }
+    }
+
+    const priorState = prior
+        ? {
+              values: suppliedNutrients(
+                  prior as unknown as Record<string, unknown>,
+              ),
+              provenance: prior.nutrient_provenance,
+          }
+        : null;
+
+    const first = resolveNutrientWrite(
+        priorState,
+        { values: sourcedValues, source, sourceId },
+        { userOverride: override },
+    );
+    if (Object.keys(estimatedValues).length === 0) return first;
+
+    const second = resolveNutrientWrite(
+        {
+            values: { ...(priorState?.values ?? {}), ...first.values },
+            provenance: first.provenance,
+        },
+        { values: estimatedValues, source: "model_estimate" },
+        { userOverride: override },
+    );
+    return {
+        values: { ...first.values, ...second.values },
+        provenance: second.provenance,
+        rejectedEstimates: [
+            ...first.rejectedEstimates,
+            ...second.rejectedEstimates,
+        ],
+        blockedByPrecedence: [
+            ...first.blockedByPrecedence,
+            ...second.blockedByPrecedence,
+        ],
+    };
+}
+
+/**
+ * Narrow a resolved nutrient set to what `MealInput` accepts.
+ *
+ * The twelve micronutrients are `number | null` there (null = clear the
+ * field), but the original eight — calories, the macros, alcohol, caffeine —
+ * are `number | undefined`: they predate this epic and have no clear-to-null
+ * path through any tool, so their schemas never produce a null. This drops a
+ * null on one of those rather than widening a shipped type to permit a write
+ * nothing can actually request.
+ */
+function toMealNutrientInput(values: NutrientValues): Partial<MealInput> {
+    const out: Record<string, number | null> = {};
+    for (const [field, value] of Object.entries(values) as Array<
+        [NutrientField, number | null | undefined]
+    >) {
+        if (value === undefined) continue;
+        if (value === null && !MICRONUTRIENT_SET_MCP.has(field)) continue;
+        out[field] = value;
+    }
+    return out as Partial<MealInput>;
+}
+
+const MICRONUTRIENT_SET_MCP: ReadonlySet<string> = new Set(
+    MICRONUTRIENT_INPUTS.map(([field]) => field),
+);
+
+/**
+ * Strip every nutrient field from a tool's raw arguments.
+ *
+ * This is load-bearing, and its absence was a shipped-in-a-commit bug: the
+ * write used to be built as `{ ...args, ...toMealNutrientInput(resolved) }`,
+ * so a field the policy REFUSED — an estimated micronutrient, a
+ * precedence-blocked overwrite — was simply absent from the overlay and the
+ * caller's original value survived underneath it. The row then held a
+ * model-invented sodium figure while the response said "Not stored:
+ * sodium_mg", and in the update case held a rejected number labelled with
+ * the authoritative provenance of the value it was supposed to have left
+ * alone. Removing the nutrients from the base object is what makes
+ * `resolved.values` the sole authority the surrounding comments claim it is.
+ */
+function withoutNutrientFields<T extends Record<string, unknown>>(
+    args: T,
+): Omit<
+    T,
+    | NutrientField
+    | "nutrient_source"
+    | "nutrient_source_id"
+    | "estimated_fields"
+    | "override_existing"
+> {
+    const out: Record<string, unknown> = { ...args };
+    for (const field of NUTRIENT_FIELDS) delete out[field];
+    // Resolution inputs describe the write; they are not columns.
+    delete out.nutrient_source;
+    delete out.nutrient_source_id;
+    delete out.estimated_fields;
+    delete out.override_existing;
+    return out as Omit<
+        T,
+        | NutrientField
+        | "nutrient_source"
+        | "nutrient_source_id"
+        | "estimated_fields"
+        | "override_existing"
+    >;
+}
+
+/** Human labels for rendering stored micronutrients back to the model. Only
+ * non-null fields are ever shown, so a meal with no micronutrient data reads
+ * exactly as it did before this field set existed. */
+const MICRONUTRIENT_LABELS: ReadonlyArray<
+    readonly [NutrientField, string, string]
+> = [
+    ["saturated_fat_g", "Saturated fat", "g"],
+    ["trans_fat_g", "Trans fat", "g"],
+    ["added_sugar_g", "Added sugar", "g"],
+    ["sodium_mg", "Sodium", "mg"],
+    ["potassium_mg", "Potassium", "mg"],
+    ["cholesterol_mg", "Cholesterol", "mg"],
+    ["calcium_mg", "Calcium", "mg"],
+    ["iron_mg", "Iron", "mg"],
+    ["magnesium_mg", "Magnesium", "mg"],
+    ["vitamin_a_mcg", "Vitamin A", "mcg"],
+    ["vitamin_c_mg", "Vitamin C", "mg"],
+    ["vitamin_d_mcg", "Vitamin D", "mcg"],
+];
+
+/** The micronutrient line for formatMeal, or null when the meal carries
+ * none. */
+export function micronutrientLine(meal: Meal): string | null {
+    const parts = MICRONUTRIENT_LABELS.filter(
+        ([field]) => meal[field] != null,
+    ).map(([field, label, unit]) => `${label}: ${meal[field]} ${unit}`);
+    return parts.length > 0 ? parts.join(" · ") : null;
+}
+
+// ---------- Micronutrient coverage and goals ----------
+
+/** Label and unit for every micronutrient, keyed by field, built from the
+ * table above so the two cannot drift. */
+const MICRONUTRIENT_META = new Map(
+    MICRONUTRIENT_LABELS.map(([field, label, unit]) => [
+        field,
+        { label, unit: unit === "g" ? "g" : ` ${unit}` },
+    ]),
+);
+
+/** Every micronutrient as one spec: its goal column (null for the two that
+ * have none), its display label and unit, which way its goal points, and the
+ * ceiling its goal column's precision allows.
+ *
+ * ONE list drives the Zod schema, the merge in set_nutrition_goals, the goal
+ * echo, the progress lines and the structured payload. THE DIRECTION IS READ
+ * OFF THE COLUMN NAME rather than kept in a second table: the whole point of
+ * naming the columns `min_`/`max_` is that no layer has to look the direction
+ * up and no lookup can go stale.
+ *
+ * The bound mirrors the column precision, for the same overflow reason
+ * MAX_GOAL_G exists: numeric(6,2) for the gram target, numeric(7,2) for the
+ * mg and mcg ones. Anything above it is a Postgres "numeric field overflow"
+ * rather than a saved goal. */
+interface MicronutrientSpec {
+    column: MicronutrientGoalField | null;
+    // PartialNutrient, not NutrientField: nutrientCoverage only accepts
+    // nutrients where null genuinely means "not recorded", which is the whole
+    // micronutrient set but not calories or the macros.
+    field: PartialNutrient;
+    label: string;
+    unit: string;
+    direction: GoalDirection;
+    max: number;
+}
+
+const MICRONUTRIENT_SPECS: readonly MicronutrientSpec[] = [
+    ...MICRONUTRIENT_GOAL_FIELDS.map(([column, field]): MicronutrientSpec => {
+        const meta = MICRONUTRIENT_META.get(field)!;
+        return {
+            column,
+            field,
+            label: meta.label,
+            unit: meta.unit,
+            direction: column.startsWith("max_") ? "ceiling" : "floor",
+            max: column.endsWith("_g") ? MAX_GOAL_G : MAX_GOAL_MG,
+        };
+    }),
+    // The two micronutrients with no goal column — see
+    // MICRONUTRIENT_GOAL_FIELDS for why. They still get a coverage line and a
+    // payload row once recorded: being ungoalable is not a reason to hide the
+    // data. `column: null` means no target is ever looked up for them.
+    ...(["trans_fat_g", "added_sugar_g"] as const).map(
+        (field): MicronutrientSpec => ({
+            column: null,
+            field,
+            label: MICRONUTRIENT_META.get(field)!.label,
+            unit: MICRONUTRIENT_META.get(field)!.unit,
+            direction: "ceiling",
+            max: MAX_GOAL_G,
+        }),
+    ),
+];
+
+/** The goalable subset, in the epic's order. */
+const MICRONUTRIENT_GOALS = MICRONUTRIENT_SPECS.filter(
+    (s): s is MicronutrientSpec & { column: MicronutrientGoalField } =>
+        s.column !== null,
+);
+
+/** set_nutrition_goals' micronutrient inputs. Bounded in the schema like every
+ * other goal field (see the MAX_* block for why this tool differs from
+ * bulk_import_meals), `.nullable()` so a target can be cleared, `.optional()`
+ * so an omitted field keeps its stored value.
+ *
+ * Deliberately NO defaults and no suggested figures in the descriptions. There
+ * are widely published reference intakes for all ten, and offering them here
+ * would turn a tracking tool into a source of dietary advice for a user who
+ * never asked — the direction and the unit are what the model needs, and the
+ * number is the user's. */
+function micronutrientGoalSchema(): Record<
+    MicronutrientGoalField,
+    z.ZodOptional<z.ZodNullable<z.ZodCoercedNumber<unknown>>>
+> {
+    const shape = {} as Record<
+        MicronutrientGoalField,
+        z.ZodOptional<z.ZodNullable<z.ZodCoercedNumber<unknown>>>
+    >;
+    for (const g of MICRONUTRIENT_GOALS) {
+        const noun = g.direction === "ceiling" ? "maximum" : "minimum";
+        shape[g.column] = z.coerce
+            .number()
+            .min(0)
+            .max(g.max)
+            .nullable()
+            .optional()
+            .describe(
+                `Daily ${g.label.toLowerCase()} goal in ${g.unit.trim()}, treated as a ${noun} to ${g.direction === "ceiling" ? "stay under" : "reach"}. Set it to the figure the USER gives you; do not supply a recommended value of your own. Null to clear.`,
+            );
+    }
+    return shape;
+}
+
+function micronutrientGoalMerge(
+    args: Partial<Record<MicronutrientGoalField, number | null | undefined>>,
+    existing: NutritionGoals | null,
+): Record<string, number | null> {
+    const out: Record<string, number | null> = {};
+    for (const g of MICRONUTRIENT_GOALS) {
+        out[g.column] =
+            args[g.column] === undefined
+                ? (existing?.[g.column] ?? null)
+                : (args[g.column] ?? null);
+    }
+    return out;
+}
+
+/** How an incomplete total must be qualified, in words, everywhere it is
+ * printed.
+ *
+ * This string is the feature. "Sodium: 1300 mg / 2300 mg limit (57%, under)"
+ * on a day where one of three meals never recorded sodium is a FALSE
+ * statement — the unrecorded meal's sodium is unknown and non-negative, so the
+ * real intake may be well over the limit. The verdict is not suppressed
+ * (a user with a target wants to see where they stand), but it is never
+ * allowed to stand unqualified: the sentence says out loud that it covers the
+ * recorded meals only and that the true total is higher. */
+export function coverageNote(cov: NutrientCoverage): string {
+    if (cov.complete || cov.known_meals === 0) return "";
+    return ` — recorded meals only, ${cov.known_meals} of ${cov.total_meals}; the true total is higher`;
+}
+
+/** Coverage-aware progress lines for the micronutrients.
+ *
+ * Data-driven display, exactly like fiber/sugar/caffeine and with no opt-in
+ * flag: a nutrient appears once the user has actually recorded it, or once
+ * they have set a target for it, and is silent otherwise. A user who has never
+ * logged a sodium figure sees no sodium row rather than a fabricated "0 mg".
+ *
+ * `≥` rather than a bare number whenever coverage is partial: the recorded
+ * meals are a floor on the day's intake, not the day's intake. */
+export function micronutrientProgressLines(
+    meals: Meal[],
+    goals: NutritionGoals | null,
+): string[] {
+    const lines: string[] = [];
+    for (const g of MICRONUTRIENT_SPECS) {
+        const cov = nutrientCoverage(meals, g.field);
+        const target = g.column == null ? null : (goals?.[g.column] ?? null);
+        if (cov.known_meals === 0) {
+            // Nothing recorded. Say so only when a target makes the silence
+            // look like tracking having broken — same rule as recordedGoalLine.
+            if (!hasActiveTarget(target, g.direction)) continue;
+            const noun = g.direction === "ceiling" ? "limit" : "target";
+            lines.push(`${g.label}: not recorded / ${target}${g.unit} ${noun}`);
+            continue;
+        }
+        const value = Math.round(cov.known_total! * 10) / 10;
+        const hasTarget = hasActiveTarget(target, g.direction);
+        // formatGoalLine renders the unit itself when there is no target and
+        // puts it on the target when there is, so the "≥" override has to
+        // match whichever form it is about to take.
+        const actualText = cov.complete
+            ? undefined
+            : hasTarget
+              ? `≥${value}`
+              : `≥${value}${g.unit}`;
+        lines.push(
+            formatGoalLine(
+                g.label,
+                g.unit,
+                value,
+                target,
+                g.direction,
+                actualText,
+            ) + coverageNote(cov),
+        );
+    }
+    return lines;
+}
+
+/** Per-nutrient coverage for the structured payloads.
+ *
+ * An ARRAY, not a fixed object: a `.nullable()` field is REQUIRED in the
+ * emitted JSON Schema, so a twelve-key object would force every consumer and
+ * every literal to carry twelve explicit nulls forever. A row exists only for
+ * a nutrient the user has data or a target for, which is also exactly the
+ * data-driven display rule the text output follows.
+ *
+ * `direction` is the epic's explicit vocabulary — "minimum"/"maximum" — not
+ * this file's internal floor/ceiling wording, and it is stated for every
+ * goalable nutrient whether or not a target is currently set: a consumer
+ * needs to know which way sodium points before it can offer to set one. */
+export const NUTRIENT_COVERAGE_ITEM = z.object({
+    nutrient: z.string(),
+    unit: z.string(),
+    /** Sum over the meals that recorded it. NULL when none did — an
+     * unmeasured nutrient has no total, and 0 would be a lie. */
+    known_total: z.number().nullable(),
+    known_meals: z.number(),
+    total_meals: z.number(),
+    /** The same question weighed by calories: how much of the day's intake
+     * the recorded meals account for. "2 of 3 meals" says nothing about
+     * whether the unrecorded one was a dinner or a black coffee, and that is
+     * the difference between a total that is nearly right and one that is
+     * half the story. */
+    known_calories: z.number(),
+    total_calories: z.number(),
+    /** known_meals / total_meals, 0..1, rounded to two places. */
+    coverage: z.number(),
+    /** True only when every meal recorded a value. False means `known_total`
+     * is a LOWER BOUND on the real intake, and must not be rendered as if it
+     * were the whole figure. */
+    complete: z.boolean(),
+    /** The target `known_total` is judged against, SCALED to the same span —
+     * the daily goal multiplied by `target_days`.
+     *
+     * The alternative shapes were: ship the raw daily column and let the
+     * consumer scale it, or add a per-day average beside the total. Both
+     * leave `known_total` and `target` sitting side by side in one row
+     * measuring different spans, and the first consumer to write
+     * `value > target` — which both our own widget and the obvious external
+     * reading do — gets a wrong answer with no way to notice. A range total
+     * of 2,400 mg sodium over three days rendered "100 mg over limit"
+     * against a 2,300 mg/day ceiling, and a 1,000 mg calcium total over
+     * three days rendered "target met" against a 1,000 mg/day floor. Scaling
+     * here makes the naive comparison the correct one; `target_days` is
+     * carried so a consumer can still say "of 6,900 mg over 3 days" or
+     * divide back to the daily figure. */
+    target: z.number().nullable(),
+    /** How many days `known_total` and `target` span. 1 for a single-day
+     * payload; the number of LOGGED days for a range (the days the total is
+     * actually summed over — scaling by calendar days in the range would
+     * judge a total against days that contributed nothing to it). */
+    target_days: z.number(),
+    direction: z.enum(["minimum", "maximum"]).nullable(),
+    /** The confidence behind `known_total`, folded from each contributing
+     * meal's nutrient_provenance entry for THIS nutrient: the single
+     * confidence when they agree, "mixed" when they disagree, and null when
+     * no contributing meal carries provenance for it at all.
+     *
+     * null is the honest default and must stay renderable: a widget shows no
+     * badge for it. Defaulting to "authoritative" instead would put a
+     * "measured" tick on a figure nothing vouches for, which is the same
+     * class of claim as showing 0 for an unrecorded nutrient — and this is
+     * the one the user is most likely to trust, because it looks like
+     * provenance rather than like data. */
+    confidence: z
+        .enum(["authoritative", "user_provided", "estimated", "mixed"])
+        .nullable(),
+});
+
+/**
+ * Fold the per-meal provenance for one nutrient into a single confidence for
+ * the day's total.
+ *
+ * Only meals that actually CONTRIBUTED a value are consulted — a meal with no
+ * sodium figure says nothing about how good the sodium total is, whatever
+ * its provenance for other nutrients.
+ *
+ * A contributing meal with NO provenance entry (every meal logged before this
+ * epic is in that state) counts as a disagreement, not as a meal to skip. If
+ * half the total is a label figure and half is unattributed, the total is not
+ * a label figure — badging it "measured" would vouch for grams nothing
+ * vouches for, and a provenance badge is the last thing a user would think to
+ * doubt. Unattributed throughout yields null, which renders no badge at all.
+ */
+export function foldConfidence(
+    meals: Meal[],
+    field: NutrientField,
+): "authoritative" | "user_provided" | "estimated" | "mixed" | null {
+    const seen = new Set<string>();
+    let unattributed = false;
+    for (const meal of meals) {
+        if (meal[field] == null) continue;
+        const entry = meal.nutrient_provenance?.[field];
+        if (!entry) {
+            unattributed = true;
+            continue;
+        }
+        seen.add(entry.confidence);
+    }
+    if (seen.size === 0) return null;
+    if (seen.size > 1 || unattributed) return "mixed";
+    return [...seen][0] as "authoritative" | "user_provided" | "estimated";
+}
+
+/**
+ * @param days How many days `meals` spans — 1 for a single day (the default,
+ *   so the single-day callers read exactly as before), the number of logged
+ *   days for a range. Every target is scaled by it; see `target` on
+ *   NUTRIENT_COVERAGE_ITEM for why the row carries a scaled target rather
+ *   than the raw daily column.
+ */
+export function nutrientCoveragePayload(
+    meals: Meal[],
+    goals: NutritionGoals | null,
+    days = 1,
+): Array<z.infer<typeof NUTRIENT_COVERAGE_ITEM>> {
+    // A range with meals in it has at least one logged day; the guard is for
+    // a caller that hands us a count it derived some other way, since a 0
+    // would zero out every ceiling and make every row read "over limit".
+    const span = Math.max(1, Math.round(days));
+    const rows: Array<z.infer<typeof NUTRIENT_COVERAGE_ITEM>> = [];
+    for (const g of MICRONUTRIENT_SPECS) {
+        const cov = nutrientCoverage(meals, g.field);
+        const stored = g.column == null ? null : (goals?.[g.column] ?? null);
+        // hasActiveTarget, not `!= null`: a stored 0 on a FLOOR is "unset"
+        // everywhere else in this file (a 0 mg calcium target is meaningless),
+        // and emitting it here as `target: 0` handed a widget a target the
+        // text output flatly denies exists — and one every progress ratio
+        // divides by. A 0 CEILING stays a real target, as it does in the text.
+        const daily = hasActiveTarget(stored, g.direction) ? stored : null;
+        if (cov.known_meals === 0 && daily == null) continue;
+        // Rounded, so a 3-day 2,300 mg ceiling is 6900 and not 6900.000000001.
+        const target =
+            daily == null ? null : Math.round(daily * span * 10) / 10;
+        rows.push({
+            nutrient: g.field,
+            unit: g.unit.trim(),
+            known_total:
+                cov.known_total == null
+                    ? null
+                    : Math.round(cov.known_total * 10) / 10,
+            known_meals: cov.known_meals,
+            total_meals: cov.total_meals,
+            known_calories: cov.known_calories,
+            total_calories: cov.total_calories,
+            coverage: Math.round(cov.coverage * 100) / 100,
+            complete: cov.complete,
+            target,
+            target_days: span,
+            direction:
+                g.column == null
+                    ? null
+                    : g.direction === "ceiling"
+                      ? "maximum"
+                      : "minimum",
+            confidence: foldConfidence(meals, g.field),
+        });
+    }
+    return rows;
+}
+
+/**
+ * Render one USDA figure for the model. Two decimals is right for grams and
+ * milligrams and catastrophic for micrograms: 0.1 mcg/100 g of vitamin D
+ * scaled to a 1 g serving is 0.001 mcg, which rounds to a bare `0` — and the
+ * next line of the same message tells the model to pass these figures to
+ * log_meal, where 0 means "the source measured zero". Null is unknown and 0
+ * is measured everywhere else in this server; a printed 0 must mean the
+ * source said 0. So anything that would round away keeps two significant
+ * digits instead.
+ */
+export function formatLookupValue(v: number): string {
+    const rounded = Math.round(v * 100) / 100;
+    if (rounded !== 0 || v === 0) return String(rounded);
+    return String(Number(v.toPrecision(2)));
+}
+
+/**
+ * A compact provenance summary: sources grouped, not one line per nutrient.
+ * Twenty attribution lines under every meal would drown the meal itself, and
+ * the question a reader actually has is "which of these did you make up".
+ */
+export function provenanceLine(meal: Meal): string | null {
+    const provenance = meal.nutrient_provenance;
+    if (!provenance) return null;
+    const bySource = new Map<string, string[]>();
+    for (const field of NUTRIENT_FIELDS) {
+        const entry = provenance[field];
+        if (!entry) continue;
+        const key = entry.source_id
+            ? `${entry.source} (${entry.source_id})`
+            : entry.source;
+        const fields = bySource.get(key);
+        if (fields) fields.push(field);
+        else bySource.set(key, [field]);
+    }
+    if (bySource.size === 0) return null;
+    const parts = [...bySource.entries()].map(
+        ([source, fields]) => `${source}: ${fields.join(", ")}`,
+    );
+    return `Sources — ${parts.join(" | ")}`;
+}
+
 export function formatMeal(meal: Meal, alcohol: AlcoholDisplay = null): string {
     const parts = [
         `ID: ${meal.id}`,
@@ -1206,6 +1991,13 @@ export function formatMeal(meal: Meal, alcohol: AlcoholDisplay = null): string {
         meal.caffeine_mg != null
             ? `Caffeine: ${formatMg(meal.caffeine_mg)}`
             : null,
+        // Only fields the meal actually carries, so a meal with no
+        // micronutrient data renders exactly as it did before they existed.
+        micronutrientLine(meal),
+        // Per-nutrient attribution, grouped by source. Absent on every meal
+        // logged before this epic, which is why it is a nullable line rather
+        // than a fixed one.
+        provenanceLine(meal),
         meal.notes ? `Notes: ${meal.notes}` : null,
     ];
     return parts.filter(Boolean).join("\n");
@@ -1315,7 +2107,8 @@ export function registerTools(
                 // surface only one of the two.
                 "Log a meal entry with nutritional information. If the user doesn't specify the quantity or portion size, ask how much they ate before estimating calories and macros. When the user gives a barcode — typed, or read from a photo of the package (transcribe the digits printed under the barcode) — call lookup_barcode first to get the product's label data, then scale it to the amount eaten. Fall back to web search or estimation only when no product is found. Use web search for branded products when no barcode is available. When logging from a photo of a plated or prepared meal (no package/barcode): first identify each dish, then establish whether it is a restaurant/takeout meal or homemade before anything else. If it is from a restaurant, ask which restaurant and where, then search the web for its menu — chains publish per-item nutrition worth using directly, independent places usually publish ingredient lists that reveal the butter, cream, and oil the photo hides; if you cannot find the menu or cannot tell which dish it is, say so and put your assumption to the user as a question rather than presenting a guess as menu data. Either way, estimate portions in household measures the user can eyeball (a glass of, a handful of, a tablespoon of — NOT grams; for restaurant servings ask how much of it they actually ate), call search_meals to see how similar meals were logged before and to surface ingredients that may be invisible in the photo, then interview the user across multiple turns — one question per message, covering which variation each dish is, how much they ate, and photo-invisible ingredients (oil, sugar, sauce, what a drink was made with) — until nothing is left open. Do NOT call this tool after a single question-and-answer round; a lone confirmation is not enough. Only call it once every open question is resolved and the user has approved a full summary of the meal (or has told you to stop asking and just log it). Write the confirmed household-measure portions into the description itself (e.g. 'Oatmeal (1 glass raw oats, 2 glasses milk) with banana') so future searches are self-describing, and for a restaurant meal name the venue and city too (e.g. 'Pad thai with chicken (1 plate, finished) at Thai Basil, Podil, Kyiv').\n\n" +
                 NUTRIENT_COVERAGE +
-                "\nPutting '180 mg caffeine' or '6 g fiber' in notes or in the description instead of in the field leaves it out of every total, goal and chart.",
+                "\nPutting '180 mg caffeine' or '6 g fiber' in notes or in the description instead of in the field leaves it out of every total, goal and chart." +
+                MICRONUTRIENT_GUIDANCE,
             annotations: {
                 readOnlyHint: false,
                 destructiveHint: false,
@@ -1331,28 +2124,16 @@ export function registerTools(
                     ),
                 // Bounded in the schema, not the handler — see the MAX_*
                 // constants for why this tool differs from bulk_import_meals.
-                calories: z.coerce
-                    .number()
-                    .min(0)
-                    .max(MAX_CALORIES)
+                calories: nutrientNumber(MAX_CALORIES)
                     .optional()
                     .describe("Total calories"),
-                protein_g: z.coerce
-                    .number()
-                    .min(0)
-                    .max(MAX_MACRO_G)
+                protein_g: nutrientNumber(MAX_MACRO_G)
                     .optional()
                     .describe("Protein in grams"),
-                carbs_g: z.coerce
-                    .number()
-                    .min(0)
-                    .max(MAX_MACRO_G)
+                carbs_g: nutrientNumber(MAX_MACRO_G)
                     .optional()
                     .describe("Carbohydrates in grams"),
-                fat_g: z.coerce
-                    .number()
-                    .min(0)
-                    .max(MAX_MACRO_G)
+                fat_g: nutrientNumber(MAX_MACRO_G)
                     .optional()
                     .describe("Fat in grams"),
                 // Fiber and sugar carry reference anchors for the same reason
@@ -1360,38 +2141,28 @@ export function registerTools(
                 // effectively mandatory in practice, so the model needs a last
                 // resort that is better than skipping the field. See
                 // NUTRIENT_COVERAGE for why an omission costs the whole day.
-                fiber_g: z.coerce
-                    .number()
-                    .min(0)
-                    .max(MAX_MACRO_G)
+                fiber_g: nutrientNumber(MAX_MACRO_G)
                     .optional()
                     .describe(
                         "Dietary fiber in grams. Send this on every meal — treat it as mandatory alongside protein, carbs and fat, and estimate it rather than omitting it, because a missing value is not a zero and excludes the whole day from the user's fiber average and goal. Prefer a label or a barcode lookup, then a web search, then these anchors per 100 g: cooked lentils or beans 5-8 g, dry rolled oats 10 g, wholemeal bread 7 g, white bread 2.7 g, cooked wholewheat pasta 4 g (white 2 g), cooked brown rice 1.8 g (white 0.4 g), potato with skin 2 g, most vegetables 2-3 g, apple or pear with skin 2.4-3 g, banana 2.6 g, berries 5-7 g, almonds 12 g, chia 34 g. Meat, fish, eggs, dairy, oil and sugar contain none: send 0 there, do not omit the field.",
                     ),
-                sugar_g: z.coerce
-                    .number()
-                    .min(0)
-                    .max(MAX_MACRO_G)
+                sugar_g: nutrientNumber(MAX_MACRO_G)
                     .optional()
                     .describe(
                         "TOTAL sugars in grams — including sugar naturally present in fruit, milk and juice, not just added sugar. Report the whole figure a nutrition label or database gives for 'Sugars'; do not try to separate out added sugar. Send this on every meal, estimating rather than omitting it: a missing value is not a zero and drops the whole day out of the sugar average and limit. Anchors per 100 g when you have nothing better: milk 5 g, plain yogurt 4.7 g, fruit yogurt 12 g, apple 10 g, banana 12 g, orange 9 g, berries 5-10 g, dried dates 63 g, cola 10.6 g, orange juice 8.4 g, ketchup 22 g, milk chocolate 52 g, bread 3-5 g. Meat, fish, eggs, cheese, oil, rice, pasta and most vegetables are ~0: send 0 there, do not omit the field.",
                     ),
-                alcohol_g: z.coerce
-                    .number()
-                    .min(0)
-                    .max(MAX_ALCOHOL_G)
+                alcohol_g: nutrientNumber(MAX_ALCOHOL_G)
                     .optional()
                     .describe(
                         "Grams of pure ethanol — NOT the volume of the drink and NOT its ABV. Do not estimate this: compute it from the volume and strength, which the user can read off the bottle or the menu. grams = millilitres x (ABV% / 100) x 0.789. Worked examples: a 330 ml 5% beer = 330 x 0.05 x 0.789 = 13 g; a 150 ml glass of 13% wine = 15.4 g; a 44 ml (1.5 oz) shot of 40% spirit = 13.9 g. For US measures, 1 fl oz = 29.6 ml. Ask for the pour size and the ABV rather than guessing, and omit the field entirely for a non-alcoholic meal.",
                     ),
-                caffeine_mg: z.coerce
-                    .number()
-                    .min(0)
-                    .max(MAX_CAFFEINE_MG)
+                caffeine_mg: nutrientNumber(MAX_CAFFEINE_MG)
                     .optional()
                     .describe(
                         "Caffeine in MILLIGRAMS (mg) — this field is the one that is not in grams, and a value under 1 almost certainly means grams were sent by mistake. Typical amounts: a 240 ml brewed coffee 95 mg, a single espresso 63 mg, instant coffee 62 mg, black tea 47 mg, green tea 28 mg, a 355 ml cola 34 mg, a 250 ml energy drink 80 mg, decaf 2 mg. Scale them to what was actually drunk (a double espresso is 126 mg), and for a branded drink prefer the figure on the label or the chain's published nutrition. Caffeine adds no calories, so it never changes the kcal figure. Unlike fiber_g and sugar_g, this field is conditional, so decide it on every entry rather than skipping it by default: if the item is a caffeine source at all — coffee including decaf, tea, matcha, yerba mate, cola and other soft drinks, energy drinks, pre-workout, chocolate and cocoa, coffee ice cream, caffeine tablets — send a figure, searching the web for a branded drink whose label you do not know and falling back to the amounts above. Omit the field for anything that is not a caffeine source rather than sending 0 — a 0 records 'measured, and it was none', and one on a sandwich puts a caffeine row on the dashboard of a user who never drinks any.",
                     ),
+                ...micronutrientInputSchema(false),
+                ...NUTRIENT_SOURCE_INPUTS,
                 logged_at: z
                     .string()
                     .optional()
@@ -1424,8 +2195,15 @@ export function registerTools(
                         userId,
                         args.logged_at,
                     );
+                    // Resolution runs BEFORE the insert, not after: a
+                    // rejected micronutrient must never reach the row at
+                    // all, and `resolved.values` is the authority on which
+                    // nutrient fields are written.
+                    const resolved = resolveMealNutrients(null, args);
                     const { meal, deduplicated } = await insertMeal(userId, {
-                        ...args,
+                        ...withoutNutrientFields(args),
+                        ...toMealNutrientInput(resolved.values),
+                        nutrient_provenance: resolved.provenance,
                         logged_at: iso,
                     });
                     const header = deduplicated
@@ -1448,7 +2226,7 @@ export function registerTools(
                                     (meal.alcohol_g ?? 0) > 0,
                                     alcohol,
                                     "Alcohol saved with this meal",
-                                )}${missingNutrientNote(meal)}${note}`,
+                                )}${missingNutrientNote(meal)}${resolutionNote(resolved)}${note}`,
                             },
                         ],
                         structuredContent,
@@ -1537,7 +2315,7 @@ export function registerTools(
                 MAX_ROWS_PER_CALL +
                 " rows per call: split larger files by date range, keeping all rows for one calendar date in the same call. If a single calendar date alone has more than " +
                 MAX_ROWS_PER_CALL +
-                " rows, that date has to be split across more than one call — the row cap is a hard server-side limit and wins over the same-call grouping. Doing so loosens deduplication for that date only: two rows in it that are byte-identical (same description, meal_type, calories, protein_g, carbs_g, fat_g, notes and logged_at) may collapse into one if they land in different calls, so prefer keeping duplicate-looking rows together in one call when you have to split. If the file is an export from THIS server (its header starts with an id column), map that column to source_id on every row, and map its timezone column to timezone on every row too — source_id is what makes restoring a backup a no-op instead of doubling the user's history, and timezone is what makes a restored row resolve at the local time it was actually recorded rather than the account's current timezone.",
+                " rows, that date has to be split across more than one call — the row cap is a hard server-side limit and wins over the same-call grouping. Doing so loosens deduplication for that date only: two rows in it that are byte-identical (same description, meal_type, calories, protein_g, carbs_g, fat_g, notes and logged_at) may collapse into one if they land in different calls, so prefer keeping duplicate-looking rows together in one call when you have to split. Every nutrient value in a row must be TRANSCRIBED from the source: this tool restores history the user already has, it is not a way to write nutrition you worked out yourself. Never estimate a micronutrient here — sodium, iron, vitamin D and the rest are stored only when the file states them, and a row declaring one as a model estimate has that value refused exactly as log_meal would (an invented micronutrient is indistinguishable from a measured one, which is why no tool will store one). Leave nutrient_provenance out unless the file itself carried that column. If you want to log a meal you are estimating, that is log_meal. If the file is an export from THIS server (its header starts with an id column), map that column to source_id on every row, and map its timezone column to timezone on every row too — source_id is what makes restoring a backup a no-op instead of doubling the user's history, and timezone is what makes a restored row resolve at the local time it was actually recorded rather than the account's current timezone.",
             inputSchema: {
                 meals: z
                     .array(IMPORT_ROW_SCHEMA)
@@ -1788,6 +2566,119 @@ export function registerTools(
                 },
                 { userId },
                 { barcode },
+            );
+        },
+    );
+
+    server.registerTool(
+        "lookup_food",
+        {
+            title: "Look Up Generic Food (USDA)",
+            description:
+                "Look up a GENERIC whole food — chicken breast, an egg, a baked potato, spinach, cooked rice — in USDA FoodData Central, the US government's laboratory-analysed nutrition database. This is the counterpart to lookup_barcode: that one is for packaged products with a barcode, this one is for unpackaged foods that have no label. Use it instead of estimating whenever the user eats a plain whole food, because it returns real micronutrients (sodium, potassium, iron, calcium, magnesium, vitamins) which you are NOT allowed to estimate yourself.\n\nTwo steps. First call with `query` alone to get candidates — USDA distinguishes raw from cooked, skin-on from skinless, fortified from not, and picking the wrong one is a real error, so read the descriptions and ask the user which it was when it genuinely matters. Then call again with the chosen `fdc_id` and `grams` to get that food's nutrition scaled to the amount eaten, ready to pass straight to log_meal with nutrient_source='usda_fdc' and the nutrient_source_id shown in the result. Do not scale the numbers yourself — pass `grams` and let the server do it once.",
+            annotations: {
+                readOnlyHint: true,
+                destructiveHint: false,
+                idempotentHint: true,
+                openWorldHint: true,
+            },
+            inputSchema: {
+                query: z
+                    .string()
+                    .optional()
+                    .describe(
+                        "What to search for, e.g. 'chicken breast roasted' or 'spinach raw'. Include the preparation (raw/cooked/roasted/boiled) — it changes the nutrition substantially. Omit when passing fdc_id.",
+                    ),
+                fdc_id: z.coerce
+                    .number()
+                    .int()
+                    .positive()
+                    .optional()
+                    .describe(
+                        "FDC id of a specific food, from a previous search with this tool.",
+                    ),
+                grams: z.coerce
+                    .number()
+                    .positive()
+                    .max(20_000)
+                    .optional()
+                    .describe(
+                        "How many grams were eaten. Only meaningful with fdc_id: the values come back scaled to this amount. Omitted, the food's per-100 g figures are returned as-is.",
+                    ),
+            },
+        },
+        async ({ query, fdc_id, grams }) => {
+            return withAnalytics(
+                "lookup_food",
+                async () => {
+                    const fail = (text: string) => ({
+                        content: [{ type: "text" as const, text }],
+                    });
+                    if (fdc_id == null && !query?.trim()) {
+                        return fail(
+                            "Pass a `query` to search for a food, or an `fdc_id` from a previous search to get its full nutrition.",
+                        );
+                    }
+                    try {
+                        if (fdc_id == null) {
+                            const candidates = await searchUsdaFoods(query!, {
+                                pageSize: 8,
+                            });
+                            if (candidates.length === 0) {
+                                return fail(
+                                    `No USDA food found for "${query}". Try a simpler term (the food alone, without brand or preparation), or fall back to a web search and estimate the macros — but leave micronutrients out rather than estimating them.`,
+                                );
+                            }
+                            const lines = candidates.map(
+                                (c) =>
+                                    `fdc_id ${c.fdcId} — ${c.description}` +
+                                    (c.dataType ? ` [${c.dataType}]` : "") +
+                                    (c.preview.calories != null
+                                        ? ` — ${c.preview.calories} kcal/100 g`
+                                        : ""),
+                            );
+                            return fail(
+                                `USDA candidates for "${query}" (these are materially different foods — pick deliberately, and ask the user if raw vs cooked or skin vs skinless is unclear):\n${lines.join("\n")}\n\nCall lookup_food again with the fdc_id you chose and the grams eaten.`,
+                            );
+                        }
+
+                        const food = await lookupUsdaFood(fdc_id);
+                        if (!food) {
+                            return fail(
+                                `No USDA record found for fdc_id ${fdc_id}. Search by name first to get a valid id.`,
+                            );
+                        }
+                        // Scaling happens HERE and nowhere else — the values
+                        // below are already for the amount eaten, so the
+                        // model must not multiply them again.
+                        const values = resolveUsdaAmount(food, grams ?? 100);
+                        const shown = NUTRIENT_FIELDS.filter(
+                            (field) => values[field] != null,
+                        ).map(
+                            (field) =>
+                                `${field}: ${formatLookupValue(values[field] as number)}`,
+                        );
+                        const missing = NUTRIENT_FIELDS.filter(
+                            (field) => values[field] == null,
+                        );
+                        return fail(
+                            `${food.name}\nFor ${grams ?? 100} g (USDA reports per 100 g; already scaled — do not scale again):\n${shown.join("\n")}\n\nNot recorded by USDA for this food: ${missing.join(", ") || "(none)"} — these are UNKNOWN, not zero. Do not send them to log_meal and do not estimate the micronutrients among them.\n\nPass to log_meal with nutrient_source='usda_fdc' and nutrient_source_id='${food.sourceId}'.`,
+                        );
+                    } catch (err) {
+                        if (err instanceof UsdaConfigError) {
+                            return fail(
+                                "USDA FoodData Central is not configured on this server (USDA_FDC_API_KEY is unset), so generic whole-food lookup is unavailable. Estimate the macros instead, and leave micronutrients out rather than estimating them.",
+                            );
+                        }
+                        const msg =
+                            err instanceof Error ? err.message : String(err);
+                        return fail(
+                            `Couldn't reach USDA FoodData Central right now (${msg}). Estimate the macros from the food description, and leave micronutrients out rather than estimating them.`,
+                        );
+                    }
+                },
+                { userId },
+                { fdc_id, query },
             );
         },
     );
@@ -2203,6 +3094,14 @@ export function registerTools(
                     alcohol_g: z.number().nullable(),
                     caffeine_mg: z.number(),
                 }),
+                // Per-micronutrient coverage across the WHOLE range: the
+                // recorded total, and how many of the range's meals it was
+                // recorded on. `complete: false` means the total is a lower
+                // bound and must not be rendered as the range's intake. The
+                // per-day rows below carry no micronutrients — a consumer that
+                // wants a day's coverage asks get_goal_progress for that day,
+                // rather than being handed twelve nullable columns x 365 days.
+                nutrient_coverage: z.array(NUTRIENT_COVERAGE_ITEM),
                 days: z.array(
                     TOTALS_ITEM.extend({
                         date: z.string(),
@@ -2264,6 +3163,12 @@ export function registerTools(
                                     alcohol_g: alcohol ? 0 : null,
                                     caffeine_mg: 0,
                                 },
+                                // Empty, not omitted: a declared outputSchema
+                                // field the SDK rejects the whole result over.
+                                // No meals means no coverage to report — the
+                                // goals may exist, but with nothing recorded
+                                // there is no total to qualify.
+                                nutrient_coverage: [],
                                 days: [],
                                 meals: [],
                             },
@@ -2309,8 +3214,15 @@ export function registerTools(
                         // the range average down towards zero.
                         const present = nutrientPresence(dateMeals);
                         const header = `## ${date} (${dateMeals.length} meal${dateMeals.length === 1 ? "" : "s"})`;
+                        const microLines = micronutrientProgressLines(
+                            dateMeals,
+                            goals,
+                        );
                         sections.push(
-                            `${header}\n${formatProgress(totals, goals, alcohol, present)}`,
+                            `${header}\n${formatProgress(totals, goals, alcohol, present)}` +
+                                (microLines.length > 0
+                                    ? `\n${microLines.join("\n")}`
+                                    : ""),
                         );
                         days.push({
                             date,
@@ -2396,6 +3308,17 @@ export function registerTools(
                                     : null,
                                 caffeine_mg: recordedDays.caffeine_mg,
                             },
+                            // Range-wide, over every meal in the window — so
+                            // every target is scaled to the logged days the
+                            // total actually spans. Handing back the raw
+                            // DAILY column beside a multi-day total is what
+                            // made a 3-day 2,400 mg sodium total render "100
+                            // mg over limit" against a 2,300 mg/day ceiling.
+                            nutrient_coverage: nutrientCoveragePayload(
+                                meals,
+                                goals,
+                                days.length,
+                            ),
                             days,
                             // Multi-day range → tag each meal with its date.
                             meals: mealBreakdown(meals, tz, alcohol),
@@ -2424,65 +3347,41 @@ export function registerTools(
                 // Bounded in the schema for the same reason as log_meal, with
                 // the gram ceiling set by the numeric(6,2) goal columns rather
                 // than by what a plausible meal carries.
-                daily_calories: z.coerce
-                    .number()
-                    .min(0)
-                    .max(MAX_CALORIES)
+                daily_calories: nutrientNumber(MAX_CALORIES)
                     .nullable()
                     .optional()
                     .describe("Daily calorie target (kcal). Null to clear."),
-                daily_protein_g: z.coerce
-                    .number()
-                    .min(0)
-                    .max(MAX_GOAL_G)
+                daily_protein_g: nutrientNumber(MAX_GOAL_G)
                     .nullable()
                     .optional()
                     .describe("Daily protein target (grams). Null to clear."),
-                daily_carbs_g: z.coerce
-                    .number()
-                    .min(0)
-                    .max(MAX_GOAL_G)
+                daily_carbs_g: nutrientNumber(MAX_GOAL_G)
                     .nullable()
                     .optional()
                     .describe("Daily carbs target (grams). Null to clear."),
-                daily_fat_g: z.coerce
-                    .number()
-                    .min(0)
-                    .max(MAX_GOAL_G)
+                daily_fat_g: nutrientNumber(MAX_GOAL_G)
                     .nullable()
                     .optional()
                     .describe("Daily fat target (grams). Null to clear."),
-                daily_fiber_g: z.coerce
-                    .number()
-                    .min(0)
-                    .max(MAX_GOAL_G)
+                daily_fiber_g: nutrientNumber(MAX_GOAL_G)
                     .nullable()
                     .optional()
                     .describe(
                         "Daily fiber target (grams), treated as a minimum to reach. Null to clear.",
                     ),
-                daily_sugar_g: z.coerce
-                    .number()
-                    .min(0)
-                    .max(MAX_GOAL_G)
+                daily_sugar_g: nutrientNumber(MAX_GOAL_G)
                     .nullable()
                     .optional()
                     .describe(
                         "Daily TOTAL sugar limit (grams), treated as a maximum to stay under. Total sugars include sugar naturally present in fruit and milk, not only added sugar — say so when the user sets one, since public guidance figures usually refer to ADDED sugar and are therefore a much lower number. Null to clear.",
                     ),
-                daily_alcohol_g: z.coerce
-                    .number()
-                    .min(0)
-                    .max(MAX_GOAL_G)
+                daily_alcohol_g: nutrientNumber(MAX_GOAL_G)
                     .nullable()
                     .optional()
                     .describe(
                         "Daily alcohol limit in grams of pure ethanol, treated as a maximum to stay under. One US standard drink is 14 g, one UK unit is 7.9 g. Null to clear.",
                     ),
-                daily_caffeine_mg: z.coerce
-                    .number()
-                    .min(0)
-                    .max(MAX_GOAL_MG)
+                daily_caffeine_mg: nutrientNumber(MAX_GOAL_MG)
                     .nullable()
                     .optional()
                     .describe(
@@ -2509,6 +3408,7 @@ export function registerTools(
                     .describe(
                         "Unit for target_weight. Defaults to the user's preferred weight unit.",
                     ),
+                ...micronutrientGoalSchema(),
             },
         },
         async (args) => {
@@ -2575,6 +3475,11 @@ export function registerTools(
                                 ? (existing?.daily_water_ml ?? null)
                                 : args.daily_water_ml,
                         target_weight_g,
+                        // Same undefined-vs-null merge as every field above:
+                        // omitted keeps the stored target, explicit null
+                        // clears it. Generated, because ten hand-written
+                        // ternaries is ten chances to paste the wrong key.
+                        ...micronutrientGoalMerge(args, existing),
                     };
                     const goals = await upsertNutritionGoals(userId, merged);
                     // An alcohol target set by someone who has alcohol tracking
@@ -2659,6 +3564,11 @@ export function registerTools(
                 drink_unit: DRINK_UNIT_FIELD,
                 goals: GOALS_ITEM.nullable(),
                 totals: TOTALS_ITEM,
+                // Per-micronutrient coverage: what was recorded, over how many
+                // of the day's meals, and whether that is the whole story. A
+                // consumer must not render `known_total` as the day's intake
+                // when `complete` is false.
+                nutrient_coverage: z.array(NUTRIENT_COVERAGE_ITEM),
                 weight: z
                     .object({
                         current: z.number().nullable(),
@@ -2691,12 +3601,18 @@ export function registerTools(
                     totals.water_ml = sumWater(water);
                     const present = nutrientPresence(meals);
                     const header = `Progress for ${targetDate} (${meals.length} meal${meals.length === 1 ? "" : "s"}, ${water.length} water entr${water.length === 1 ? "y" : "ies"})`;
-                    const body = formatProgress(
-                        totals,
-                        goals,
-                        alcohol,
-                        present,
-                    );
+                    // Micronutrients hang off the macro block rather than
+                    // going through formatProgress: they need per-nutrient
+                    // COVERAGE (how many of the day's meals actually recorded
+                    // each one), which a DailyTotals sum has thrown away by the
+                    // time it gets here — summing a missing sodium as 0 is
+                    // precisely the failure this section exists to prevent.
+                    const microLines = micronutrientProgressLines(meals, goals);
+                    const body =
+                        formatProgress(totals, goals, alcohol, present) +
+                        (microLines.length > 0
+                            ? `\n${microLines.join("\n")}`
+                            : "");
 
                     // Weight is a standing metric (latest overall), not per-date.
                     let weightLine = "";
@@ -2765,6 +3681,10 @@ export function registerTools(
                             water_entries: water.length,
                             goals: goalsPayload,
                             totals: totalsPayload,
+                            nutrient_coverage: nutrientCoveragePayload(
+                                meals,
+                                goals,
+                            ),
                             weight: weightPayload,
                             // Single day → label rows by meal type in the widget.
                             meals: mealBreakdown(meals, null, alcohol),
@@ -2822,7 +3742,8 @@ export function registerTools(
             // fiber or sugar — and what missingNutrientNote points the model at.
             description:
                 "Update fields of an existing meal entry. Only the fields you pass are changed, which also makes this the way to BACKFILL nutrition a meal was logged without: if a past meal has no fiber_g, sugar_g or (where it applies) caffeine_mg, estimate the value and pass just that field rather than telling the user the figure in prose. Meal ids come from get_meals_today, get_meals_by_date or search_meals.\n\n" +
-                NUTRIENT_COVERAGE,
+                NUTRIENT_COVERAGE +
+                MICRONUTRIENT_GUIDANCE,
             annotations: {
                 readOnlyHint: false,
                 destructiveHint: false,
@@ -2836,42 +3757,32 @@ export function registerTools(
                     .enum(["breakfast", "lunch", "dinner", "snack"])
                     .optional(),
                 // Same bounds, and the same reasoning, as log_meal.
-                calories: z.coerce.number().min(0).max(MAX_CALORIES).optional(),
-                protein_g: z.coerce.number().min(0).max(MAX_MACRO_G).optional(),
-                carbs_g: z.coerce.number().min(0).max(MAX_MACRO_G).optional(),
-                fat_g: z.coerce.number().min(0).max(MAX_MACRO_G).optional(),
-                fiber_g: z.coerce
-                    .number()
-                    .min(0)
-                    .max(MAX_MACRO_G)
+                calories: nutrientNumber(MAX_CALORIES).optional(),
+                protein_g: nutrientNumber(MAX_MACRO_G).optional(),
+                carbs_g: nutrientNumber(MAX_MACRO_G).optional(),
+                fat_g: nutrientNumber(MAX_MACRO_G).optional(),
+                fiber_g: nutrientNumber(MAX_MACRO_G)
                     .optional()
                     .describe(
                         "Dietary fiber in grams. Every meal should carry one — pass it here for a meal logged without it, estimating from the ingredients if no label figure exists, and 0 for a food that genuinely has none (meat, fish, eggs, dairy, oil).",
                     ),
-                sugar_g: z.coerce
-                    .number()
-                    .min(0)
-                    .max(MAX_MACRO_G)
+                sugar_g: nutrientNumber(MAX_MACRO_G)
                     .optional()
                     .describe(
                         "TOTAL sugars in grams, including sugar naturally present in fruit and milk — not only added sugar. Every meal should carry one — pass it here for a meal logged without it, estimating if there is no label figure, and 0 for a food that genuinely has none.",
                     ),
-                alcohol_g: z.coerce
-                    .number()
-                    .min(0)
-                    .max(MAX_ALCOHOL_G)
+                alcohol_g: nutrientNumber(MAX_ALCOHOL_G)
                     .optional()
                     .describe(
                         "Grams of pure ethanol — NOT the drink's volume and NOT its ABV. Compute it rather than estimating: grams = millilitres x (ABV% / 100) x 0.789 (a 330 ml 5% beer = 13 g).",
                     ),
-                caffeine_mg: z.coerce
-                    .number()
-                    .min(0)
-                    .max(MAX_CAFFEINE_MG)
+                caffeine_mg: nutrientNumber(MAX_CAFFEINE_MG)
                     .optional()
                     .describe(
                         "Caffeine in MILLIGRAMS, not grams (a 240 ml brewed coffee is 95 mg, a single espresso 63 mg, black tea 47 mg, a 250 ml energy drink 80 mg). Adds no calories. Pass it only for a meal that is genuinely a caffeine source; a 0 here records 'measured, and it was none' and starts showing the user a caffeine row.",
                     ),
+                ...micronutrientInputSchema(true),
+                ...NUTRIENT_SOURCE_INPUTS,
                 logged_at: z
                     .string()
                     .optional()
@@ -2892,8 +3803,16 @@ export function registerTools(
                         userId,
                         fields.logged_at,
                     );
+                    // The prior row is read first because precedence needs
+                    // to know not just what is stored but where it came
+                    // from — updateMeal's own select happens after that
+                    // decision has to be made.
+                    const prior = await getMealById(userId, id);
+                    const resolved = resolveMealNutrients(prior, fields);
                     const meal = await updateMeal(userId, id, {
-                        ...fields,
+                        ...withoutNutrientFields(fields),
+                        ...toMealNutrientInput(resolved.values),
+                        nutrient_provenance: resolved.provenance,
                         logged_at: iso,
                     });
                     const { progressSection, structuredContent } =
@@ -2911,7 +3830,7 @@ export function registerTools(
                                     (meal.alcohol_g ?? 0) > 0,
                                     alcohol,
                                     "Alcohol saved with this meal",
-                                )}${missingNutrientNote(meal)}${note}`,
+                                )}${missingNutrientNote(meal)}${resolutionNote(resolved)}${note}`,
                             },
                         ],
                         structuredContent,

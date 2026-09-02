@@ -263,6 +263,13 @@
                 // is this app's own export, offered like any other field so
                 // it can be re-pointed or unset.
                 { key: "timezone", label: "Timezone (from our export)" },
+                // Where each nutrient figure came from, as one JSON cell.
+                // Only our own export writes it; offered like the two fields
+                // above so it can be re-pointed or unset.
+                {
+                    key: "nutrient_provenance",
+                    label: "Nutrient sources (from our export)",
+                },
             ];
             // Header aliases for the exports surveyed. Matched with
             // normalizeHeader from csv.ts, so "Fat (g)" and "fat_g" both hit.
@@ -278,6 +285,14 @@
                     "lebensmittel",
                 ],
                 meal_type: ["meal", "meal_type", "type", "group", "mahlzeit"],
+                // The kJ spellings are here, not only in sniffEnergyUnit's
+                // KJ_HEADER_RE: without them "Energy (kJ)" — the standard
+                // header of every kilojoule export — auto-mapped to nothing,
+                // so every row was sent with NO calories at all AND
+                // expected_total_kcal was omitted, which silently disabled the
+                // server-side control total that would have caught the loss.
+                // sniffEnergyUnit already reports "kj" for each of them, so the
+                // conversion and its preview light up with no other change.
                 calories: [
                     "calories",
                     "energy_kcal",
@@ -285,6 +300,11 @@
                     "kcal",
                     "calories_kcal",
                     "kalorien",
+                    "energy_kj",
+                    "kj",
+                    "kilojoules",
+                    "energie",
+                    "energie_kj",
                 ],
                 protein_g: ["protein_g", "protein", "eiweiss"],
                 carbs_g: [
@@ -382,7 +402,61 @@
                 // Deliberately narrow, same reasoning as source_id above:
                 // our own export writes exactly "timezone".
                 timezone: ["timezone"],
+                // One JSON object per row, written only by our own export.
+                // Passed through verbatim — see nutrient_provenance in
+                // buildRows for why the widget must not touch it.
+                nutrient_provenance: ["nutrient_provenance"],
             };
+
+            // ---- micronutrient columns ---------------------------------------
+            //
+            // The twelve micronutrients are NOT in FIELDS: they are resolved from
+            // the header text by findNutrientColumns (csv.ts), which also reports
+            // the unit the header states. Twelve more dropdowns would bury the
+            // four fields that actually need a human, and the resolver already
+            // handles the unit-qualified, localised and abbreviated spellings a
+            // dropdown would be asking the user to disambiguate by hand.
+            //
+            // Values are sent UNCONVERTED with a nutrient_units map alongside, so
+            // "Potassium (g)" is converted exactly once, server-side. A column in
+            // IU or % DV is not sent at all — see microRefused, which says so on
+            // screen rather than leaving the nutrient silently blank.
+            function microColumns() {
+                return S.micro.filter((c) => !c.duplicate && c.unit !== null);
+            }
+            // Columns whose header named no unit, so the canonical one was
+            // assumed ("Sodium" -> mg). Every label and export surveyed states
+            // these in the canonical unit, but the user did not, so say it.
+            function microAssumed() {
+                return microColumns().filter((c) => !c.unitStated);
+            }
+            // Columns naming a unit that cannot become a mass: an IU figure read
+            // as micrograms is wrong by 3-20x and looks entirely plausible.
+            function microRefused() {
+                return S.micro.filter((c) => !c.duplicate && c.unit === null);
+            }
+            function microDuplicates() {
+                return S.micro.filter((c) => c.duplicate);
+            }
+            // "sodium_mg" -> "Sodium (mg)". Derived from the field name rather
+            // than tabulated, exactly as the summary widget's microLabel is.
+            // The unit shown is the one the COLUMN is in, not the canonical one:
+            // the preview shows the file's own numbers, so a "Potassium (g)"
+            // column headed "(mg)" would read as a 1000x error that is not there.
+            function microLabel(field, unit) {
+                const m = /^(.*)_(g|mg|mcg)$/.exec(field);
+                const name = (m ? m[1] : field)
+                    .split("_")
+                    // A one-letter word is an initial: "vitamin_c" -> "Vitamin C".
+                    .map((w, i) =>
+                        w.length === 1 || i === 0
+                            ? w.charAt(0).toUpperCase() + w.slice(1)
+                            : w,
+                    )
+                    .join(" ");
+                const u = unit || (m ? m[2] : "");
+                return name + (u ? " (" + u + ")" : "");
+            }
 
             // Columns that hold ADDED sugar rather than total sugar. The server
             // stores total sugars (including what is naturally in fruit and
@@ -463,6 +537,7 @@
                 fileName: "",
                 table: null, // ParsedTable from csv.ts
                 mapping: {}, // field key -> column index (-1 = unmapped)
+                micro: [], // NutrientColumn[] from csv.ts, resolved by header
                 sourceApp: "",
                 dateFormat: "iso", // iso | dmy | mdy — sniffed, user-confirmable
                 dateAmbiguous: false, // sniff could not tell day-first from month-first
@@ -508,6 +583,7 @@
                     return;
                 }
                 S.errors = [];
+                S.micro = findNutrientColumns(S.table.headers);
                 autoMap();
                 guessSourceApp();
                 resniffDateFormat();
@@ -658,6 +734,7 @@
                     return v === null ? undefined : v;
                 };
 
+                const cols = microColumns();
                 const rows = [];
                 let skipped = 0;
                 let badDates = 0;
@@ -713,6 +790,12 @@
                     // are not sure about is how a 1000x error gets written.
                     const energy = num(r, m.calories);
 
+                    // Micronutrients: values as the file states them, plus the
+                    // units they are stated IN. No arithmetic here — the server
+                    // converts, once, so the widget and the stored row cannot
+                    // disagree about who already scaled what.
+                    const micro = readNutrientCells(r, cols, dec);
+
                     rows.push({
                         source_line: t.sourceLines[i],
                         logged_at: when,
@@ -747,6 +830,16 @@
                         // timezone when it is absent or not a recognized
                         // IANA identifier.
                         timezone: cell(r, m.timezone),
+                        // Verbatim, like source_id and timezone: it is the JSON
+                        // our own export wrote, naming where each figure came
+                        // from. Re-deriving or re-stamping it here would replace
+                        // "USDA, authoritative" with "import" and quietly
+                        // downgrade every restored meal.
+                        nutrient_provenance: cell(r, m.nutrient_provenance),
+                        ...micro.values,
+                        nutrient_units: Object.keys(micro.units).length
+                            ? micro.units
+                            : undefined,
                     });
                 }
                 S.rows = rows;
@@ -1124,6 +1217,77 @@
                           ) +
                           "</span></div>"
                         : "") +
+                    // Micronutrients map themselves off the header, so this is
+                    // the only place the user gets to see what that decided —
+                    // which columns were recognised, which unit each will be
+                    // read in when the header did not say, and which were
+                    // refused outright. One notice, not one per column.
+                    (microColumns().length
+                        ? '<div class="notice"><span>i</span><span>' +
+                          esc(
+                              microColumns().length +
+                                  " micronutrient column(s) were recognised from their headers and will be imported: " +
+                                  microColumns()
+                                      .map((c) => c.header)
+                                      .join(", ") +
+                                  ".",
+                          ) +
+                          (microAssumed().length
+                              ? " " +
+                                esc(
+                                    // Grouped by unit rather than one clause per
+                                    // column: five "X states no unit and will be
+                                    // read as mg" sentences is the wall of
+                                    // warnings this notice exists to avoid.
+                                    "Stating no unit, so read as " +
+                                        ["g", "mg", "mcg"]
+                                            .map((u) => [
+                                                u,
+                                                microAssumed().filter(
+                                                    (c) => c.unit === u,
+                                                ),
+                                            ])
+                                            .filter((x) => x[1].length)
+                                            .map(
+                                                (x) =>
+                                                    x[0] +
+                                                    ": " +
+                                                    x[1]
+                                                        .map((c) => c.header)
+                                                        .join(", "),
+                                            )
+                                            .join("; ") +
+                                        ". Every nutrition label and export states these in that unit, but your file did not say so — if the values are in something else, change the header before importing.",
+                                )
+                              : "") +
+                          (microDuplicates().length
+                              ? " " +
+                                esc(
+                                    "Ignored as a second column for the same nutrient: " +
+                                        microDuplicates()
+                                            .map((c) => c.header)
+                                            .join(", ") +
+                                        ".",
+                                )
+                              : "") +
+                          "</span></div>"
+                        : "") +
+                    (microRefused().length
+                        ? '<div class="notice notice-warn"><span>!</span><span>' +
+                          esc(
+                              microRefused()
+                                  .map((c) => c.header)
+                                  .join(", ") +
+                                  " will not be imported: those values are in " +
+                                  microRefused()
+                                      .map((c) =>
+                                          c.unsupportedUnit.toUpperCase(),
+                                      )
+                                      .join("/") +
+                                  ", which cannot be converted to a weight — the factor depends on which compound was measured, and your file does not say. Re-importing later will not fill them in, because those rows will already be logged. Export the column in mg or mcg if you need it.",
+                          ) +
+                          "</span></div>"
+                        : "") +
                     '<div class="map-grid">' +
                     mappableFields()
                         .map((f) => {
@@ -1185,11 +1349,23 @@
                     ["sugar_g", "Sug"],
                     ["alcohol_g", "Alc", true],
                     ["caffeine_mg", "Caf mg"],
-                ].filter(
-                    (c) =>
-                        (!c[2] || alcoholTracked()) &&
-                        S.rows.some((r) => r[c[0]] !== undefined),
-                );
+                ]
+                    .filter(
+                        (c) =>
+                            (!c[2] || alcoholTracked()) &&
+                            S.rows.some((r) => r[c[0]] !== undefined),
+                    )
+                    // Every recognised micronutrient gets a column too. Twelve
+                    // more columns is a lot, but this table is the confirmation
+                    // step: a value that is about to be written and was never
+                    // shown is the failure the whole flow exists to prevent.
+                    // The table scrolls sideways (.tscroll) rather than wrapping.
+                    .concat(
+                        microColumns().map((c) => [
+                            c.field,
+                            microLabel(c.field, c.unit),
+                        ]),
+                    );
                 return (
                     '<section class="card"><h3>Preview</h3>' +
                     '<div class="stat-row"><span><b>' +
@@ -1505,6 +1681,7 @@
                     restart.onclick = () => {
                         S.step = "file";
                         S.table = null;
+                        S.micro = [];
                         S.rows = [];
                         S.result = null;
                         S.errors = [];

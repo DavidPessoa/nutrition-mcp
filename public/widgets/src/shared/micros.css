@@ -1,0 +1,298 @@
+/* ---- Micronutrient section (shared/micros.js) ---------------------------- */
+/* A collapsible section BELOW the macro strip, inside the same panel: the
+   epic's hierarchy is calories and macros first, micronutrients grouped
+   underneath. Twelve of them at macro-tile size would be the wall of progress
+   bars this section exists to avoid, so a row is one dense line and a half:
+   name + figure, a hairline bar, then the caption and the state tag.
+
+   NO NEW SERIES COLOURS. The strip's rule — keep the series colour, flag state
+   on the figure — assumes each metric HAS a hue that distinguishes it from its
+   three neighbours. Twelve micronutrients have no such hues, and inventing
+   twelve would make the section unreadable in exactly the way the brief warns
+   about. So a micro row's one colour is its STATE: --over for a breach,
+   --accent for a target genuinely met, and neutral grey for everything whose
+   truth depends on the meals nobody recorded. That is also the enforcement
+   point for the correctness rule — see .tone-ok / the hatch below. */
+.micros {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+.mic-sum {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    cursor: pointer;
+    list-style: none;
+    -webkit-tap-highlight-color: transparent;
+}
+/* The disclosure triangle, drawn rather than left to the UA: Safari's default
+   marker is a filled triangle the size of the label. */
+.mic-sum::-webkit-details-marker {
+    display: none;
+}
+.mic-sum::before {
+    content: "";
+    flex: none;
+    width: 0;
+    height: 0;
+    border-left: 4.5px solid var(--text-dim);
+    border-top: 3.5px solid transparent;
+    border-bottom: 3.5px solid transparent;
+    transform: translateY(-1px);
+    transition: transform 0.12s ease;
+}
+.micros[open] > .mic-sum::before {
+    transform: translateY(-1px) rotate(90deg);
+}
+.mic-sum:focus-visible {
+    outline: none;
+    border-radius: 6px;
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 35%, transparent);
+}
+.mic-title {
+    font-size: 9.5px;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+}
+.mic-meta {
+    margin-left: auto;
+    font-size: 10px;
+    color: var(--text-dim);
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+}
+.mic-over {
+    color: var(--over);
+    font-weight: 700;
+}
+
+/* The legend is not decoration: the three glyphs it names are the entire
+   difference between "you ate no iron", "we do not know" and "we know about
+   two of your three meals", and a reader cannot be assumed to infer them. */
+.mic-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 12px;
+    font-size: 9.5px;
+    color: var(--text-dim);
+}
+.mic-legend b {
+    color: var(--text);
+    font-variant-numeric: tabular-nums;
+}
+
+.mic-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 8px 16px;
+}
+@media (min-width: 560px) {
+    .mic-list {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+@media (min-width: 860px) {
+    .mic-list {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+}
+.mic-row {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    min-width: 0;
+}
+.mic-top {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+}
+/* The NAME is what gives way, never the figure — same rule as .mkey/.mnum in
+   the strip, and for the same reason: two nowrap children in a minmax(0, 1fr)
+   track paint over each other with no scrollbar to give it away. */
+.mic-key {
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 9.5px;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+}
+.mic-val {
+    flex: none;
+    margin-left: auto;
+    font-size: 11.5px;
+    font-weight: 800;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+.mic-val .mic-unit {
+    font-size: 9.5px;
+    font-weight: 500;
+    color: var(--text-dim);
+}
+/* An unrecorded nutrient shows an em dash where every other row shows a
+   number. It is dimmed AND it is a different glyph class — a grey zero would
+   still read as a measurement at a glance. */
+.mic-dash {
+    color: var(--text-dim);
+    font-weight: 600;
+}
+
+.mic-bar {
+    position: relative;
+    height: 4px;
+    border-radius: 999px;
+    background: var(--track);
+    overflow: hidden;
+}
+/* The rail of an unrecorded nutrient is DASHED and empty: an empty solid rail
+   is what a measured zero looks like, and those two must not be the same
+   picture. */
+.st-none > .mic-bar {
+    background: transparent;
+    border: 1px dashed var(--panel-border);
+    height: 4px;
+}
+.mic-fill {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    border-radius: 999px;
+    background: var(--mic-tone, var(--text-dim));
+}
+/* PARTIAL COVERAGE IS HATCHED. The bar is the one part of the row read
+   pre-attentively, so a partial total drawn as a solid bar is a solid claim
+   about the day — which is precisely the misrepresentation this feature
+   exists to prevent. The hatch says "some of this is missing" before any word
+   is read; the "≥" on the figure and the tag underneath say it in language. */
+.st-partial > .mic-bar > .mic-fill {
+    background-image: repeating-linear-gradient(
+        135deg,
+        var(--mic-tone, var(--text-dim)) 0 3px,
+        transparent 3px 6px
+    );
+    background-color: color-mix(
+        in srgb,
+        var(--mic-tone, var(--text-dim)) 22%,
+        transparent
+    );
+}
+
+/* Tone = what the row's verdict is allowed to claim, set by microVerdict().
+   --accent is reachable ONLY from a conclusion that survives the unrecorded
+   meals: a ceiling breach, or a floor already reached. "Under your sodium
+   limit" on partial coverage lands in tone-none and stays grey. */
+.tone-over {
+    --mic-tone: var(--over);
+}
+.tone-ok {
+    --mic-tone: var(--accent);
+}
+.tone-none {
+    --mic-tone: var(--text-dim);
+}
+.tone-over .mic-val {
+    color: var(--over);
+}
+
+.mic-foot {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 3px 8px;
+    font-size: 9.5px;
+    line-height: 1.3;
+    color: var(--text-dim);
+    font-variant-numeric: tabular-nums;
+}
+.tone-over .mic-cap {
+    color: var(--over);
+}
+.tone-ok .mic-cap {
+    color: var(--accent);
+}
+
+/* The state tag. A pill so it reads as metadata about the figure rather than
+   as more of the caption, and worded in every case — colour is the second
+   channel here, never the only one. */
+.mic-tag {
+    padding: 0 5px;
+    border-radius: 999px;
+    border: 1px solid transparent;
+    font-weight: 600;
+    white-space: nowrap;
+}
+.t-none {
+    border-style: dashed;
+    border-color: var(--panel-border);
+    color: var(--text-dim);
+}
+.t-partial {
+    color: var(--warn);
+    border-color: color-mix(in srgb, var(--warn) 45%, transparent);
+    background: color-mix(in srgb, var(--warn) 10%, transparent);
+    white-space: normal;
+}
+.t-zero,
+.t-complete {
+    color: var(--text-dim);
+    border-color: var(--panel-border);
+}
+.t-zero {
+    color: var(--text);
+}
+
+/* Provenance badge — rendered only when the payload states a confidence. */
+.mic-prov {
+    padding: 0 5px;
+    border-radius: 999px;
+    font-weight: 600;
+    border: 1px solid transparent;
+    white-space: nowrap;
+}
+.mic-prov::before {
+    margin-right: 3px;
+}
+.p-auth {
+    color: var(--accent);
+    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+}
+.p-auth::before {
+    content: "✓";
+}
+.p-user {
+    color: var(--text-dim);
+    border-color: var(--panel-border);
+}
+.p-user::before {
+    content: "✎";
+}
+/* An estimated figure is the one badge that must be impossible to miss: it is
+   amber, the same --warn the import widget uses for "worth a look". */
+.p-est {
+    color: var(--warn);
+    border-color: color-mix(in srgb, var(--warn) 45%, transparent);
+    background: color-mix(in srgb, var(--warn) 10%, transparent);
+}
+.p-est::before {
+    content: "~";
+}
+.p-mixed {
+    color: var(--text-dim);
+    border-color: var(--panel-border);
+}
+.p-mixed::before {
+    content: "±";
+}

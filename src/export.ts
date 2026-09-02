@@ -7,6 +7,7 @@ import {
     getNutritionGoals,
     getProfile,
     timezoneFromProfile,
+    MICRONUTRIENT_GOAL_FIELDS,
     type Meal,
     type NutritionGoals,
     type Profile,
@@ -48,7 +49,36 @@ const CSV_COLUMNS = [
     // grams, so a bare "caffeine" header is exactly how a re-import — ours or
     // anyone else's — turns 180 mg into 180 g.
     "caffeine_mg",
+    // The twelve micronutrients, each carrying its unit in the header for the
+    // same reason caffeine_mg does — these columns do NOT all agree, and the
+    // importer reads a bare "Sodium" as milligrams by convention rather than
+    // by anything the file said. Spelling them as the canonical field names
+    // makes the round trip exact instead of conventional.
+    "saturated_fat_g",
+    "trans_fat_g",
+    "added_sugar_g",
+    "sodium_mg",
+    "potassium_mg",
+    "cholesterol_mg",
+    "calcium_mg",
+    "iron_mg",
+    "magnesium_mg",
+    "vitamin_a_mcg",
+    "vitamin_c_mg",
+    "vitamin_d_mcg",
     "notes",
+    // Per-nutrient provenance as one JSON object per row.
+    //
+    // JSON in a cell, rather than three more columns per nutrient: provenance
+    // is a {source, source_id, confidence} record PER nutrient, so a flat
+    // rendering would add up to sixty columns to a file whose whole job is to
+    // be re-importable, and the importer maps columns one at a time. One
+    // opaque cell round-trips byte-exactly through JSON.parse, stays empty
+    // (not "{}") for the overwhelming majority of rows that have none, and
+    // costs a reader nothing who only wants the numbers. csvEscape quotes it
+    // and doubles its quotes, which is plain RFC-4180 and what every parser
+    // here and elsewhere already undoes.
+    "nutrient_provenance",
 ] as const;
 
 /**
@@ -93,7 +123,27 @@ export function buildMealsCsv(meals: Meal[], tz: string): string {
                 csvEscape(m.sugar_g),
                 csvEscape(m.alcohol_g),
                 csvEscape(m.caffeine_mg),
+                csvEscape(m.saturated_fat_g),
+                csvEscape(m.trans_fat_g),
+                csvEscape(m.added_sugar_g),
+                csvEscape(m.sodium_mg),
+                csvEscape(m.potassium_mg),
+                csvEscape(m.cholesterol_mg),
+                csvEscape(m.calcium_mg),
+                csvEscape(m.iron_mg),
+                csvEscape(m.magnesium_mg),
+                csvEscape(m.vitamin_a_mcg),
+                csvEscape(m.vitamin_c_mg),
+                csvEscape(m.vitamin_d_mcg),
                 csvEscape(m.notes),
+                // Empty cell — not "{}" and not "null" — when there is no
+                // provenance, so it reads as "nothing recorded here" exactly
+                // like every other empty cell in this file.
+                csvEscape(
+                    m.nutrient_provenance
+                        ? JSON.stringify(m.nutrient_provenance)
+                        : null,
+                ),
             ].join(","),
         );
     }
@@ -207,6 +257,13 @@ const GOALS_CSV_COLUMNS = [
     "daily_caffeine_mg",
     "daily_water_ml",
     "target_weight_g",
+    // The ten micronutrient targets, spliced in from the canonical list rather
+    // than spelled out, so a target added to the model cannot be silently left
+    // out of the backup — which is exactly what happened to all ten of these
+    // when they were added to the goals table and not to this file. The names
+    // carry their direction (max_/min_) and their unit for the same reason
+    // every other column here does.
+    ...MICRONUTRIENT_GOAL_FIELDS.map(([goalField]) => goalField),
     "updated_at",
     "timezone",
 ] as const;
@@ -234,6 +291,11 @@ export function buildGoalsCsv(
                 csvEscape(goals.daily_caffeine_mg),
                 csvEscape(goals.daily_water_ml),
                 csvEscape(goals.target_weight_g),
+                // Same list, same order as the header above — the parallel
+                // arrays stay aligned because neither is hand-written.
+                ...MICRONUTRIENT_GOAL_FIELDS.map(([goalField]) =>
+                    csvEscape(goals[goalField]),
+                ),
                 csvEscape(formatLocalDateTime(goals.updated_at, tz)),
                 csvEscape(tz),
             ].join(","),
@@ -334,7 +396,7 @@ export function buildExportReadme(opts: {
         "",
         "Files",
         "-----",
-        `meals.csv    ${rows(counts.meals)} — every meal you have logged: time, description, calories and macros.`,
+        `meals.csv    ${rows(counts.meals)} — every meal you have logged: time, description, calories, macros and micronutrients.`,
         `water.csv    ${rows(counts.water)} — every water entry, in millilitres.`,
         `weight.csv   ${rows(counts.weight)} — every weigh-in, as stored grams and as ${weightUnit}.`,
         "goals.csv    your current daily targets — one row, or a header alone if you have never set goals.",
@@ -346,10 +408,18 @@ export function buildExportReadme(opts: {
         "The unit is part of every column name, because these columns do not all agree:",
         "  * _g columns are grams; alcohol_g and daily_alcohol_g are grams of pure ethanol, not the volume of the drink.",
         "  * caffeine_mg and daily_caffeine_mg are MILLIGRAMS, unlike every gram column beside them. A cup of coffee is about 95 mg.",
+        "  * sodium_mg, potassium_mg, cholesterol_mg, calcium_mg, iron_mg, magnesium_mg and vitamin_c_mg are MILLIGRAMS; vitamin_a_mcg (micrograms RAE) and vitamin_d_mcg are MICROGRAMS — a thousandth of a milligram.",
+        "  * saturated_fat_g, trans_fat_g and added_sugar_g are grams. added_sugar_g is its own figure, not part of sugar_g and not subtracted from it: sugar_g is TOTAL sugars, including what is naturally in fruit and milk.",
         "  * amount_ml and daily_water_ml are millilitres.",
         `  * weight_g and target_weight_g are grams — the canonical form the server stores. weight.csv also gives weight_display in ${weightUnit}, with weight_unit naming it, so you do not have to divide anything by hand.`,
         "  * calories are kcal.",
         "An empty cell means nothing was ever recorded there. It does not mean zero — a meal logged before caffeine tracking existed has an empty caffeine_mg, not a 0.",
+        "",
+        "Where the numbers came from",
+        "---------------------------",
+        "nutrient_provenance holds one JSON object per meal, keyed by nutrient, saying where that nutrient's value came from and how much to trust it — for example:",
+        '  {"sodium_mg":{"source":"usda_fdc","source_id":"fdc:173410","confidence":"authoritative"}}',
+        "source is one of nutrition_label, open_food_facts, usda_fdc, restaurant_published, user_provided, import or model_estimate; confidence is authoritative, user_provided or estimated. It is per nutrient, not per meal: one meal can hold a barcode-scanned figure beside an estimated one. The cell is empty when nothing was recorded, and it survives an export and re-import unchanged.",
         "",
         "Re-importing",
         "------------",

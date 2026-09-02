@@ -13,3 +13,13 @@ public/map-data.json
 
 # Local Claude Code state — untracked, not ours to format.
 .claude/
+
+# Written by `bun run validate:off` / `validate:usda`, which are live-API
+# validation runs. These files are EVIDENCE of a run, so they must stay
+# byte-for-byte what the script emitted — reformatting them afterwards makes
+# them a report about a report. That is not hypothetical: the committed
+# versions had been reformatted after generation, so they no longer matched
+# what the validators produced, and running the documented command turned the
+# tree red.
+validation/open-food-facts/live-report.md
+validation/usda/live-report.md

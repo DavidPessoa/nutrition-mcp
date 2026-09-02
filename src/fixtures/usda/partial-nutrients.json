@@ -1,0 +1,40 @@
+{
+    "_note": "SYNTHETIC. A record carrying only the four core macros and nothing else. No real record sampled on 2026-08-19 was this bare (the live Survey (FNDDS) spinach record is nutrient-rich), which is exactly why this one is hand-made: every micronutrient must come back null, not zero.",
+    "fdcId": 2341234,
+    "description": "Beef curry",
+    "dataType": "Survey (FNDDS)",
+    "foodNutrients": [
+        {
+            "amount": 141,
+            "nutrient": {
+                "number": "208",
+                "name": "Energy",
+                "unitName": "KCAL"
+            }
+        },
+        {
+            "amount": 9.5,
+            "nutrient": {
+                "number": "203",
+                "name": "Protein",
+                "unitName": "G"
+            }
+        },
+        {
+            "amount": 6.2,
+            "nutrient": {
+                "number": "204",
+                "name": "Total lipid (fat)",
+                "unitName": "G"
+            }
+        },
+        {
+            "amount": 11.4,
+            "nutrient": {
+                "number": "205",
+                "name": "Carbohydrate, by difference",
+                "unitName": "G"
+            }
+        }
+    ]
+}

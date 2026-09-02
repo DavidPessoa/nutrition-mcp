@@ -30,6 +30,8 @@
 
             /*@include shared/macros.css@*/
 
+            /*@include shared/micros.css@*/
+
             /*@include shared/trend.css@*/
         </style>
     </head>
@@ -77,6 +79,120 @@
                     caffeine_mg: 187,
                     water_ml: 2100,
                 },
+                // Per-micronutrient coverage across the WHOLE range — the
+                // recorded total and how many of the range's meals carry it.
+                // `complete: false` means the total is a lower bound, and the
+                // section renders it as one (see shared/micros.js). Confidence
+                // is NOT in NUTRIENT_COVERAGE_ITEM yet; the two rows carrying
+                // it here are what the badge looks like once it is, and every
+                // other row shows the (correct) absence of a badge.
+                // `target` is scaled to the range — 2,300 mg/day of sodium
+                // over the 3 logged days above is 6,900 here — and
+                // `target_days` says over how many, so `known_total` and
+                // `target` are always the same span.
+                nutrient_coverage: [
+                    {
+                        nutrient: "sodium_mg",
+                        unit: "mg",
+                        known_total: 4180,
+                        known_meals: 7,
+                        total_meals: 11,
+                        known_calories: 4100,
+                        total_calories: 6105,
+                        coverage: 0.64,
+                        complete: false,
+                        target: 6900,
+                        target_days: 3,
+                        direction: "maximum",
+                        confidence: "authoritative",
+                    },
+                    {
+                        nutrient: "saturated_fat_g",
+                        unit: "g",
+                        known_total: 82.4,
+                        known_meals: 11,
+                        total_meals: 11,
+                        known_calories: 6105,
+                        total_calories: 6105,
+                        coverage: 1,
+                        complete: true,
+                        target: 60,
+                        target_days: 3,
+                        direction: "maximum",
+                        confidence: "authoritative",
+                    },
+                    {
+                        nutrient: "potassium_mg",
+                        unit: "mg",
+                        known_total: 9840,
+                        known_meals: 9,
+                        total_meals: 11,
+                        known_calories: 5200,
+                        total_calories: 6105,
+                        coverage: 0.82,
+                        complete: false,
+                        target: null,
+                        target_days: 3,
+                        direction: "minimum",
+                    },
+                    {
+                        nutrient: "calcium_mg",
+                        unit: "mg",
+                        known_total: 2410,
+                        known_meals: 11,
+                        total_meals: 11,
+                        known_calories: 6105,
+                        total_calories: 6105,
+                        coverage: 1,
+                        complete: true,
+                        target: 2100,
+                        target_days: 3,
+                        direction: "minimum",
+                    },
+                    {
+                        nutrient: "iron_mg",
+                        unit: "mg",
+                        known_total: null,
+                        known_meals: 0,
+                        total_meals: 11,
+                        known_calories: 0,
+                        total_calories: 6105,
+                        coverage: 0,
+                        complete: false,
+                        target: 54,
+                        target_days: 3,
+                        direction: "minimum",
+                    },
+                    {
+                        nutrient: "added_sugar_g",
+                        unit: "g",
+                        known_total: 0,
+                        known_meals: 11,
+                        total_meals: 11,
+                        known_calories: 6105,
+                        total_calories: 6105,
+                        coverage: 1,
+                        complete: true,
+                        target: null,
+                        target_days: 3,
+                        direction: null,
+                    },
+                    {
+                        nutrient: "vitamin_d_mcg",
+                        unit: "mcg",
+                        known_total: 21.6,
+                        known_meals: 4,
+                        total_meals: 11,
+                        known_calories: 1900,
+                        total_calories: 6105,
+                        coverage: 0.36,
+                        complete: false,
+                        target: 45,
+                        target_days: 3,
+                        direction: "minimum",
+                        confidence: "user_provided",
+                    },
+                ],
                 days: [
                     {
                         date: "2026-07-05",
@@ -280,6 +396,8 @@
 
             /*@include shared/macros.js@*/
 
+            /*@include shared/micros.js@*/
+
             // ---- Header dates -------------------------------------------------
             // The header line is one nowrap run, so the range is written the way
             // a person would say it ("5–7 Jul") rather than as two ISO strings.
@@ -481,6 +599,7 @@
             </div>
             ${trend}
             ${panel}
+            ${microSection(data.nutrient_coverage)}
           </div>`;
             }
 

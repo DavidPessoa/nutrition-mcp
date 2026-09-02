@@ -32,6 +32,19 @@ function meal(overrides: Partial<Meal> = {}): Meal {
         sugar_g: 12,
         alcohol_g: 3,
         caffeine_mg: 95,
+        saturated_fat_g: null,
+        trans_fat_g: null,
+        added_sugar_g: null,
+        sodium_mg: null,
+        potassium_mg: null,
+        cholesterol_mg: null,
+        calcium_mg: null,
+        iron_mg: null,
+        magnesium_mg: null,
+        vitamin_a_mcg: null,
+        vitamin_c_mg: null,
+        vitamin_d_mcg: null,
+        nutrient_provenance: null,
         notes: null,
         idempotency_key: null,
         ...overrides,
@@ -39,7 +52,7 @@ function meal(overrides: Partial<Meal> = {}): Meal {
 }
 
 const HEADER =
-    "id,logged_at,timezone,meal_type,description,calories,protein_g,carbs_g,fat_g,fiber_g,sugar_g,alcohol_g,caffeine_mg,notes";
+    "id,logged_at,timezone,meal_type,description,calories,protein_g,carbs_g,fat_g,fiber_g,sugar_g,alcohol_g,caffeine_mg,saturated_fat_g,trans_fat_g,added_sugar_g,sodium_mg,potassium_mg,cholesterol_mg,calcium_mg,iron_mg,magnesium_mg,vitamin_a_mcg,vitamin_c_mg,vitamin_d_mcg,notes,nutrient_provenance";
 
 /**
  * Minimal RFC-4180 reader: splits a CSV document into rows of fields, honouring
@@ -151,6 +164,28 @@ test("every value lands under its own header name", () => {
                     sugar_g: 12,
                     alcohol_g: 3,
                     caffeine_mg: 95,
+                    // Distinct micronutrient values for the same reason the
+                    // macros above are distinct: a one-column shift anywhere in
+                    // the twelve lands a value under the wrong name.
+                    saturated_fat_g: 4.5,
+                    trans_fat_g: 0,
+                    added_sugar_g: 2.25,
+                    sodium_mg: 610,
+                    potassium_mg: 430,
+                    cholesterol_mg: 85,
+                    calcium_mg: 120,
+                    iron_mg: 1.8,
+                    magnesium_mg: 55,
+                    vitamin_a_mcg: 90,
+                    vitamin_c_mg: 12,
+                    vitamin_d_mcg: 0.4,
+                    nutrient_provenance: {
+                        sodium_mg: {
+                            source: "usda_fdc",
+                            source_id: "fdc:173410",
+                            confidence: "authoritative",
+                        },
+                    },
                     notes: "post-run",
                 }),
             ],
@@ -171,7 +206,22 @@ test("every value lands under its own header name", () => {
         sugar_g: "12",
         alcohol_g: "3",
         caffeine_mg: "95",
+        saturated_fat_g: "4.5",
+        // A real zero, rendered as "0" and not as an empty cell.
+        trans_fat_g: "0",
+        added_sugar_g: "2.25",
+        sodium_mg: "610",
+        potassium_mg: "430",
+        cholesterol_mg: "85",
+        calcium_mg: "120",
+        iron_mg: "1.8",
+        magnesium_mg: "55",
+        vitamin_a_mcg: "90",
+        vitamin_c_mg: "12",
+        vitamin_d_mcg: "0.4",
         notes: "post-run",
+        nutrient_provenance:
+            '{"sodium_mg":{"source":"usda_fdc","source_id":"fdc:173410","confidence":"authoritative"}}',
     });
 });
 
@@ -195,7 +245,22 @@ test("header column order is stable and importer-compatible", () => {
         // matches on this exact string, and "caffeine" alone would let a grams
         // column bind to a milligram field.
         "caffeine_mg",
+        // The twelve micronutrients, each spelled as its canonical field name
+        // so a re-import binds them without a unit assumption.
+        "saturated_fat_g",
+        "trans_fat_g",
+        "added_sugar_g",
+        "sodium_mg",
+        "potassium_mg",
+        "cholesterol_mg",
+        "calcium_mg",
+        "iron_mg",
+        "magnesium_mg",
+        "vitamin_a_mcg",
+        "vitamin_c_mg",
+        "vitamin_d_mcg",
         "notes",
+        "nutrient_provenance",
     ]);
 });
 
@@ -326,6 +391,18 @@ function weight(overrides: Partial<WeightEntry> = {}): WeightEntry {
 function goals(overrides: Partial<NutritionGoals> = {}): NutritionGoals {
     return {
         user_id: "user-1",
+        // Micronutrient goals: unset by default, like every other optional
+        // target. Explicit nulls because NutritionGoals requires the keys.
+        max_saturated_fat_g: null,
+        max_sodium_mg: null,
+        min_potassium_mg: null,
+        max_cholesterol_mg: null,
+        min_calcium_mg: null,
+        min_iron_mg: null,
+        min_magnesium_mg: null,
+        min_vitamin_a_mcg: null,
+        min_vitamin_c_mg: null,
+        min_vitamin_d_mcg: null,
         daily_calories: 2200,
         daily_protein_g: 150,
         daily_carbs_g: 220,
@@ -358,8 +435,13 @@ function profile(overrides: Partial<Profile> = {}): Profile {
 const WATER_HEADER = "id,logged_at,timezone,amount_ml,notes";
 const WEIGHT_HEADER =
     "id,logged_at,timezone,weight_g,weight_display,weight_unit,notes";
+// Spelled out rather than rebuilt from MICRONUTRIENT_GOAL_FIELDS: a header
+// derived from the same list the builder derives from would agree with itself
+// no matter what either did. This is the literal file a user gets.
 const GOALS_HEADER =
-    "daily_calories,daily_protein_g,daily_carbs_g,daily_fat_g,daily_fiber_g,daily_sugar_g,daily_alcohol_g,daily_caffeine_mg,daily_water_ml,target_weight_g,updated_at,timezone";
+    "daily_calories,daily_protein_g,daily_carbs_g,daily_fat_g,daily_fiber_g,daily_sugar_g,daily_alcohol_g,daily_caffeine_mg,daily_water_ml,target_weight_g," +
+    "max_saturated_fat_g,max_sodium_mg,min_potassium_mg,max_cholesterol_mg,min_calcium_mg,min_iron_mg,min_magnesium_mg,min_vitamin_a_mcg,min_vitamin_c_mg,min_vitamin_d_mcg," +
+    "updated_at,timezone";
 const PROFILE_HEADER =
     "timezone,preferred_weight_unit,preferred_drink_unit,alcohol_tracking_enabled,widgets_enabled,created_at,updated_at";
 
@@ -521,8 +603,36 @@ test("goals.csv header and its single row have identical field counts", () => {
 });
 
 test("every goal value lands under its own header name", () => {
-    const f = fieldsByName(buildGoalsCsv(goals(), "Europe/Berlin"));
+    const f = fieldsByName(
+        buildGoalsCsv(
+            goals({
+                max_saturated_fat_g: 20,
+                max_sodium_mg: 2300,
+                min_potassium_mg: 3400,
+                max_cholesterol_mg: 300,
+                min_calcium_mg: 1000,
+                min_iron_mg: 0,
+                min_magnesium_mg: 420,
+                min_vitamin_a_mcg: 900,
+                min_vitamin_c_mg: 90,
+                min_vitamin_d_mcg: 20,
+            }),
+            "Europe/Berlin",
+        ),
+    );
     expect(f).toEqual({
+        // The ten micronutrient targets. A 0 is a real target ("no iron
+        // floor set" is null, and these are different facts).
+        max_saturated_fat_g: "20",
+        max_sodium_mg: "2300",
+        min_potassium_mg: "3400",
+        max_cholesterol_mg: "300",
+        min_calcium_mg: "1000",
+        min_iron_mg: "0",
+        min_magnesium_mg: "420",
+        min_vitamin_a_mcg: "900",
+        min_vitamin_c_mg: "90",
+        min_vitamin_d_mcg: "20",
         daily_calories: "2200",
         daily_protein_g: "150",
         daily_carbs_g: "220",

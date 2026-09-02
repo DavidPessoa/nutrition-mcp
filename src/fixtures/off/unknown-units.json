@@ -1,0 +1,23 @@
+{
+    "code": "0000000000024",
+    "status": 1,
+    "status_verbose": "product found",
+    "_note": "Synthetic. Every micronutrient here has a PRESENT, PARSEABLE amount but an ambiguous or absent unit: vitamin A in IU (no single IU -> ug RAE factor exists, see src/nutrient-units.ts), potassium with no _unit key at all, magnesium in '%' of a daily value, calcium in an unhandled 'kg'. CONTRACT.md 0.9: ambiguous unit => null, never a guessed number.",
+    "product": {
+        "product_name": "Ambiguous Units Test Product",
+        "brands": "Fixture Foods",
+        "nutriments": {
+            "energy-kcal_100g": 100,
+            "proteins_100g": 1,
+            "carbohydrates_100g": 2,
+            "fat_100g": 3,
+            "vitamin-a_100g": 2500,
+            "vitamin-a_unit": "IU",
+            "potassium_100g": 0.3,
+            "magnesium_100g": 20,
+            "magnesium_unit": "%",
+            "calcium_100g": 0.0005,
+            "calcium_unit": "kg"
+        }
+    }
+}

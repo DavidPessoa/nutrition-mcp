@@ -1,3 +1,4 @@
+import { MICRONUTRIENT_FIELDS } from "./nutrients.js";
 import type {
     Meal,
     NutritionGoals,
@@ -123,8 +124,21 @@ export function buildDailyBuckets(
  * reported 5 g/day for a user eating 30 g, and scored 25 data-less days as days
  * under a sugar limit. Caffeine is the same story and then some: most meals will
  * legitimately never carry a value. */
-export type PartialNutrient =
+export type BucketNutrient =
     "fiber_g" | "sugar_g" | "alcohol_g" | "caffeine_mg";
+
+/** Every micronutrient is partial by construction: it arrived with this epic,
+ * so literally every meal predating it carries NULL, and most sources will
+ * never report all twelve. They join `PartialNutrient` rather than getting a
+ * parallel "coverage" system — `dayCarries` and `coveredDailyAverage` are
+ * already the rule, and two rules would be two answers.
+ *
+ * The split from `BucketNutrient` is deliberate: `DailyBucket` accumulates
+ * only the four originals, so bucket-level helpers (`coveredSeries`, the
+ * weekly digest) stay narrowed to those, while the meal-level helpers below
+ * take the full set. */
+type MicronutrientField = (typeof MICRONUTRIENT_FIELDS)[number];
+export type PartialNutrient = BucketNutrient | MicronutrientField;
 
 /** THE RULE, shared with mcp.ts: a day carries a nutrient when at least one of
  * that day's meals has a non-null value for it. Only carrying days count toward
@@ -132,6 +146,71 @@ export type PartialNutrient =
  * both numerator and denominator, so trends and the summary must agree. */
 export function dayCarries(meals: Meal[], nutrient: PartialNutrient): boolean {
     return meals.some((m) => m[nutrient] != null);
+}
+
+/** How much of a nutrient is actually KNOWN across a set of meals.
+ *
+ * `dayCarries` answers "does this day count at all"; this answers the sharper
+ * question a total has to answer: breakfast 600 mg sodium, lunch unknown,
+ * dinner 700 mg is NOT 1300 mg of sodium — it is 1300 mg recorded across 2 of
+ * 3 meals, and the true intake is larger. Presenting the sum as the day's
+ * intake is the single failure this whole feature exists to prevent, so every
+ * caller gets the denominator alongside the number and is expected to print it.
+ *
+ * `known_total` is NULL, not 0, when nothing recorded the nutrient: an
+ * unmeasured day has no total. An explicitly recorded 0 counts as KNOWN and
+ * contributes 0 — that is the whole point of null != 0. */
+export interface NutrientCoverage {
+    /** Sum over the meals that recorded a value; null when none did. */
+    known_total: number | null;
+    known_meals: number;
+    total_meals: number;
+    /** The same coverage question weighed by CALORIES rather than by meal
+     * count, because "2 of 3 meals" hides which meals: a missing 900 kcal
+     * dinner and a missing 5 kcal black coffee are both "1 of 3" and are not
+     * remotely the same claim about how wrong `known_total` is.
+     *
+     * Calories are `?? 0` here, unlike every nutrient this module guards:
+     * calories predate the null-means-unknown rule, every other read path
+     * already sums them that way (see buildDailyBuckets), and a second
+     * convention for the same column would put two different day totals on
+     * screen. These two are a WEIGHT on the coverage figure, not an intake
+     * claim, so the older convention is the harmless one to keep. */
+    known_calories: number;
+    total_calories: number;
+    /** known_meals / total_meals, 0 when there are no meals at all. */
+    coverage: number;
+    /** True only when every meal recorded a value — i.e. the total is the
+     * whole story. Vacuously false with no meals: nothing was measured. */
+    complete: boolean;
+}
+
+export function nutrientCoverage(
+    meals: Meal[],
+    nutrient: PartialNutrient,
+): NutrientCoverage {
+    let known = 0;
+    let total: number | null = null;
+    let knownCalories = 0;
+    let totalCalories = 0;
+    for (const m of meals) {
+        totalCalories += m.calories ?? 0;
+        const v = m[nutrient];
+        // `!= null` and not a truthiness check: a recorded 0 is a measurement.
+        if (v == null) continue;
+        known++;
+        knownCalories += m.calories ?? 0;
+        total = (total ?? 0) + v;
+    }
+    return {
+        known_total: total,
+        known_meals: known,
+        total_meals: meals.length,
+        known_calories: knownCalories,
+        total_calories: totalCalories,
+        coverage: meals.length > 0 ? known / meals.length : 0,
+        complete: meals.length > 0 && known === meals.length,
+    };
 }
 
 /** Mean of a nutrient over only the days that carry it, given one Meal[] per
@@ -210,7 +289,7 @@ function fullSeries(
 /** A nutrient that may be missing: only carrying days count (see dayCarries). */
 function coveredSeries(
     buckets: DailyBucket[],
-    nutrient: PartialNutrient,
+    nutrient: BucketNutrient,
 ): StatSeries {
     const valuesOf = (bs: DailyBucket[]) =>
         bs.filter((b) => dayCarries(b.meals, nutrient)).map((b) => b[nutrient]);
@@ -784,7 +863,7 @@ export function computeWeeklyDigest(
     const avgFat = round(mean(buckets.map((b) => b.fat_g)));
     // Same rule as computeTrends, so the two narratives cannot disagree: these
     // average over the days that carry them, not over the whole week.
-    const covered = (nutrient: PartialNutrient) => {
+    const covered = (nutrient: BucketNutrient) => {
         const days = buckets.filter((b) => dayCarries(b.meals, nutrient));
         return {
             avg:

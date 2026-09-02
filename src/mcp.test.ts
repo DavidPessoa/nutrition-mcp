@@ -30,11 +30,24 @@ import {
     MAX_GOAL_G,
     MAX_GOAL_MG,
     gateAlcohol,
+    micronutrientProgressLines,
+    nutrientCoveragePayload,
+    foldConfidence,
+    coverageNote,
+    NUTRIENT_COVERAGE_ITEM,
 } from "./mcp.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import * as actualSupabase from "./supabase.js";
+import * as actualUsda from "./usda.js";
+import type { UsdaCandidate } from "./usda.js";
+import { emptyNutrientValues, type FoodNutrition } from "./providers/types.js";
+import type {
+    NutrientProvenance,
+    NutrientProvenanceEntry,
+    NutrientConfidence,
+} from "./nutrients.js";
 import { DELETED_ACCOUNT_ANALYTICS_ID } from "./analytics.js";
 import { formatFoodResult, type FoodResult } from "./foods.js";
 import {
@@ -72,6 +85,19 @@ function meal(over: Partial<Meal> = {}): Meal {
         // fixture meal a milligram figure would hide the suppression this whole
         // feature turns on — the tests that want caffeine ask for it.
         caffeine_mg: null,
+        saturated_fat_g: null,
+        trans_fat_g: null,
+        added_sugar_g: null,
+        sodium_mg: null,
+        potassium_mg: null,
+        cholesterol_mg: null,
+        calcium_mg: null,
+        iron_mg: null,
+        magnesium_mg: null,
+        vitamin_a_mcg: null,
+        vitamin_c_mg: null,
+        vitamin_d_mcg: null,
+        nutrient_provenance: null,
         notes: null,
         idempotency_key: null,
         ...over,
@@ -92,6 +118,18 @@ function goals(over: Partial<NutritionGoals> = {}): NutritionGoals {
         daily_caffeine_mg: 400,
         daily_water_ml: 2500,
         target_weight_g: null,
+        // Micronutrient goals: unset by default, like every other optional
+        // target. Explicit nulls because NutritionGoals requires the keys.
+        max_saturated_fat_g: null,
+        max_sodium_mg: null,
+        min_potassium_mg: null,
+        max_cholesterol_mg: null,
+        min_calcium_mg: null,
+        min_iron_mg: null,
+        min_magnesium_mg: null,
+        min_vitamin_a_mcg: null,
+        min_vitamin_c_mg: null,
+        min_vitamin_d_mcg: null,
         updated_at: "2026-07-26T00:00:00.000Z",
         ...over,
     };
@@ -1129,6 +1167,7 @@ describe("start_meal_import and bulk_import_meals treat a timezone-less profile 
 // gating cases are covered here rather than in the food-lookup suite.
 describe("formatFoodResult", () => {
     const beer: FoodResult = {
+        servingBasis: { kind: "per_100g" },
         name: "Lager",
         brand: "Brewery",
         serving: "330 ml",
@@ -1139,6 +1178,20 @@ describe("formatFoodResult", () => {
         fiber_g: 0.5,
         sugar_g: 0.2,
         alcohol_g: 13,
+        caffeine_mg: null,
+        saturated_fat_g: null,
+        trans_fat_g: null,
+        added_sugar_g: null,
+        sodium_mg: null,
+        potassium_mg: null,
+        cholesterol_mg: null,
+        calcium_mg: null,
+        iron_mg: null,
+        magnesium_mg: null,
+        vitamin_a_mcg: null,
+        vitamin_c_mg: null,
+        vitamin_d_mcg: null,
+        provenance: null,
         source: "off:1234567890123",
         source_name: "openfoodfacts",
         barcode: "1234567890123",
@@ -1442,7 +1495,17 @@ mock.module("./supabase.js", () => ({
     getUserTimezone: async () => db.profile?.timezone ?? "UTC",
     getNutritionGoals: async () => db.goals,
     getMealsByDate: async () => db.meals,
+    // update_meal reads the prior row before writing, so the resolution
+    // policy can see where a stored value came from before deciding whether
+    // an incoming one may replace it (src/resolution.ts).
+    getMealById: async (_userId: string, id: string) =>
+        db.meals.find((m) => m.id === id) ?? null,
     getWaterByDate: async () => [],
+    // get_goal_progress reads the latest weight to render a weight line. The
+    // real implementation goes through getSupabase(), which is stubbed here
+    // to answer analytics inserts only — so without this the whole tool
+    // throws before any coverage assertion is reached.
+    getLatestWeight: async () => null,
     // The range readers behind get_nutrition_summary. They ignore the dates and
     // hand back whatever the test staged: the fixtures below already sit inside
     // the window they ask for, and filtering here would only re-implement the
@@ -1941,6 +2004,19 @@ describe("missingNutrientNote", () => {
         sugar_g: null,
         alcohol_g: null,
         caffeine_mg: null,
+        saturated_fat_g: null,
+        trans_fat_g: null,
+        added_sugar_g: null,
+        sodium_mg: null,
+        potassium_mg: null,
+        cholesterol_mg: null,
+        calcium_mg: null,
+        iron_mg: null,
+        magnesium_mg: null,
+        vitamin_a_mcg: null,
+        vitamin_c_mg: null,
+        vitamin_d_mcg: null,
+        nutrient_provenance: null,
         notes: null,
         idempotency_key: null,
     } satisfies Meal;
@@ -2033,8 +2109,12 @@ describe("log_meal / update_meal chase missing fiber and sugar", () => {
             const text = textOf(
                 await call("update_meal", { id: "m1", fiber_g: 6 }),
             );
-            expect(text).toContain("sugar_g");
-            expect(text).not.toContain("fiber_g");
+            // Scoped to the nudge itself: the meal body now also carries a
+            // provenance line ("Sources — model_estimate: fiber_g"), which is
+            // the write being attributed, not the repair loop asking again.
+            const note = text.slice(text.indexOf("Not recorded on this meal:"));
+            expect(note).toContain("sugar_g");
+            expect(note).not.toContain("fiber_g");
         });
     });
 });
@@ -3637,5 +3717,1250 @@ describe("export_all_data is on the tool surface", () => {
             idempotentHint: false,
             openWorldHint: false,
         });
+    });
+});
+
+// ---------- (4) nutrient sources, provenance and the resolution policy ----------
+
+// src/resolution.test.ts already covers the policy as a pure function. What it
+// cannot see is whether the tools OBEY it, which is a different question with a
+// different answer: both handlers build their write as
+// `{ ...args, ...toMealNutrientInput(resolved.values) }`, so a field the policy
+// refused is merely absent from the overlay and the caller's raw value survives
+// underneath it. Everything below therefore asserts on what reached the storage
+// layer (db.inserted / db.mealUpdates) and not only on the text — a text-only
+// assertion here passes while the wrong number is written.
+//
+// Two of these assertions were written as `test.failing` against a real defect
+// found while writing them: the write was built as
+// `{ ...args, ...toMealNutrientInput(resolved.values) }`, so a value the
+// resolution policy REFUSED was merely absent from the overlay and the
+// caller's original survived underneath it — the row held a model-invented
+// sodium figure while the response said "Not stored: sodium_mg". Fixed in
+// src/mcp.ts by stripping the nutrient fields from the base object
+// (withoutNutrientFields), so resolved.values is genuinely the only
+// authority. These two are the regression locks on that; they assert on what
+// reached the storage layer, because the response text was reassuring while
+// the row was wrong.
+
+/** Provenance exactly as it reached insertMeal / updateMeal. */
+function writtenProvenance(
+    row: Record<string, unknown> | undefined,
+): NutrientProvenance | null {
+    return (row?.nutrient_provenance ?? null) as NutrientProvenance | null;
+}
+
+/** The four attributions these tests expect to see stored. Written out as
+ *  literals rather than derived from confidenceOf(), so that a change to the
+ *  source-to-confidence mapping fails here instead of agreeing with itself. */
+const OFF_CALORIES: NutrientProvenanceEntry = {
+    source: "open_food_facts",
+    source_id: "off:5000112",
+    confidence: "authoritative",
+};
+const ESTIMATED: NutrientProvenanceEntry = {
+    source: "model_estimate",
+    source_id: null,
+    confidence: "estimated",
+};
+const USER_STATED: NutrientProvenanceEntry = {
+    source: "user_provided",
+    source_id: null,
+    confidence: "user_provided",
+};
+const FROM_LABEL: NutrientProvenanceEntry = {
+    source: "nutrition_label",
+    source_id: null,
+    confidence: "authoritative",
+};
+
+describe("a better-sourced value survives a worse-sourced write", () => {
+    /** Log one barcode-sourced meal and hand back its id. */
+    async function logFromBarcode(call: CallTool) {
+        await call("log_meal", {
+            description: "Protein bar",
+            meal_type: "snack",
+            calories: 250,
+            protein_g: 20,
+            nutrient_source: "open_food_facts",
+            nutrient_source_id: "off:5000112",
+        });
+        return "m1";
+    }
+
+    test("an estimate cannot relabel a barcode figure as its own", async () => {
+        await withTools(null, async (call) => {
+            const id = await logFromBarcode(call);
+            const r = await call("update_meal", { id, calories: 999 });
+            // The attribution is the half that already works: the stored
+            // provenance still credits Open Food Facts, and the model is told
+            // why its number did not take and how to override deliberately.
+            expect(writtenProvenance(db.mealUpdates[0])?.calories).toEqual(
+                OFF_CALORIES,
+            );
+            expect(textOf(r)).toContain(
+                "Kept the existing values for: calories",
+            );
+            expect(textOf(r)).toContain("nutrient_source='user_provided'");
+        });
+    });
+
+    // KNOWN BUG (src/mcp.ts, update_meal): the refused value still reaches
+    // updateMeal, so the row ends up holding 999 kcal while its provenance
+    // says the figure came from Open Food Facts. That disagreement is worse
+    // than either failure alone — the meal now looks authoritative and is not.
+    test("the refused estimate does not reach the database", async () => {
+        await withTools(null, async (call) => {
+            const id = await logFromBarcode(call);
+            await call("update_meal", { id, calories: 999 });
+            expect(db.mealUpdates[0]).not.toHaveProperty("calories");
+        });
+    });
+
+    test("a user-stated value also outranks a later estimate", async () => {
+        await withTools(null, async (call) => {
+            await call("log_meal", {
+                description: "Grandma's stew",
+                meal_type: "dinner",
+                calories: 500,
+                nutrient_source: "user_provided",
+            });
+            const r = await call("update_meal", { id: "m1", calories: 800 });
+            expect(writtenProvenance(db.mealUpdates[0])?.calories).toEqual(
+                USER_STATED,
+            );
+            expect(textOf(r)).toContain(
+                "Kept the existing values for: calories",
+            );
+        });
+    });
+
+    // The other side of the same rule, and the one that must NOT block: a
+    // stored null is "unknown", so filling it is not an overwrite. Without
+    // this, a barcode with no fiber figure would freeze fiber at null forever.
+    test("an estimate fills a macro the source had nothing for", async () => {
+        await withTools(null, async (call) => {
+            await call("log_meal", {
+                description: "Protein bar",
+                meal_type: "snack",
+                calories: 250,
+                nutrient_source: "open_food_facts",
+                nutrient_source_id: "off:5000112",
+            });
+            expect(db.meals[0]!.fiber_g).toBeNull();
+
+            const r = await call("update_meal", { id: "m1", fiber_g: 4 });
+            expect(db.mealUpdates[0]!.fiber_g).toBe(4);
+            expect(writtenProvenance(db.mealUpdates[0])?.fiber_g).toEqual(
+                ESTIMATED,
+            );
+            // Filling one field must not restate the other's attribution.
+            expect(writtenProvenance(db.mealUpdates[0])?.calories).toEqual(
+                OFF_CALORIES,
+            );
+            expect(textOf(r)).not.toContain("Kept the existing values");
+        });
+    });
+
+    // A meal logged before this epic has real values and NULL provenance. The
+    // absent field must not read as "unclaimed, so overwritable" — those
+    // numbers came from the user's own log.
+    test("a pre-epic meal is not overwritten by a fresh estimate", async () => {
+        await withTools(null, async (call) => {
+            db.meals = [meal({ calories: 700, nutrient_provenance: null })];
+            const r = await call("update_meal", { id: "m1", calories: 450 });
+            expect(textOf(r)).toContain(
+                "Kept the existing values for: calories",
+            );
+            // Nothing is invented on its behalf either: the untouched field
+            // gets no back-dated attribution.
+            expect(
+                writtenProvenance(db.mealUpdates[0])?.calories,
+            ).toBeUndefined();
+        });
+    });
+});
+
+describe("micronutrients are never model-estimated", () => {
+    test("log_meal refuses an estimated sodium figure and says why", async () => {
+        await withTools(null, async (call) => {
+            const r = await call("log_meal", {
+                description: "Chicken soup",
+                meal_type: "lunch",
+                calories: 200,
+                // No nutrient_source: the default is model_estimate, which is
+                // exactly the case this rule exists for.
+                sodium_mg: 900,
+            });
+            const provenance = writtenProvenance(db.inserted[0]);
+            // Absent, not null: nothing about this figure was recorded.
+            expect(provenance).not.toHaveProperty("sodium_mg");
+            expect(provenance?.calories?.source).toBe("model_estimate");
+            expect(textOf(r)).toContain("Not stored: sodium_mg");
+            expect(textOf(r)).toContain("cannot be model-estimated");
+        });
+    });
+
+    // KNOWN BUG (src/mcp.ts, log_meal): the invented 900 mg still reaches
+    // insertMeal, so the row is written with a sodium figure the response has
+    // just told the model was not stored — and the meal renders "Sodium: 900
+    // mg" two lines above "Not stored: sodium_mg".
+    test("the refused micronutrient never reaches the row", async () => {
+        await withTools(null, async (call) => {
+            await call("log_meal", {
+                description: "Chicken soup",
+                meal_type: "lunch",
+                calories: 200,
+                sodium_mg: 900,
+            });
+            expect(db.inserted[0]).not.toHaveProperty("sodium_mg");
+        });
+    });
+
+    test("a real source may supply the same field", async () => {
+        await withTools(null, async (call) => {
+            await call("log_meal", {
+                description: "Chicken soup",
+                meal_type: "lunch",
+                calories: 200,
+                sodium_mg: 900,
+                nutrient_source: "nutrition_label",
+            });
+            expect(db.inserted[0]!.sodium_mg).toBe(900);
+            expect(writtenProvenance(db.inserted[0])?.sodium_mg).toEqual(
+                FROM_LABEL,
+            );
+        });
+    });
+});
+
+describe("mixed-source provenance", () => {
+    /** The common real shape: a barcode gave the macros, the model filled the
+     *  one figure the product had no value for. */
+    async function logMixed(call: CallTool) {
+        return call("log_meal", {
+            description: "Protein bar",
+            meal_type: "snack",
+            calories: 250,
+            protein_g: 20,
+            sugar_g: 8,
+            fiber_g: 3,
+            nutrient_source: "open_food_facts",
+            nutrient_source_id: "off:5000112",
+            estimated_fields: ["fiber_g"],
+        });
+    }
+
+    test("each field is attributed to the source it actually came from", async () => {
+        await withTools(null, async (call) => {
+            await logMixed(call);
+            const provenance = writtenProvenance(db.inserted[0]);
+            for (const field of ["calories", "protein_g", "sugar_g"] as const) {
+                expect(provenance?.[field], field).toEqual(OFF_CALORIES);
+            }
+            expect(provenance?.fiber_g).toEqual(ESTIMATED);
+        });
+    });
+
+    test("it survives the round trip and is shown on the meal", async () => {
+        await withTools(null, async (call) => {
+            await logMixed(call);
+            const text = textOf(await call("get_meals_today"));
+            expect(text).toContain(
+                "Sources — open_food_facts (off:5000112): calories, protein_g, sugar_g | model_estimate: fiber_g",
+            );
+        });
+    });
+
+    test("updating one nutrient leaves the others and their sources alone", async () => {
+        await withTools(null, async (call) => {
+            await logMixed(call);
+            // user_provided (5) may replace the model estimate (6) it is
+            // correcting, and must touch nothing else.
+            await call("update_meal", {
+                id: "m1",
+                fiber_g: 7,
+                nutrient_source: "user_provided",
+            });
+            const update = db.mealUpdates[0]!;
+            expect(update.fiber_g).toBe(7);
+            for (const field of ["calories", "protein_g", "sugar_g"]) {
+                expect(update, field).not.toHaveProperty(field);
+            }
+            const provenance = writtenProvenance(update);
+            expect(provenance?.calories).toEqual(OFF_CALORIES);
+            expect(provenance?.sugar_g).toEqual(OFF_CALORIES);
+            expect(provenance?.fiber_g).toEqual(USER_STATED);
+        });
+    });
+
+    test("clearing a micronutrient stores null and drops its attribution", async () => {
+        await withTools(null, async (call) => {
+            await call("log_meal", {
+                description: "Instant noodles",
+                meal_type: "lunch",
+                calories: 400,
+                sodium_mg: 1600,
+                nutrient_source: "nutrition_label",
+            });
+            await call("update_meal", { id: "m1", sodium_mg: null });
+            const update = db.mealUpdates[0]!;
+            // null, not 0 and not absent: the value is now unknown, and an
+            // absent key would have left the 1600 standing.
+            expect(update.sodium_mg).toBeNull();
+            const provenance = writtenProvenance(update);
+            expect(provenance).not.toHaveProperty("sodium_mg");
+            // The rest of the meal keeps its attribution.
+            expect(provenance?.calories?.source).toBe("nutrition_label");
+            // And the read path stops showing it at all.
+            expect(textOf(await call("get_meals_today"))).not.toContain(
+                "Sodium",
+            );
+        });
+    });
+});
+
+// ---------- (5) lookup_food ----------
+
+// The USDA module is stubbed rather than reached: CONTRACT.md §0.8 forbids a
+// live API call in `bun test`, and the failure modes worth testing here (no key
+// configured, a search that returns candidates, a scaled lookup) are all in the
+// handler, not in the HTTP client. `resolveAmount` is deliberately left REAL so
+// the scaling assertions below exercise the actual arithmetic. Same wholesale-
+// replacement hazard as the ./supabase.js mock above, handled the same way.
+const usda = {
+    candidates: [] as UsdaCandidate[],
+    food: null as FoodNutrition | null,
+    error: null as Error | null,
+};
+
+// Snapshotted BEFORE the mock is installed. `actualUsda` is a live ESM
+// namespace, so mock.module rewrites the very bindings it exposes: restoring
+// with `() => actualUsda` hands the mock back to itself and leaks these stubs
+// into src/usda.test.ts, which runs later in the same process.
+const REAL_USDA = { ...actualUsda };
+
+mock.module("./usda.js", () => ({
+    ...REAL_USDA,
+    searchFoods: async () => {
+        if (usda.error) throw usda.error;
+        return usda.candidates;
+    },
+    lookupFood: async () => {
+        if (usda.error) throw usda.error;
+        return usda.food;
+    },
+}));
+
+afterAll(() => {
+    mock.module("./usda.js", () => REAL_USDA);
+});
+
+function usdaFood(over: Partial<FoodNutrition> = {}): FoodNutrition {
+    return {
+        ...emptyNutrientValues(),
+        name: "Chicken, broilers or fryers, breast, meat only, roasted",
+        brand: null,
+        serving: { kind: "per_100g" },
+        source: "usda_fdc",
+        sourceId: "fdc:171077",
+        ...over,
+    };
+}
+
+function usdaCandidate(
+    fdcId: number,
+    description: string,
+    calories: number | null,
+): UsdaCandidate {
+    return {
+        fdcId,
+        description,
+        dataType: "Foundation",
+        brand: null,
+        category: null,
+        publishedOn: null,
+        preview: { ...emptyNutrientValues(), calories },
+    };
+}
+
+describe("lookup_food", () => {
+    beforeEach(() => {
+        usda.candidates = [];
+        usda.food = null;
+        usda.error = null;
+    });
+
+    // Raw and roasted chicken breast differ by ~40% in calories, so picking for
+    // the model is picking wrong 50% of the time. The tool returns the choice.
+    test("a query alone returns candidates and picks none of them", async () => {
+        usda.candidates = [
+            usdaCandidate(171077, "Chicken, breast, meat only, roasted", 165),
+            usdaCandidate(171116, "Chicken, breast, meat only, raw", 120),
+        ];
+        await withTools(null, async (call) => {
+            const text = textOf(
+                await call("lookup_food", { query: "chicken breast" }),
+            );
+            expect(text).toContain("fdc_id 171077");
+            expect(text).toContain("fdc_id 171116");
+            expect(text).toContain("Call lookup_food again");
+            // No nutrition figures are offered for either: the candidate list
+            // is for disambiguation, and a preview kcal read as the answer is
+            // how the second step gets skipped.
+            expect(text).not.toContain("Pass to log_meal");
+            expect(db.inserted).toHaveLength(0);
+        });
+    });
+
+    test("fdc_id + grams returns values already scaled, and names what USDA lacks", async () => {
+        usda.food = usdaFood({
+            calories: 165,
+            protein_g: 31,
+            fat_g: 3.6,
+            sodium_mg: 74,
+            potassium_mg: 256,
+        });
+        await withTools(null, async (call) => {
+            const text = textOf(
+                await call("lookup_food", { fdc_id: 171077, grams: 200 }),
+            );
+            // 200 g of a per-100 g record: doubled exactly once.
+            expect(text).toContain("calories: 330");
+            expect(text).toContain("protein_g: 62");
+            expect(text).toContain("sodium_mg: 148");
+            expect(text).toContain("potassium_mg: 512");
+            expect(text).toContain("For 200 g");
+            expect(text).toContain("do not scale again");
+            // The fields USDA has no figure for are named as UNKNOWN rather
+            // than omitted, so the model does not read silence as zero.
+            const missing = text
+                .split("\n")
+                .find((line) => line.startsWith("Not recorded by USDA"))!;
+            expect(missing).toContain("vitamin_d_mcg");
+            expect(missing).toContain("fiber_g");
+            expect(missing).not.toContain("sodium_mg");
+            // And the result hands over the exact log_meal attribution.
+            expect(text).toContain("nutrient_source='usda_fdc'");
+            expect(text).toContain("nutrient_source_id='fdc:171077'");
+        });
+    });
+
+    // 0.1 mcg/100 g scaled to a 1 g serving is 0.001 mcg; two decimals print
+    // that as a bare "0", and the same message tells the model to pass these
+    // figures to log_meal — where 0 means the source measured zero. A nonzero
+    // figure must never be rendered as one.
+    test("a tiny nonzero figure never prints as a bare 0", async () => {
+        usda.food = usdaFood({
+            calories: 30,
+            vitamin_d_mcg: 0.1,
+            sodium_mg: 4.28,
+        });
+        await withTools(null, async (call) => {
+            const text = textOf(
+                await call("lookup_food", { fdc_id: 171077, grams: 1 }),
+            );
+            const line = text
+                .split("\n")
+                .find((l) => l.startsWith("vitamin_d_mcg:"))!;
+            expect(line).toBe("vitamin_d_mcg: 0.001");
+            expect(Number(line.split(": ")[1])).toBeGreaterThan(0);
+            // Anything two decimals can still express is unchanged.
+            expect(text).toContain("sodium_mg: 0.04");
+        });
+    });
+
+    test("with no grams the per-100 g figures come back untouched", async () => {
+        usda.food = usdaFood({ calories: 165, protein_g: 31 });
+        await withTools(null, async (call) => {
+            const text = textOf(await call("lookup_food", { fdc_id: 171077 }));
+            expect(text).toContain("calories: 165");
+            expect(text).toContain("For 100 g");
+        });
+    });
+
+    // An unconfigured server is a deployment state, not a caller error: the
+    // tool degrades to a sentence the model can act on instead of throwing.
+    test("no USDA key configured degrades to a usable message", async () => {
+        usda.error = new actualUsda.UsdaConfigError("USDA_FDC_API_KEY unset");
+        await withTools(null, async (call) => {
+            const r = await call("lookup_food", { query: "spinach raw" });
+            expect(r.isError).not.toBe(true);
+            const text = textOf(r);
+            expect(text).toContain("not configured");
+            expect(text).toContain("USDA_FDC_API_KEY");
+            // Crucially it does not invite the model to fill the gap itself.
+            expect(text).toContain(
+                "leave micronutrients out rather than estimating them",
+            );
+        });
+    });
+
+    test("a network failure says so and does not surface as a tool error", async () => {
+        usda.error = new Error("fetch failed");
+        await withTools(null, async (call) => {
+            const r = await call("lookup_food", { fdc_id: 171077 });
+            expect(r.isError).not.toBe(true);
+            expect(textOf(r)).toContain("Couldn't reach USDA");
+        });
+    });
+
+    test("neither argument is a refusal, not an empty search", async () => {
+        await withTools(null, async (call) => {
+            expect(textOf(await call("lookup_food", {}))).toContain(
+                "Pass a `query`",
+            );
+        });
+    });
+});
+
+// ---------- micronutrient coverage and goals ----------
+//
+// The scenario the epic is built around: breakfast 600 mg sodium, lunch
+// unknown, dinner 700 mg. A line that reads "Sodium: 1300 mg / 2300 mg limit
+// (57%, under)" is FALSE — the unrecorded lunch's sodium is unknown and
+// non-negative, so the day may be well over. Every test here is a way of
+// shipping that sentence by accident.
+
+const SODIUM_DAY = [
+    meal({ id: "b", meal_type: "breakfast", sodium_mg: 600 }),
+    meal({ id: "l", meal_type: "lunch" }), // sodium unknown
+    meal({ id: "d", meal_type: "dinner", sodium_mg: 700 }),
+];
+
+function microLine(lines: string[], label: string): string | undefined {
+    return lines.find((l) => l.startsWith(`${label}:`));
+}
+
+describe("micronutrientProgressLines", () => {
+    test("a partial total is marked partial, with the denominator", () => {
+        const line = microLine(
+            micronutrientProgressLines(SODIUM_DAY, null),
+            "Sodium",
+        );
+        expect(line).toBe(
+            "Sodium: ≥1300 mg — recorded meals only, 2 of 3; the true total is higher",
+        );
+    });
+
+    test("a partial total against a limit never claims 'under' unqualified", () => {
+        const line = microLine(
+            micronutrientProgressLines(
+                SODIUM_DAY,
+                goals({ max_sodium_mg: 2300 }),
+            ),
+            "Sodium",
+        );
+        // The verdict is still shown — a user with a limit wants to know where
+        // they stand — but it can never stand alone.
+        expect(line).toContain("under");
+        expect(line).toContain("recorded meals only, 2 of 3");
+        expect(line).toContain("the true total is higher");
+        expect(line).toContain("≥1300");
+    });
+
+    test("a complete total carries no qualifier and no ≥", () => {
+        const complete = [
+            meal({ id: "b", sodium_mg: 600 }),
+            meal({ id: "d", sodium_mg: 700 }),
+        ];
+        const line = microLine(
+            micronutrientProgressLines(
+                complete,
+                goals({ max_sodium_mg: 2300 }),
+            ),
+            "Sodium",
+        );
+        expect(line).toBe("Sodium: 1300 / 2300 mg limit (57%, under)");
+        expect(line).not.toContain("≥");
+        expect(line).not.toContain("recorded meals only");
+    });
+
+    test("a minimum goal reads as a floor, a maximum as a ceiling", () => {
+        const day = [meal({ id: "a", potassium_mg: 1000, sodium_mg: 1000 })];
+        const lines = micronutrientProgressLines(
+            day,
+            goals({ min_potassium_mg: 3500, max_sodium_mg: 2300 }),
+        );
+        // Floor: something to reach. Ceiling: something to stay under. The
+        // wordings are opposites and swapping them turns a shortfall into
+        // congratulation.
+        expect(microLine(lines, "Potassium")).toBe(
+            "Potassium: 1000 / 3500 mg (29%, 2500 mg to go)",
+        );
+        expect(microLine(lines, "Sodium")).toBe(
+            "Sodium: 1000 / 2300 mg limit (43%, under)",
+        );
+    });
+
+    // A floor and a ceiling read OPPOSITELY on partial data: against a floor
+    // the unknown meal can only help ("2500 mg to go" overstates the gap),
+    // against a ceiling it can only hurt. Neither sentence may stand without
+    // the qualifier, and the ≥ has to survive both wordings.
+    test("a partial total is qualified against a floor too, not just a ceiling", () => {
+        const line = microLine(
+            micronutrientProgressLines(
+                [meal({ id: "a", potassium_mg: 1000 }), meal({ id: "b" })],
+                goals({ min_potassium_mg: 3500 }),
+            ),
+            "Potassium",
+        );
+        expect(line).toBe(
+            "Potassium: ≥1000 / 3500 mg (29%, 2500 mg to go) — recorded meals only, 1 of 2; the true total is higher",
+        );
+    });
+
+    test("missing intake with a target says 'not recorded', never 0", () => {
+        const lines = micronutrientProgressLines(
+            [meal({ id: "a" })],
+            goals({ max_sodium_mg: 2300, min_calcium_mg: 1000 }),
+        );
+        expect(microLine(lines, "Sodium")).toBe(
+            "Sodium: not recorded / 2300 mg limit",
+        );
+        expect(microLine(lines, "Calcium")).toBe(
+            "Calcium: not recorded / 1000 mg target",
+        );
+    });
+
+    test("missing target with intake still reports the figure", () => {
+        const lines = micronutrientProgressLines(
+            [meal({ id: "a", iron_mg: 8 })],
+            null,
+        );
+        expect(microLine(lines, "Iron")).toBe("Iron: 8 mg");
+    });
+
+    test("neither intake nor target renders nothing at all", () => {
+        // Data-driven display, exactly like fiber/sugar/caffeine: a user who
+        // has never recorded sodium is not shown a sodium row.
+        expect(micronutrientProgressLines([meal({ id: "a" })], null)).toEqual(
+            [],
+        );
+        expect(micronutrientProgressLines([], null)).toEqual([]);
+    });
+
+    test("an explicitly recorded zero is a complete measurement, not a gap", () => {
+        const lines = micronutrientProgressLines(
+            [
+                meal({ id: "a", trans_fat_g: 0 }),
+                meal({ id: "b", trans_fat_g: 0 }),
+            ],
+            null,
+        );
+        expect(microLine(lines, "Trans fat")).toBe("Trans fat: 0g");
+    });
+
+    test("a zero limit is a real limit, not 'unset'", () => {
+        const lines = micronutrientProgressLines(
+            [meal({ id: "a", sodium_mg: 5 })],
+            goals({ max_sodium_mg: 0 }),
+        );
+        expect(microLine(lines, "Sodium")).toBe(
+            "Sodium: 5 / 0 mg limit (5 mg over)",
+        );
+    });
+
+    test("a zero FLOOR is unset — a 0 mg calcium target is meaningless", () => {
+        const lines = micronutrientProgressLines(
+            [meal({ id: "a", calcium_mg: 5 })],
+            goals({ min_calcium_mg: 0 }),
+        );
+        expect(microLine(lines, "Calcium")).toBe("Calcium: 5 mg");
+    });
+});
+
+describe("coverageNote", () => {
+    test("is empty when complete and when nothing was recorded", () => {
+        // Nothing recorded gets the "not recorded" line instead; a note about
+        // partial coverage on a total that does not exist is noise.
+        expect(
+            coverageNote({
+                known_total: 10,
+                known_meals: 2,
+                total_meals: 2,
+                known_calories: 800,
+                total_calories: 800,
+                coverage: 1,
+                complete: true,
+            }),
+        ).toBe("");
+        expect(
+            coverageNote({
+                known_total: null,
+                known_meals: 0,
+                total_meals: 2,
+                known_calories: 0,
+                total_calories: 800,
+                coverage: 0,
+                complete: false,
+            }),
+        ).toBe("");
+    });
+});
+
+describe("nutrientCoveragePayload", () => {
+    const shape = z.array(NUTRIENT_COVERAGE_ITEM);
+
+    test("a partial nutrient carries its own denominator", () => {
+        const rows = nutrientCoveragePayload(
+            SODIUM_DAY,
+            goals({ max_sodium_mg: 2300 }),
+        );
+        expect(shape.safeParse(rows).success).toBe(true);
+        const sodium = rows.find((r) => r.nutrient === "sodium_mg");
+        expect(sodium).toEqual({
+            nutrient: "sodium_mg",
+            unit: "mg",
+            known_total: 1300,
+            known_meals: 2,
+            total_meals: 3,
+            known_calories: 1400,
+            total_calories: 2100,
+            coverage: 0.67,
+            complete: false,
+            target: 2300,
+            // One day, so the scaled target is the daily one.
+            target_days: 1,
+            direction: "maximum",
+            confidence: null,
+        });
+    });
+
+    test("0% coverage with a target reports a NULL total, never 0", () => {
+        const rows = nutrientCoveragePayload(
+            [meal({ id: "a" })],
+            goals({ min_potassium_mg: 3500 }),
+        );
+        const k = rows.find((r) => r.nutrient === "potassium_mg");
+        expect(k?.known_total).toBeNull();
+        expect(k?.known_meals).toBe(0);
+        expect(k?.complete).toBe(false);
+        expect(k?.direction).toBe("minimum");
+    });
+
+    // The text output treats a 0 FLOOR as "unset" (hasActiveTarget), so the
+    // payload must too: emitting `target: 0` for a minimum handed the widget a
+    // target the text flatly denies exists, and one every ratio divides by. A
+    // 0 CEILING is the opposite case and stays a real target in both.
+    test("a zero minimum is not a target here either, but a zero maximum is", () => {
+        expect(
+            nutrientCoveragePayload(
+                [meal({ id: "a" })],
+                goals({ min_calcium_mg: 0 }),
+            ),
+        ).toEqual([]);
+        expect(
+            micronutrientProgressLines(
+                [meal({ id: "a" })],
+                goals({ min_calcium_mg: 0 }),
+            ),
+        ).toEqual([]);
+
+        const ceiling = nutrientCoveragePayload(
+            [meal({ id: "a" })],
+            goals({ max_sodium_mg: 0 }),
+        );
+        expect(ceiling.find((r) => r.nutrient === "sodium_mg")?.target).toBe(0);
+    });
+
+    test("coverage is reported by calories as well as by meal count", () => {
+        // Same "1 of 2" either way; the calorie pair is what says whether the
+        // unrecorded meal was a coffee or the dinner.
+        const rows = nutrientCoveragePayload(
+            [
+                meal({ id: "a", calories: 50, iron_mg: 1 }),
+                meal({ id: "b", calories: 950 }),
+            ],
+            null,
+        );
+        expect(rows.find((r) => r.nutrient === "iron_mg")).toMatchObject({
+            known_meals: 1,
+            total_meals: 2,
+            coverage: 0.5,
+            known_calories: 50,
+            total_calories: 1000,
+        });
+    });
+
+    test("nutrients with neither data nor a target are absent entirely", () => {
+        const rows = nutrientCoveragePayload([meal({ id: "a" })], null);
+        expect(rows).toEqual([]);
+    });
+
+    test("the two goal-less micronutrients still report coverage", () => {
+        const rows = nutrientCoveragePayload(
+            [meal({ id: "a", added_sugar_g: 12 })],
+            null,
+        );
+        const added = rows.find((r) => r.nutrient === "added_sugar_g");
+        expect(added?.known_total).toBe(12);
+        expect(added?.complete).toBe(true);
+        // No goal column exists for it, so it has no direction to declare.
+        expect(added?.direction).toBeNull();
+    });
+
+    // A RANGE TOTAL JUDGED AGAINST A DAILY TARGET. The payload used to ship
+    // the raw daily goal column beside a total summed over every meal in the
+    // window, so a consumer doing the obvious `value > target` — which our own
+    // widget does — read three ordinary days as a breach. Both directions are
+    // covered because the bug inverts on a floor: there a range total clears a
+    // daily target it never met on any single day.
+    const threeDays = (extra: Partial<Meal>) => [
+        meal({ id: "a", logged_at: "2026-07-26T12:00:00.000Z", ...extra }),
+        meal({ id: "b", logged_at: "2026-07-27T12:00:00.000Z", ...extra }),
+        meal({ id: "c", logged_at: "2026-07-28T12:00:00.000Z", ...extra }),
+    ];
+
+    test("a ceiling is scaled to the range, so three ordinary days are not a breach", () => {
+        const rows = nutrientCoveragePayload(
+            threeDays({ sodium_mg: 800 }),
+            goals({ max_sodium_mg: 2300 }),
+            3,
+        );
+        expect(shape.safeParse(rows).success).toBe(true);
+        const sodium = rows.find((r) => r.nutrient === "sodium_mg")!;
+        expect(sodium.known_total).toBe(2400);
+        expect(sodium.target).toBe(6900);
+        expect(sodium.target_days).toBe(3);
+        // The whole point: the naive comparison is now the right one.
+        expect(sodium.known_total! > sodium.target!).toBe(false);
+    });
+
+    test("a floor is scaled too, so a range total cannot fake a met target", () => {
+        const rows = nutrientCoveragePayload(
+            threeDays({ calcium_mg: 333.34 }),
+            goals({ min_calcium_mg: 1000 }),
+            3,
+        );
+        const calcium = rows.find((r) => r.nutrient === "calcium_mg")!;
+        expect(calcium.known_total).toBe(1000);
+        expect(calcium.target).toBe(3000);
+        expect(calcium.target_days).toBe(3);
+        expect(calcium.known_total! >= calcium.target!).toBe(false);
+    });
+
+    test("the single-day default leaves the target exactly as stored", () => {
+        const rows = nutrientCoveragePayload(
+            [meal({ id: "a", sodium_mg: 800 })],
+            goals({ max_sodium_mg: 2300 }),
+        );
+        const sodium = rows.find((r) => r.nutrient === "sodium_mg")!;
+        expect(sodium.target).toBe(2300);
+        expect(sodium.target_days).toBe(1);
+    });
+
+    // A 0 span would zero every ceiling and read every row as over its limit.
+    test("a zero day count is floored at one rather than zeroing every target", () => {
+        const rows = nutrientCoveragePayload(
+            [meal({ id: "a", sodium_mg: 800 })],
+            goals({ max_sodium_mg: 2300 }),
+            0,
+        );
+        expect(rows.find((r) => r.nutrient === "sodium_mg")).toMatchObject({
+            target: 2300,
+            target_days: 1,
+        });
+    });
+
+    test("coverage is computed over every meal in a multi-day range", () => {
+        const rows = nutrientCoveragePayload(
+            [
+                meal({
+                    id: "a",
+                    logged_at: "2026-07-26T12:00:00.000Z",
+                    iron_mg: 4,
+                }),
+                meal({
+                    id: "b",
+                    logged_at: "2026-07-27T12:00:00.000Z",
+                    iron_mg: 6,
+                }),
+                meal({ id: "c", logged_at: "2026-07-28T12:00:00.000Z" }),
+            ],
+            null,
+        );
+        const iron = rows.find((r) => r.nutrient === "iron_mg");
+        expect(iron?.known_total).toBe(10);
+        expect(iron?.known_meals).toBe(2);
+        expect(iron?.total_meals).toBe(3);
+        expect(iron?.coverage).toBe(0.67);
+        expect(iron?.complete).toBe(false);
+    });
+});
+
+describe("formatGoals lists micronutrient targets", () => {
+    test("only the ones actually set, with their direction", () => {
+        const out = formatGoals(
+            goals({ max_sodium_mg: 2300, min_vitamin_d_mcg: 20 }),
+            "kg",
+            null,
+        );
+        expect(out).toContain("- Sodium (max): 2300 mg");
+        expect(out).toContain("- Vitamin D (min): 20 mcg");
+        // Not a wall of "not set" rows for the eight the user never touched.
+        expect(out).not.toContain("Potassium");
+    });
+
+    test("says so once when none are set, so the feature stays discoverable", () => {
+        expect(formatGoals(goals(), "kg", null)).toContain(
+            "Micronutrient goals (saturated fat, sodium, potassium, cholesterol, calcium, iron, magnesium, vitamins A/C/D): none set",
+        );
+    });
+});
+
+// ---------- micronutrient goals and coverage, end to end ----------
+
+describe("set_nutrition_goals accepts micronutrient targets", () => {
+    test("stores a min and a max, and echoes both back", async () => {
+        await withTools(null, async (call) => {
+            const r = await call("set_nutrition_goals", {
+                max_sodium_mg: 2300,
+                min_potassium_mg: 3500,
+            });
+            expect(r.isError).toBeFalsy();
+            expect(db.goals?.max_sodium_mg).toBe(2300);
+            expect(db.goals?.min_potassium_mg).toBe(3500);
+            expect(textOf(r)).toContain("- Sodium (max): 2300 mg");
+            expect(textOf(r)).toContain("- Potassium (min): 3500 mg");
+        });
+    });
+
+    test("an omitted micronutrient target keeps its stored value", async () => {
+        await withTools(null, async (call) => {
+            await call("set_nutrition_goals", { max_sodium_mg: 2300 });
+            await call("set_nutrition_goals", { min_iron_mg: 18 });
+            // The upsert replaces the whole row, so a field the merge forgot
+            // would be silently cleared on the next unrelated save.
+            expect(db.goals?.max_sodium_mg).toBe(2300);
+            expect(db.goals?.min_iron_mg).toBe(18);
+        });
+    });
+
+    test("an explicit null clears one", async () => {
+        await withTools(null, async (call) => {
+            await call("set_nutrition_goals", { max_sodium_mg: 2300 });
+            await call("set_nutrition_goals", { max_sodium_mg: null });
+            expect(db.goals?.max_sodium_mg).toBeNull();
+        });
+    });
+
+    test("a negative target is refused", async () => {
+        await withTools(null, async (call) => {
+            const r = await call("set_nutrition_goals", {
+                max_sodium_mg: -1,
+            });
+            expect(r.isError).toBe(true);
+        });
+    });
+
+    test("a target above the column's precision is refused, not overflowed", async () => {
+        await withTools(null, async (call) => {
+            // numeric(7,2) — a Postgres "numeric field overflow" is not
+            // something a model should have to learn by hitting it.
+            expect(
+                (await call("set_nutrition_goals", { max_sodium_mg: 100_000 }))
+                    .isError,
+            ).toBe(true);
+            expect(
+                (
+                    await call("set_nutrition_goals", {
+                        max_saturated_fat_g: 10_000,
+                    })
+                ).isError,
+            ).toBe(true);
+        });
+    });
+});
+
+describe("get_goal_progress surfaces coverage", () => {
+    test("a partial sodium day is never reported as a complete total", async () => {
+        db.goals = goals({ max_sodium_mg: 2300 });
+        db.meals = [
+            meal({
+                id: "b",
+                logged_at: "2026-07-26T07:00:00.000Z",
+                sodium_mg: 600,
+            }),
+            meal({ id: "l", logged_at: "2026-07-26T12:00:00.000Z" }),
+            meal({
+                id: "d",
+                logged_at: "2026-07-26T19:00:00.000Z",
+                sodium_mg: 700,
+            }),
+        ];
+        await withTools(null, async (call) => {
+            const r = await call("get_goal_progress", { date: "2026-07-26" });
+            expect(r.isError).toBeFalsy();
+            const text = textOf(r);
+            expect(text).toContain("≥1300");
+            expect(text).toContain("recorded meals only, 2 of 3");
+            const cov = (
+                r.structuredContent as unknown as {
+                    nutrient_coverage: Array<Record<string, unknown>>;
+                }
+            ).nutrient_coverage;
+            expect(cov).toContainEqual({
+                nutrient: "sodium_mg",
+                unit: "mg",
+                known_total: 1300,
+                known_meals: 2,
+                total_meals: 3,
+                known_calories: 1400,
+                total_calories: 2100,
+                coverage: 0.67,
+                complete: false,
+                target: 2300,
+                target_days: 1,
+                direction: "maximum",
+                // These fixture meals carry no nutrient_provenance, so
+                // nothing vouches for the total. null is what a widget needs
+                // to render no badge at all — defaulting to "authoritative"
+                // would put a "measured" tick on an unattributed figure.
+                confidence: null,
+            });
+        });
+    });
+
+    test("a day with no micronutrients at all emits an empty coverage list", async () => {
+        db.goals = null;
+        db.meals = [meal({ id: "a", logged_at: "2026-07-26T12:00:00.000Z" })];
+        await withTools(null, async (call) => {
+            const r = await call("get_goal_progress", { date: "2026-07-26" });
+            expect(r.isError).toBeFalsy();
+            // Empty, not absent: it is a declared outputSchema field.
+            expect(
+                (
+                    r.structuredContent as unknown as {
+                        nutrient_coverage: unknown[];
+                    }
+                ).nutrient_coverage,
+            ).toEqual([]);
+        });
+    });
+});
+
+describe("get_nutrition_summary surfaces range-wide coverage", () => {
+    test("coverage spans the whole range, across several days", async () => {
+        db.goals = null;
+        db.meals = [
+            meal({
+                id: "a",
+                logged_at: "2026-07-26T12:00:00.000Z",
+                calcium_mg: 200,
+            }),
+            meal({
+                id: "b",
+                logged_at: "2026-07-27T12:00:00.000Z",
+                calcium_mg: 300,
+            }),
+            meal({ id: "c", logged_at: "2026-07-28T12:00:00.000Z" }),
+        ];
+        await withTools(null, async (call) => {
+            const r = await call("get_nutrition_summary", {
+                start_date: "2026-07-26",
+                end_date: "2026-07-28",
+            });
+            expect(r.isError).toBeFalsy();
+            const cov = (
+                r.structuredContent as unknown as {
+                    nutrient_coverage: Array<Record<string, unknown>>;
+                }
+            ).nutrient_coverage;
+            const calcium = cov.find((c) => c.nutrient === "calcium_mg");
+            expect(calcium).toMatchObject({
+                known_total: 500,
+                known_meals: 2,
+                total_meals: 3,
+                complete: false,
+            });
+            // Per-day sections still qualify their own day's figure.
+            expect(textOf(r)).toContain("Calcium: 200 mg");
+        });
+    });
+
+    // The text output computes micronutrient progress per DAY; the payload
+    // sums the range. If the payload carried the raw daily target, the two
+    // halves of one tool call would disagree about the same three days —
+    // the text saying "under limit" each day and the widget "over limit".
+    test("range targets are scaled to the logged days, so text and payload agree", async () => {
+        db.goals = goals({ max_sodium_mg: 2300, min_calcium_mg: 1000 });
+        db.meals = ["2026-07-26", "2026-07-27", "2026-07-28"].map((d, i) =>
+            meal({
+                id: String.fromCharCode(97 + i),
+                logged_at: `${d}T12:00:00.000Z`,
+                calories: 700,
+                sodium_mg: 800,
+                calcium_mg: 333.34,
+            }),
+        );
+        await withTools(null, async (call) => {
+            const r = await call("get_nutrition_summary", {
+                start_date: "2026-07-26",
+                end_date: "2026-07-28",
+            });
+            expect(r.isError).toBeFalsy();
+            const cov = (
+                r.structuredContent as unknown as {
+                    nutrient_coverage: Array<Record<string, unknown>>;
+                }
+            ).nutrient_coverage;
+            expect(cov.find((c) => c.nutrient === "sodium_mg")).toMatchObject({
+                known_total: 2400,
+                target: 6900,
+                target_days: 3,
+            });
+            expect(cov.find((c) => c.nutrient === "calcium_mg")).toMatchObject({
+                known_total: 1000,
+                target: 3000,
+                target_days: 3,
+            });
+        });
+    });
+});
+
+// ---------- blank cells are not zeros ----------
+//
+// `z.coerce.number().parse("")` is 0: Number("") is 0 and Zod coerces before
+// it validates. Any mapper that emits an empty cell as "" rather than null
+// therefore wrote a confident zero into a column whose entire contract is
+// that null and 0 differ. This was live on the macro fields long before the
+// micronutrients arrived, which is why these tests cover both.
+describe("an empty string is not a zero on any write path", () => {
+    test("log_meal treats a blank macro as not recorded", async () => {
+        await withTools(null, async (call) => {
+            await call("log_meal", {
+                description: "Salad",
+                meal_type: "lunch",
+                calories: "",
+                fiber_g: "",
+                protein_g: "4",
+            });
+            const written = db.inserted[0]!;
+            expect(written.calories ?? null).toBeNull();
+            expect(written.fiber_g ?? null).toBeNull();
+            // A real numeric string still coerces — that is why z.coerce is
+            // here at all, since models emit "450" as often as 450.
+            expect(written.protein_g).toBe(4);
+        });
+    });
+
+    test("log_meal keeps a real zero as a zero", async () => {
+        await withTools(null, async (call) => {
+            await call("log_meal", {
+                description: "Ribeye steak",
+                meal_type: "dinner",
+                fiber_g: 0,
+                sugar_g: "0",
+            });
+            const written = db.inserted[0]!;
+            expect(written.fiber_g).toBe(0);
+            expect(written.sugar_g).toBe(0);
+        });
+    });
+
+    test("log_meal treats a blank micronutrient as not recorded", async () => {
+        await withTools(null, async (call) => {
+            await call("log_meal", {
+                description: "Crisps",
+                meal_type: "snack",
+                sodium_mg: "",
+                nutrient_source: "nutrition_label",
+            });
+            const written = db.inserted[0]!;
+            expect(written.sodium_mg ?? null).toBeNull();
+            // No value means nothing to attribute.
+            expect(
+                (written.nutrient_provenance as Record<string, unknown> | null)
+                    ?.sodium_mg,
+            ).toBeUndefined();
+        });
+    });
+});
+
+// ---------- confidence folded across a day ----------
+//
+// A widget badges a nutrient "measured" / "you said" / "estimated" from this
+// one field. Getting it wrong is worse than omitting it: a wrong badge looks
+// like provenance rather than like data, so it is the thing a user is most
+// likely to trust.
+describe("foldConfidence", () => {
+    const withProv = (
+        id: string,
+        sodium: number | null,
+        confidence: NutrientConfidence | null,
+    ) =>
+        meal({
+            id,
+            sodium_mg: sodium,
+            nutrient_provenance:
+                confidence == null
+                    ? null
+                    : {
+                          sodium_mg: {
+                              source: "nutrition_label",
+                              source_id: null,
+                              confidence,
+                          },
+                      },
+        }) as Meal;
+
+    test("agreeing meals fold to that one confidence", () => {
+        expect(
+            foldConfidence(
+                [
+                    withProv("a", 600, "authoritative"),
+                    withProv("b", 700, "authoritative"),
+                ],
+                "sodium_mg",
+            ),
+        ).toBe("authoritative");
+    });
+
+    test("disagreeing meals fold to mixed", () => {
+        expect(
+            foldConfidence(
+                [
+                    withProv("a", 600, "authoritative"),
+                    withProv("b", 700, "estimated"),
+                ],
+                "sodium_mg",
+            ),
+        ).toBe("mixed");
+    });
+
+    test("an unattributed contributing meal is mixed, never assumed", () => {
+        // Every meal logged before this epic has values and no provenance.
+        // Folding it in as "authoritative" would vouch for a figure nothing
+        // vouches for.
+        expect(
+            foldConfidence(
+                [withProv("a", 600, "authoritative"), withProv("b", 700, null)],
+                "sodium_mg",
+            ),
+        ).toBe("mixed");
+    });
+
+    test("no provenance anywhere yields null, not a default", () => {
+        expect(
+            foldConfidence(
+                [withProv("a", 600, null), withProv("b", 700, null)],
+                "sodium_mg",
+            ),
+        ).toBeNull();
+    });
+
+    test("a meal that recorded nothing does not vote", () => {
+        // A meal with no sodium figure says nothing about how good the
+        // sodium total is, whatever its provenance for other nutrients.
+        expect(
+            foldConfidence(
+                [
+                    withProv("a", 600, "authoritative"),
+                    withProv("b", null, "estimated"),
+                ],
+                "sodium_mg",
+            ),
+        ).toBe("authoritative");
     });
 });

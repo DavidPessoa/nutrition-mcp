@@ -147,6 +147,17 @@ export function sniffDelimiter(text: string): Delimiter {
  * delimiter is not itself a comma. Getting this wrong scales every macro by
  * 1000x while still producing valid-looking numbers.
  */
+// A separator followed by EXACTLY three digits is ambiguous — "1,240" is a
+// thousands group in a dot-decimal file and a decimal in a comma-decimal one —
+// so it votes for neither. Counting it as evidence is what let a dot-decimal
+// export with thousands-separated micronutrients be read as comma-decimal,
+// after which every decimal was multiplied by 10 (12.5 g protein -> 125) and
+// every thousands number divided by 1000 (1,240 mg sodium -> 1.24). Unlike the
+// date format and the energy unit, this sniff has no user-facing control, so
+// being undecided and falling back to the dot default beats guessing.
+const DECIMAL_EVIDENCE_COMMA = /^-?\d+,(\d{1,2}|\d{4,})$/;
+const DECIMAL_EVIDENCE_DOT = /^-?\d+\.(\d{1,2}|\d{4,})$/;
+
 export function sniffDecimalSeparator(
     rows: string[][],
     delimiter: Delimiter,
@@ -157,8 +168,8 @@ export function sniffDecimalSeparator(
     for (const row of rows.slice(0, 50)) {
         for (const cell of row) {
             const v = cell.trim();
-            if (/^-?\d+,\d+$/.test(v)) commaDecimals++;
-            else if (/^-?\d+\.\d+$/.test(v)) dotDecimals++;
+            if (DECIMAL_EVIDENCE_COMMA.test(v)) commaDecimals++;
+            else if (DECIMAL_EVIDENCE_DOT.test(v)) dotDecimals++;
         }
     }
     return commaDecimals > dotDecimals ? "," : ".";
@@ -263,7 +274,13 @@ function tokenize(text: string, delimiter: string): RawRow[] {
             continue;
         }
 
-        if (ch === '"' && field === "") {
+        // A quote opens a quoted field even with whitespace before it. Real
+        // files write `, "Beans, baked", 250`; requiring the quote to be the
+        // very first character split that into two corrupted fields, truncated
+        // the description to `"Beans` and lost the 250 kcal entirely, behind a
+        // generic "different number of columns" warning.
+        if (ch === '"' && field.trim() === "") {
+            field = "";
             inQuotes = true;
             sawAnyChar = true;
             continue;
@@ -406,12 +423,24 @@ export function isBlankRow(fields: string[]): boolean {
     return fields.every((f) => f.trim() === "");
 }
 
-/** A totals/average row: an aggregate label with no other identifying text. */
+/**
+ * A totals/average row: an aggregate label, in ANY column, on a row that also
+ * leaves at least one cell empty.
+ *
+ * Testing only the first non-empty cell missed every export this actually
+ * matters for: MyFitnessPal and Cronometer both lead with a date or an id, so
+ * "2026-07-18,,Total,200" was imported as an extra 200 kcal meal and the day
+ * was double-counted. The empty-cell condition is what keeps a genuine meal
+ * from being swallowed — an aggregate row never fills the identifying columns,
+ * a real row generally does — and a skipped row is counted and reported, so the
+ * remaining risk is visible rather than silent.
+ */
 export function isTotalsRow(fields: string[]): boolean {
-    const firstNonEmpty = fields.find((f) => f.trim() !== "");
-    if (firstNonEmpty === undefined) return false;
-    const v = firstNonEmpty.trim().toLowerCase().replace(/:$/, "");
-    return TOTALS_ROW_PREFIXES.includes(v);
+    if (!fields.some((f) => f.trim() === "")) return false;
+    return fields.some((f) => {
+        const v = f.trim().toLowerCase().replace(/:$/, "");
+        return v !== "" && TOTALS_ROW_PREFIXES.includes(v);
+    });
 }
 
 /** Whether a cell means "no value" rather than a value. */
@@ -440,6 +469,12 @@ export function normalizeHeader(header: string): string {
             .replace(/[\u0300-\u036f]/g, "")
             .replace(/ß/g, "ss")
             .replace(/\(([^)]*)\)/g, " $1 ")
+            // "%" must survive as a WORD, because the a-z sweep below would
+            // otherwise delete it and leave "Iron (%)" as the bare key "iron" —
+            // a percent-of-daily-value column then read as milligrams, with 20
+            // %DV of iron stored as 20 mg. "pct" is already an unsupported unit
+            // token, so spelling it out is what lets the refusal fire.
+            .replace(/%/g, " pct ")
             .replace(/[^a-z0-9]+/g, " ")
             .trim()
             .replace(/\s+/g, "_")
@@ -456,6 +491,11 @@ export function parseNumber(
 ): number | null {
     if (isBlankCell(raw)) return null;
     let v = raw!.trim();
+
+    // "<1" and ">2000" are statements that the value is NOT known, and the
+    // strip below would turn them into a confident 1 and 2000. Null is the
+    // same answer a blank cell gets, which is what they mean.
+    if (/[<>]/.test(v)) return null;
 
     // Strip currency-ish and unit noise but keep sign, digits and separators.
     v = v.replace(/[^0-9,.\-+eE]/g, "");
@@ -879,4 +919,386 @@ export function sniffEnergyUnit(header: string, values: number[]): EnergyUnit {
 export function toKcal(value: number, unit: EnergyUnit): number {
     if (unit === "kcal") return Math.round(value);
     return Math.round(value / KJ_PER_KCAL);
+}
+
+// ---------- micronutrient columns ----------
+//
+// Header -> canonical nutrient field, plus the unit the header STATES. This
+// module does no arithmetic (CONTRACT §0.5 reserves every conversion for
+// src/nutrient-units.ts); it only reports what the column claims to be, and
+// whoever holds the value converts it.
+//
+// The twelve field names are spelled out here rather than imported from
+// src/nutrients.ts because this module is inlined verbatim into the import
+// widget by the `@inlinets` marker (see CLAUDE.md), which only works for a
+// module with NO runtime imports. src/csv.test.ts asserts that the keys of
+// MICRONUTRIENT_HEADER_ALIASES are exactly MICRONUTRIENT_FIELDS, so the
+// duplication cannot drift without CI saying so.
+
+/** The mass units a nutrient column may state. No "kcal": these are all
+ *  masses, and no "IU" — see UNSUPPORTED_UNIT_TOKENS. */
+export type CsvNutrientUnit = "g" | "mg" | "mcg";
+
+/** Spellings of each unit seen in real export headers and in hand-edited
+ *  files. `normalizeHeader` has already folded µ/μ to "u", which is why "ug"
+ *  rather than "µg" is what arrives here. */
+const UNIT_TOKENS: Record<string, CsvNutrientUnit> = {
+    g: "g",
+    gram: "g",
+    grams: "g",
+    gr: "g",
+    gramm: "g",
+    gramme: "g",
+    grammes: "g",
+    mg: "mg",
+    milligram: "mg",
+    milligrams: "mg",
+    milligramm: "mg",
+    mcg: "mcg",
+    ug: "mcg",
+    mcgs: "mcg",
+    microgram: "mcg",
+    micrograms: "mcg",
+    mikrogramm: "mcg",
+};
+
+/** Units a column may state that cannot be converted to a canonical mass.
+ *  IU is the one that matters: there is no single IU -> µg RAE factor for
+ *  vitamin A (it depends on which compound was measured, which no export
+ *  states), and src/nutrient-units.ts deliberately refuses that conversion.
+ *  "%" / "DV" columns are a fraction of a reference intake, not a mass, and
+ *  the reference itself varies by country and by the user's age and sex.
+ *  Both are reported so a caller can say WHY a column was not mapped, rather
+ *  than leaving the nutrient silently blank or — far worse — treating the
+ *  number as if it were milligrams. */
+const UNSUPPORTED_UNIT_TOKENS = new Set([
+    "iu",
+    "ius",
+    "ie", // German "Internationale Einheit"
+    "ui", // French/Spanish/Italian
+    "dv",
+    "rdi",
+    "rda",
+    "nrv",
+    "percent",
+    "pct",
+]);
+
+/** Trailing words that qualify a nutrient without naming its unit.
+ *  "Vitamin A (mcg RAE)" is the canonical spelling of our own unit. */
+const QUALIFIER_TOKENS = new Set(["rae", "re", "total"]);
+
+/**
+ * Aliases per canonical micronutrient field, as `normalizeHeader` keys and
+ * WITHOUT any unit suffix — the unit is peeled off the header separately, so
+ * listing "sodium" here matches "Sodium", "Sodium (mg)", "Sodium (g)" and
+ * "sodium_mg" alike. Localised spellings are the accent-folded forms
+ * normalizeHeader produces ("Gesättigte Fettsäuren" -> gesattigte_fettsauren).
+ */
+export const MICRONUTRIENT_HEADER_ALIASES: Record<string, string[]> = {
+    // The `fatty_acids_*` and `<nutrient>_<symbol>` spellings are USDA
+    // FoodData Central's own nutrient names, which appear verbatim in a
+    // FoodData Central CSV export and in anything built on one.
+    saturated_fat_g: [
+        "saturated_fat",
+        "sat_fat",
+        "saturated",
+        "fatty_acids_saturated",
+        "fat_saturated",
+        "saturated_fats",
+        "saturated_fatty_acids",
+        "gesattigte_fettsauren",
+        "grasas_saturadas",
+        "acides_gras_satures",
+    ],
+    trans_fat_g: [
+        "trans_fat",
+        "trans_fats",
+        "trans",
+        "fatty_acids_trans",
+        "fat_trans",
+        "trans_fatty_acids",
+        "transfett",
+        "transfette",
+        "grasas_trans",
+    ],
+    // Deliberately does NOT include "sugar"/"sugars": total sugars is a
+    // different quantity that already has its own field, and conflating them
+    // under-reports one and over-reports the other.
+    added_sugar_g: [
+        "added_sugar",
+        "added_sugars",
+        "sugar_added",
+        "sugars_added",
+        "free_sugar",
+        "free_sugars",
+        "zugesetzter_zucker",
+        "azucares_anadidos",
+    ],
+    sodium_mg: ["sodium", "sodium_na", "natrium", "sodio"],
+    potassium_mg: ["potassium", "potassium_k", "kalium", "potasio"],
+    cholesterol_mg: ["cholesterol", "cholesterin", "colesterol"],
+    calcium_mg: ["calcium", "calcium_ca", "kalzium", "calcio"],
+    iron_mg: ["iron", "iron_fe", "eisen", "hierro", "fer", "ferro"],
+    // "magnesium_mg" is the element-symbol spelling ("Magnesium, Mg"), not the
+    // field name: the unit peel takes one unit token, so "Magnesium, Mg (mg)"
+    // arrives here with the symbol still attached.
+    magnesium_mg: ["magnesium", "magnesium_mg", "magnesio"],
+    vitamin_a_mcg: ["vitamin_a", "vit_a", "vitamina_a"],
+    vitamin_c_mg: [
+        "vitamin_c",
+        "vit_c",
+        "ascorbic_acid",
+        "vitamin_c_ascorbic_acid",
+        "vitamina_c",
+    ],
+    vitamin_d_mcg: [
+        "vitamin_d",
+        "vit_d",
+        "vitamin_d3",
+        "vitamin_d_d2_d3",
+        "vitamina_d",
+        "calciferol",
+    ],
+};
+
+/** The unit each canonical field is stored in — read straight off the field
+ *  name, which is why they are named that way. Used only to report what a
+ *  unit-less header will be READ as; no arithmetic happens here. */
+function canonicalUnitOf(field: string): CsvNutrientUnit {
+    if (field.endsWith("_mcg")) return "mcg";
+    if (field.endsWith("_mg")) return "mg";
+    return "g";
+}
+
+const ALIAS_TO_FIELD: Map<string, string> = (() => {
+    const m = new Map<string, string>();
+    for (const [field, aliases] of Object.entries(
+        MICRONUTRIENT_HEADER_ALIASES,
+    )) {
+        for (const a of aliases) m.set(a, field);
+    }
+    return m;
+})();
+
+export type NutrientHeaderMatch =
+    | {
+          field: string;
+          unit: CsvNutrientUnit;
+          /** False when the header named no unit and the canonical one was
+           *  applied. Callers MUST surface this — see resolveNutrientHeader. */
+          unitStated: boolean;
+      }
+    | {
+          field: string;
+          unit: null;
+          /** The unit token the header stated, which cannot be converted. */
+          unsupportedUnit: string;
+      };
+
+/**
+ * Resolve a column header to a canonical micronutrient field and the unit its
+ * values are in, or null when the header names no micronutrient we carry.
+ *
+ * On a header that states no unit ("Sodium"), the canonical unit is applied
+ * and `unitStated: false` is returned. This is NOT a guess in the sense
+ * CONTRACT §0.9 forbids: every nutrition label, every regulator's format and
+ * every export surveyed states sodium, potassium, cholesterol, calcium, iron
+ * and magnesium in milligrams and vitamins A and D in micrograms, so the
+ * canonical unit is the only reading a bare header has ever had. It is still
+ * an assumption the user did not make explicitly, which is exactly why it is
+ * flagged rather than silent — the caller is expected to show it ("Sodium
+ * will be read as mg") before writing anything, the same way the widget
+ * already shows a mapped column's preview values.
+ *
+ * A header stating a unit we cannot convert (IU, % DV) returns the field with
+ * `unit: null` and the offending token, so the caller can explain the refusal.
+ * It must never fall back to the canonical unit: an IU figure read as
+ * micrograms is wrong by a factor of 3 to 20 and looks completely plausible.
+ */
+export function resolveNutrientHeader(
+    header: string,
+): NutrientHeaderMatch | null {
+    const key = normalizeHeader(header);
+    if (key === "") return null;
+
+    let tokens = key.split("_");
+    let unit: CsvNutrientUnit | null = null;
+    let unsupported: string | null = null;
+
+    // One loop, because a qualifier can sit on EITHER side of the unit.
+    // "Vitamin A (mcg RAE)" puts it inside; "Vitamin A, RAE (mcg)" — USDA's own
+    // spelling — puts it outside, and peeling qualifiers once before the unit
+    // left "vitamin_a_rae", which matched nothing and was dropped with no
+    // notice at all. Looping also keeps "Vitamin C (% DV)" refused now that "%"
+    // survives normalization as its own "pct" token: both tokens peel, and the
+    // field underneath is still recognised, which is what makes the refusal
+    // explainable instead of silent.
+    while (tokens.length > 1) {
+        const last = tokens[tokens.length - 1]!;
+        if (QUALIFIER_TOKENS.has(last)) {
+            tokens = tokens.slice(0, -1);
+            continue;
+        }
+        if (unit === null && UNIT_TOKENS[last] !== undefined) {
+            unit = UNIT_TOKENS[last]!;
+            tokens = tokens.slice(0, -1);
+            continue;
+        }
+        if (UNSUPPORTED_UNIT_TOKENS.has(last)) {
+            // Keep the FIRST one seen — it is the outermost, and so the one the
+            // header actually states ("% DV" reports "dv", not "pct").
+            unsupported ??= last;
+            tokens = tokens.slice(0, -1);
+            continue;
+        }
+        break;
+    }
+
+    // A qualifier can also sit INSIDE the name, which is where USDA puts it:
+    // "Fatty acids, total saturated", "Vitamin C, total ascorbic acid",
+    // "Calcium, total". Dropping it anywhere rather than listing every
+    // permutation as an alias is what keeps that whole family mapping. It
+    // cannot collide with a real nutrient: "Total Sugars" and "Total Fat"
+    // reduce to "sugars" and "fat", neither of which is a micronutrient alias
+    // (total sugars is its own macro field, deliberately not listed here).
+    if (tokens.length > 1) {
+        const kept = tokens.filter((t) => !QUALIFIER_TOKENS.has(t));
+        if (kept.length > 0) tokens = kept;
+    }
+
+    const field = ALIAS_TO_FIELD.get(tokens.join("_"));
+    if (field === undefined) return null;
+
+    if (unsupported !== null) {
+        return { field, unit: null, unsupportedUnit: unsupported };
+    }
+    if (unit === null) {
+        return { field, unit: canonicalUnitOf(field), unitStated: false };
+    }
+    return { field, unit, unitStated: true };
+}
+
+/**
+ * Normalize a free-text unit string ("mg", "Milligrams", "µg") to a canonical
+ * mass unit, or null when it is not one we recognise. Null means "ambiguous or
+ * unknown" and callers must turn it into an error rather than picking a
+ * default — this is the "never guess" rule at its sharpest, because a unit we
+ * do not recognise is exactly the case where any assumption is a coin flip.
+ */
+export function parseUnitToken(
+    raw: string | undefined,
+): CsvNutrientUnit | null {
+    if (raw === undefined) return null;
+    const key = normalizeHeader(raw);
+    return UNIT_TOKENS[key] ?? null;
+}
+
+// ---------- micronutrient columns -> row values ----------
+//
+// The two functions below are the whole browser-side micronutrient mapper. They
+// live here, next to the resolver, because BOTH callers that map a file to
+// import rows need identical behaviour and neither can import anything: the
+// import widget gets this module spliced in by `@inlinets` (CLAUDE.md), and the
+// model-facing fallback path is mirrored in src/import.test.ts. The widget
+// having its own copy is exactly how twelve nutrients went missing from the
+// widget path while the server happily accepted them.
+
+export interface NutrientColumn {
+    /** Column index in `headers`. */
+    index: number;
+    /** The header text verbatim, for showing the user what was recognised. */
+    header: string;
+    /** Canonical field, e.g. "sodium_mg". */
+    field: string;
+    /** The unit the values are in, or null when it cannot be converted. */
+    unit: CsvNutrientUnit | null;
+    /** False when the header stated no unit and the canonical one was assumed. */
+    unitStated: boolean;
+    /** The refused unit token ("iu", "dv", …) when `unit` is null. */
+    unsupportedUnit: string | null;
+    /**
+     * True when an earlier column already claimed this field, so this one is
+     * NOT read. Kept in the list rather than dropped so the UI can say which
+     * of two competing columns won.
+     */
+    duplicate: boolean;
+}
+
+/**
+ * Resolve every micronutrient column in a header row.
+ *
+ * Returned in header order. When one field has several columns, the first with
+ * a convertible unit wins and the rest are flagged `duplicate` — so a file
+ * carrying both "Vitamin A (IU)" and "Vitamin A (mcg)" reads the micrograms
+ * however they are ordered, rather than refusing the nutrient because the
+ * unusable column came first.
+ */
+export function findNutrientColumns(headers: string[]): NutrientColumn[] {
+    const all: NutrientColumn[] = [];
+    for (let i = 0; i < headers.length; i++) {
+        const m = resolveNutrientHeader(headers[i]!);
+        if (m === null) continue;
+        all.push({
+            index: i,
+            header: headers[i]!,
+            field: m.field,
+            unit: m.unit,
+            unitStated: m.unit === null ? true : m.unitStated,
+            unsupportedUnit: m.unit === null ? m.unsupportedUnit : null,
+            duplicate: false,
+        });
+    }
+    // Convertible columns claim their field first, so an IU column is demoted
+    // to a duplicate whenever a usable column for the same nutrient exists
+    // anywhere in the file — and its refusal is then not worth mentioning.
+    const claimed = new Set<string>();
+    for (const pass of [true, false]) {
+        for (const c of all) {
+            if ((c.unit !== null) !== pass) continue;
+            if (claimed.has(c.field)) c.duplicate = true;
+            else claimed.add(c.field);
+        }
+    }
+    return all;
+}
+
+export interface NutrientCells {
+    /** field -> value, or null for a cell that states "not recorded". */
+    values: Record<string, number | null>;
+    /** field -> the unit its value is in, for the values that have one. */
+    units: Record<string, CsvNutrientUnit>;
+}
+
+/**
+ * Read one row's micronutrient cells.
+ *
+ * Three outcomes per column, and the distinction between them is the point:
+ *   - a blank-ish cell is `null` — "not recorded", never 0 and never absent
+ *   - a value is passed through UNCONVERTED with its stated unit alongside, so
+ *     the arithmetic happens once, server-side (CONTRACT §0.5)
+ *   - an IU / %DV column contributes nothing at all, so the nutrient stays
+ *     unrecorded rather than being off by a factor of 3 to 20
+ */
+export function readNutrientCells(
+    row: string[],
+    columns: NutrientColumn[],
+    decimalSeparator: DecimalSeparator = ".",
+): NutrientCells {
+    const values: Record<string, number | null> = {};
+    const units: Record<string, CsvNutrientUnit> = {};
+    for (const c of columns) {
+        if (c.duplicate || c.unit === null) continue;
+        const raw = row[c.index];
+        if (raw === undefined) continue;
+        if (isBlankCell(raw)) {
+            values[c.field] = null;
+            continue;
+        }
+        const v = parseNumber(raw, decimalSeparator);
+        if (v === null) continue;
+        values[c.field] = v;
+        units[c.field] = c.unit;
+    }
+    return { values, units };
 }

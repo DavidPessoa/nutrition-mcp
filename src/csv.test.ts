@@ -4,6 +4,11 @@ import { runImport, resolveLoggedAt } from "./import.js";
 import { buildMealsCsv } from "./export.js";
 import type { Meal } from "./supabase.js";
 import {
+    MICRONUTRIENT_HEADER_ALIASES,
+    resolveNutrientHeader,
+    findNutrientColumns,
+    readNutrientCells,
+    parseUnitToken,
     parseCsv,
     decodeBytes,
     stripBom,
@@ -992,4 +997,447 @@ test("the export's id column is what the importer's source_id alias matches", ()
     const t = parseCsv(buildMealsCsv(STORED, "UTC"));
     expect(findColumn(t.headers, ["id"])).toBe(0);
     expect(t.rows[0]![0]).toBe(STORED[0]!.id);
+});
+
+// ---------- micronutrient header resolution ----------
+
+test("the alias table covers exactly the canonical micronutrient fields", async () => {
+    // csv.ts spells the twelve field names out because it is inlined into the
+    // import widget by @inlinets, which forbids runtime imports. This is the
+    // guard that keeps that copy from drifting from the model.
+    const { MICRONUTRIENT_FIELDS } = await import("./nutrients.js");
+    expect(Object.keys(MICRONUTRIENT_HEADER_ALIASES).sort()).toEqual(
+        [...MICRONUTRIENT_FIELDS].sort(),
+    );
+});
+
+test("resolves the headings and aliases real exports use", () => {
+    const cases: [string, string][] = [
+        ["Saturated Fat", "saturated_fat_g"],
+        ["Sat Fat", "saturated_fat_g"],
+        ["saturated_fat_g", "saturated_fat_g"],
+        ["Trans Fat", "trans_fat_g"],
+        ["Added Sugar", "added_sugar_g"],
+        ["Added Sugars", "added_sugar_g"],
+        ["Sodium", "sodium_mg"],
+        ["Potassium", "potassium_mg"],
+        ["Cholesterol", "cholesterol_mg"],
+        ["Calcium", "calcium_mg"],
+        ["Iron", "iron_mg"],
+        ["Magnesium", "magnesium_mg"],
+        ["Vitamin A", "vitamin_a_mcg"],
+        ["Vitamin C", "vitamin_c_mg"],
+        ["Vitamin D", "vitamin_d_mcg"],
+        ["Gesättigte Fettsäuren", "saturated_fat_g"],
+        ["Natrium", "sodium_mg"],
+    ];
+    for (const [header, field] of cases) {
+        const m = resolveNutrientHeader(header);
+        expect(m).not.toBeNull();
+        expect(m!.field).toBe(field);
+    }
+});
+
+test("a unit-qualified header reports the unit the header states", () => {
+    expect(resolveNutrientHeader("Sodium (mg)")).toEqual({
+        field: "sodium_mg",
+        unit: "mg",
+        unitStated: true,
+    });
+    // The case that must never silently become milligrams.
+    expect(resolveNutrientHeader("Sodium (g)")).toEqual({
+        field: "sodium_mg",
+        unit: "g",
+        unitStated: true,
+    });
+    expect(resolveNutrientHeader("Vitamin D (mcg)")).toEqual({
+        field: "vitamin_d_mcg",
+        unit: "mcg",
+        unitStated: true,
+    });
+    // µ is folded to "u" by normalizeHeader, so "µg" arrives as "ug".
+    expect(resolveNutrientHeader("Vitamin D (µg)")).toEqual({
+        field: "vitamin_d_mcg",
+        unit: "mcg",
+        unitStated: true,
+    });
+    // "mcg RAE" is our own canonical spelling for vitamin A.
+    expect(resolveNutrientHeader("Vitamin A (mcg RAE)")).toEqual({
+        field: "vitamin_a_mcg",
+        unit: "mcg",
+        unitStated: true,
+    });
+});
+
+test("a unit-less header is read canonically but says it assumed", () => {
+    // Flagged, not silent: the caller has to be able to tell the user
+    // "Sodium will be read as mg" before anything is written.
+    expect(resolveNutrientHeader("Sodium")).toEqual({
+        field: "sodium_mg",
+        unit: "mg",
+        unitStated: false,
+    });
+    expect(resolveNutrientHeader("Vitamin A")).toEqual({
+        field: "vitamin_a_mcg",
+        unit: "mcg",
+        unitStated: false,
+    });
+    expect(resolveNutrientHeader("Saturated Fat")).toEqual({
+        field: "saturated_fat_g",
+        unit: "g",
+        unitStated: false,
+    });
+});
+
+test("an unconvertible unit is refused, never read as the canonical one", () => {
+    // IU has no single conversion to µg RAE, so this must surface as a refusal
+    // the caller can explain — not fall back to mcg, which would be wrong by a
+    // factor of 3 to 20 while looking entirely plausible.
+    expect(resolveNutrientHeader("Vitamin A (IU)")).toEqual({
+        field: "vitamin_a_mcg",
+        unit: null,
+        unsupportedUnit: "iu",
+    });
+    expect(resolveNutrientHeader("Vitamin D (IU)")).toEqual({
+        field: "vitamin_d_mcg",
+        unit: null,
+        unsupportedUnit: "iu",
+    });
+    expect(resolveNutrientHeader("Vitamin C (% DV)")).toEqual({
+        field: "vitamin_c_mg",
+        unit: null,
+        unsupportedUnit: "dv",
+    });
+});
+
+test("does not claim columns that are not micronutrients", () => {
+    for (const header of [
+        "",
+        "Food",
+        "Calories",
+        "Fat (g)",
+        "Sugar",
+        "Sugars",
+        "Total Sugars",
+        "Sugar Alcohols (g)",
+        "Caffeine (mg)",
+        "Notes",
+    ]) {
+        expect(resolveNutrientHeader(header)).toBeNull();
+    }
+});
+
+test("parseUnitToken accepts the mass ladder and refuses everything else", () => {
+    expect(parseUnitToken("g")).toBe("g");
+    expect(parseUnitToken("Grams")).toBe("g");
+    expect(parseUnitToken("MG")).toBe("mg");
+    expect(parseUnitToken("mcg")).toBe("mcg");
+    expect(parseUnitToken("µg")).toBe("mcg");
+    expect(parseUnitToken("micrograms")).toBe("mcg");
+    for (const bad of ["IU", "%", "% DV", "kcal", "oz", "", "  ", "flurbs"]) {
+        expect(parseUnitToken(bad)).toBeNull();
+    }
+    expect(parseUnitToken(undefined)).toBeNull();
+});
+
+test("the exported meals.csv micronutrient headers resolve back to their own fields", async () => {
+    // The re-import contract for the twelve, checked against the resolver
+    // rather than a copy of the names: a rename on either side silently turns a
+    // restored backup into one with no micronutrients.
+    const { MICRONUTRIENT_FIELDS } = await import("./nutrients.js");
+    const headers = parseCsv(buildMealsCsv([], "UTC")).headers;
+    for (const field of MICRONUTRIENT_FIELDS) {
+        expect(headers).toContain(field);
+        expect(resolveNutrientHeader(field)).toEqual({
+            field,
+            unit: field.endsWith("_mcg")
+                ? "mcg"
+                : field.endsWith("_mg")
+                  ? "mg"
+                  : "g",
+            unitStated: true,
+        });
+    }
+});
+
+// ---------- micronutrient columns -> row values ----------
+//
+// findNutrientColumns/readNutrientCells ARE the browser-side mapper: the import
+// widget calls exactly these (src/widgets.test.ts drives the assembled document
+// to prove it), so a case pinned here is pinned for the widget path too.
+
+test("findNutrientColumns resolves a whole header row, in order", () => {
+    const cols = findNutrientColumns([
+        "Date",
+        "Food",
+        "Sodium (mg)",
+        "Potassium (g)",
+        "Cholesterol",
+        "Vitamin A (IU)",
+        "Sugar Alcohols (g)",
+    ]);
+    expect(cols.map((c) => [c.index, c.field, c.unit])).toEqual([
+        [2, "sodium_mg", "mg"],
+        [3, "potassium_mg", "g"],
+        [4, "cholesterol_mg", "mg"],
+        [5, "vitamin_a_mcg", null],
+    ]);
+    // A bare header assumed its unit; a qualified one did not. The flag is the
+    // only way the UI can say "read as mg" before anything is written.
+    expect(cols[2]!.unitStated).toBe(false);
+    expect(cols[0]!.unitStated).toBe(true);
+    expect(cols[3]!.unsupportedUnit).toBe("iu");
+});
+
+test("a convertible column wins over an IU one for the same nutrient", () => {
+    // Either order: the mcg column is read and the IU one is a duplicate, so
+    // the refusal is not worth reporting because it cost nothing.
+    for (const headers of [
+        ["Vitamin A (IU)", "Vitamin A (mcg)"],
+        ["Vitamin A (mcg)", "Vitamin A (IU)"],
+    ]) {
+        const cols = findNutrientColumns(headers);
+        const used = cols.filter((c) => !c.duplicate && c.unit !== null);
+        expect(used).toHaveLength(1);
+        expect(used[0]!.header).toBe("Vitamin A (mcg)");
+        expect(cols.filter((c) => c.duplicate)).toHaveLength(1);
+    }
+});
+
+test("a second column for the same nutrient is ignored, not summed", () => {
+    const cols = findNutrientColumns(["Sodium (mg)", "sodium_mg"]);
+    expect(cols[1]!.duplicate).toBe(true);
+    const { values } = readNutrientCells(["10", "999"], cols);
+    expect(values).toEqual({ sodium_mg: 10 });
+});
+
+test("readNutrientCells keeps values in the file's unit and names that unit", () => {
+    const cols = findNutrientColumns(["Sodium (mg)", "Potassium (g)"]);
+    // No arithmetic here on purpose: 0.39 stays 0.39 and travels with "g".
+    expect(readNutrientCells(["180", "0.39"], cols)).toEqual({
+        values: { sodium_mg: 180, potassium_mg: 0.39 },
+        units: { sodium_mg: "mg", potassium_mg: "g" },
+    });
+});
+
+test("a blank cell is null, a zero is zero, an IU column is neither", () => {
+    const cols = findNutrientColumns([
+        "Sodium",
+        "Iron",
+        "Calcium",
+        "Vitamin A (IU)",
+    ]);
+    const { values, units } = readNutrientCells(["", "0", "n/a", "500"], cols);
+    expect(values.sodium_mg).toBeNull();
+    expect(values.iron_mg).toBe(0);
+    expect(values.calcium_mg).toBeNull();
+    // Not null and not 500: the nutrient stays unrecorded rather than being
+    // recorded wrong by a factor nobody can recover.
+    expect("vitamin_a_mcg" in values).toBe(false);
+    // A null carries no unit — there is no value for a unit to qualify.
+    expect(units).toEqual({ iron_mg: "mg" });
+});
+
+test("a European decimal comma is honoured for micronutrients too", () => {
+    const cols = findNutrientColumns(["Natrium (mg)"]);
+    expect(readNutrientCells(["1.234,5"], cols, ",").values.sodium_mg).toBe(
+        1234.5,
+    );
+});
+
+test("a file with no micronutrient columns yields nothing at all", () => {
+    const cols = findNutrientColumns(["Date", "Food", "Calories", "Fat (g)"]);
+    expect(cols).toEqual([]);
+    expect(readNutrientCells(["a", "b", "c", "d"], cols)).toEqual({
+        values: {},
+        units: {},
+    });
+});
+
+// ---------- the ten defects an independent verifier confirmed ----------
+//
+// Every one of these passed the builder's own suite first, and each is written
+// as the input that produced the wrong number rather than as a unit assertion
+// about the function that produced it.
+
+test("a percent-of-daily-value column is refused, not read as a mass", () => {
+    // 20 %DV of iron was stored as 20 mg — over twice the adult RDA — because
+    // normalizeHeader deleted the "%" before any unsupported-unit check ran.
+    for (const header of [
+        "Iron (%)",
+        "Sodium %",
+        "Iron (% DV)",
+        "Iron (%DV)",
+    ]) {
+        const m = resolveNutrientHeader(header);
+        expect(m).not.toBeNull();
+        expect(m!.unit).toBeNull();
+        expect(normalizeHeader(header)).toContain("pct");
+    }
+    // The field is still recognised, so the refusal can name the nutrient.
+    expect(resolveNutrientHeader("Iron (%)")!.field).toBe("iron_mg");
+    // "% DV" reports the unit the header actually states.
+    expect(
+        (
+            resolveNutrientHeader("Vitamin C (% DV)") as {
+                unsupportedUnit: string;
+            }
+        ).unsupportedUnit,
+    ).toBe("dv");
+});
+
+test("a percent column does not outrank the real mass column", () => {
+    // Header order used to decide this, so "Iron (%)" claimed iron_mg and the
+    // true 3.6 mg was discarded as a duplicate.
+    const cols = findNutrientColumns(["Date", "Food", "Iron (%)", "Iron (mg)"]);
+    const usable = cols.filter((c) => !c.duplicate && c.unit !== null);
+    expect(usable).toHaveLength(1);
+    expect(usable[0]!.header).toBe("Iron (mg)");
+    expect(
+        readNutrientCells(["2026-07-18", "Steak", "20", "3.6"], cols),
+    ).toEqual({
+        values: { iron_mg: 3.6 },
+        units: { iron_mg: "mg" },
+    });
+});
+
+test("a percent-of-energy macro column does not auto-map to grams", () => {
+    // A 600 kcal bowl was recorded as 30 g protein / 45 g carbs / 25 g fat.
+    const headers = ["Calories", "Protein (%)", "Carbs (%)", "Fat (%)"];
+    expect(findColumn(headers, ["protein_g", "protein"])).toBe(-1);
+    expect(findColumn(headers, ["carbs_g", "carbs"])).toBe(-1);
+    expect(findColumn(headers, ["fat_g", "fat"])).toBe(-1);
+    // The gram spellings still map.
+    expect(findColumn(["Protein (g)"], ["protein_g", "protein"])).toBe(0);
+});
+
+test("USDA's own nutrient spellings resolve, qualifier on either side", () => {
+    const cases: [string, string, string | null][] = [
+        ["Vitamin A, RAE (mcg)", "vitamin_a_mcg", "mcg"],
+        ["Vitamin A (mcg RAE)", "vitamin_a_mcg", "mcg"],
+        ["Sodium total (mg)", "sodium_mg", "mg"],
+        ["Calcium, total (mg)", "calcium_mg", "mg"],
+        ["Fatty acids, total saturated (g)", "saturated_fat_g", "g"],
+        ["Fatty acids, total trans (g)", "trans_fat_g", "g"],
+        ["Fat, saturated (g)", "saturated_fat_g", "g"],
+        ["Calcium, Ca (mg)", "calcium_mg", "mg"],
+        ["Iron, Fe (mg)", "iron_mg", "mg"],
+        ["Potassium, K (mg)", "potassium_mg", "mg"],
+        ["Magnesium, Mg (mg)", "magnesium_mg", "mg"],
+        ["Sodium, Na (mg)", "sodium_mg", "mg"],
+        ["Vitamin C, total ascorbic acid (mg)", "vitamin_c_mg", "mg"],
+        ["Vitamin D (D2 + D3) (mcg)", "vitamin_d_mcg", "mcg"],
+    ];
+    for (const [header, field, unit] of cases) {
+        const m = resolveNutrientHeader(header);
+        expect(m === null ? header : "ok").toBe("ok");
+        expect([header, m!.field, m!.unit]).toEqual([header, field, unit]);
+    }
+    // The IU refusal survives the looping peel, on both spellings.
+    for (const header of ["Vitamin D (IU)", "Vitamin A, RAE (IU)"]) {
+        expect([header, resolveNutrientHeader(header)!.unit]).toEqual([
+            header,
+            null,
+        ]);
+    }
+});
+
+test("a thousands separator is not evidence of a decimal comma", () => {
+    // Sniffed as comma-decimal, this file read 12.5 g protein as 125 and
+    // 1,240 mg sodium as 1.24.
+    const rows = [
+        ["2026-07-18", "Soup", "250", "12.5", "1,240", "1,100"],
+        ["2026-07-18", "Chips", "300", "3", "1,050", "1,200"],
+        ["2026-07-19", "Stew", "400", "20", "2,300", "1,400"],
+    ];
+    expect(sniffDecimalSeparator(rows, "\t")).toBe(".");
+    expect(parseNumber("1,240", ".")).toBe(1240);
+    expect(parseNumber("12.5", ".")).toBe(12.5);
+    // A genuine comma-decimal file is still recognised.
+    expect(
+        sniffDecimalSeparator(
+            [
+                ["Soup", "12,5", "1,8"],
+                ["Stew", "20,25", "3,4"],
+            ],
+            ";",
+        ),
+    ).toBe(",");
+    // And a dot thousands group no longer votes for the dot either.
+    expect(
+        sniffDecimalSeparator(
+            [
+                ["Soup", "1.240", "12,5"],
+                ["Stew", "1.100", "3,4"],
+            ],
+            ";",
+        ),
+    ).toBe(",");
+});
+
+test("a totals row is recognised when the date column comes first", () => {
+    // MyFitnessPal and Cronometer both lead with a date or an id, so this row
+    // was imported as an extra 200 kcal meal and the day was double-counted.
+    expect(isTotalsRow(["2026-07-18", "", "Total", "200"])).toBe(true);
+    expect(isTotalsRow(["", "Totals:", "", "1800"])).toBe(true);
+    // A fully populated meal row is never a totals row, whatever it is called.
+    expect(isTotalsRow(["2026-07-18", "lunch", "Total Cereal", "200"])).toBe(
+        false,
+    );
+    expect(isTotalsRow(["2026-07-18", "lunch", "Total", "200"])).toBe(false);
+    expect(isTotalsRow(["", "", "", ""])).toBe(false);
+});
+
+test("a quoted field survives whitespace before the quote", () => {
+    // `, "Beans, baked", 250` split into two corrupted fields: the description
+    // was truncated to `"Beans` and the 250 kcal was lost.
+    const t = parseCsv('Date,Food,Calories\n2026-07-18, "Beans, baked", 250\n');
+    expect(t.rows[0]).toEqual(["2026-07-18", "Beans, baked", "250"]);
+    expect(parseNumber(t.rows[0]![2])).toBe(250);
+    // Escaped quotes and unquoted fields are unaffected.
+    expect(parseCsv('a,b\n1, "say ""hi""" ,3\n').rows[0]![1]).toBe('say "hi"');
+});
+
+test("a censored value is not a definite one", () => {
+    // "<1" became a confident 1, ">2000" a confident 2000.
+    expect(parseNumber("<1")).toBeNull();
+    expect(parseNumber(">2000")).toBeNull();
+    expect(parseNumber("< 0.5")).toBeNull();
+    // Ordinary values, including negatives and unit noise, still parse.
+    expect(parseNumber("1.5 mg")).toBe(1.5);
+    expect(parseNumber("-2")).toBe(-2);
+});
+
+test("an Energy (kJ) column is a calories column", () => {
+    // Without the kJ spellings the column mapped to nothing, so every row was
+    // sent with no calories AND expected_total_kcal was omitted, disabling the
+    // server-side control total that would have caught the loss.
+    const aliases = [
+        "calories",
+        "energy_kcal",
+        "energy",
+        "kcal",
+        "calories_kcal",
+        "kalorien",
+        "energy_kj",
+        "kj",
+        "kilojoules",
+        "energie",
+        "energie_kj",
+    ];
+    for (const header of [
+        "Energy (kJ)",
+        "Energy kJ",
+        "energy_kj",
+        "kJ",
+        "Kilojoules",
+        "Energie (kJ)",
+    ]) {
+        expect([header, findColumn([header], aliases)]).toEqual([header, 0]);
+        expect([header, sniffEnergyUnit(header, [1046])]).toEqual([
+            header,
+            "kj",
+        ]);
+    }
+    expect(toKcal(1046, "kj")).toBe(250);
 });

@@ -1,0 +1,26 @@
+{
+    "code": "0000000000031",
+    "status": 1,
+    "status_verbose": "product found",
+    "_note": "Synthetic. Units are fine; the AMOUNTS are unusable: a non-numeric string, an explicit JSON null, an empty string, a boolean, and NaN-producing junk. All must read as null. iron_100g is a numeric STRING, which OFF really does emit and which must still parse.",
+    "product": {
+        "product_name": "Bad Values Test Product",
+        "brands": "Fixture Foods",
+        "nutriments": {
+            "energy-kcal_100g": 100,
+            "proteins_100g": 1,
+            "carbohydrates_100g": 2,
+            "fat_100g": 3,
+            "sodium_100g": "n/a",
+            "sodium_unit": "g",
+            "potassium_100g": null,
+            "potassium_unit": "mg",
+            "calcium_100g": "",
+            "calcium_unit": "mg",
+            "magnesium_100g": true,
+            "magnesium_unit": "mg",
+            "iron_100g": "0.014",
+            "iron_unit": "g"
+        }
+    }
+}

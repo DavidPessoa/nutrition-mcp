@@ -31,6 +31,8 @@
 
             /*@include shared/macros.css@*/
 
+            /*@include shared/micros.css@*/
+
             .gal {
                 padding: 16px;
                 display: grid;
@@ -78,6 +80,8 @@
             }
 
             /*@include shared/macros.js@*/
+
+            /*@include shared/micros.js@*/
 
             // One day's worth of fixture data for the macro components below.
             const GOALS = {
@@ -192,6 +196,145 @@
                     { caffeine_mg: null },
                     GOALS,
                 ],
+            ];
+
+            // Every micronutrient state on one page, because several of them
+            // are unreachable from any real payload you happen to have: a
+            // measured zero, a target with nothing recorded against it, and
+            // the confidence badge that NUTRIENT_COVERAGE_ITEM does not carry
+            // yet. `cov` fills in the boring half of a row so each entry says
+            // only what makes it different.
+            const cov = (o) => ({
+                unit: "mg",
+                known_total: null,
+                known_meals: 0,
+                total_meals: 4,
+                known_calories: 0,
+                total_calories: 2000,
+                coverage: 0,
+                complete: false,
+                target: null,
+                // Single-day by default; a range payload scales `target` by
+                // this and the caption then says "over N days".
+                target_days: 1,
+                direction: null,
+                ...o,
+            });
+            const MICRO_STATES = [
+                cov({
+                    nutrient: "sodium_mg",
+                    known_total: 1780,
+                    known_meals: 2,
+                    known_calories: 1200,
+                    coverage: 0.5,
+                    target: 2300,
+                    direction: "maximum",
+                }),
+                cov({
+                    nutrient: "potassium_mg",
+                    known_total: 3620,
+                    known_meals: 4,
+                    known_calories: 2000,
+                    coverage: 1,
+                    complete: true,
+                    target: 3500,
+                    direction: "minimum",
+                }),
+                cov({
+                    nutrient: "calcium_mg",
+                    known_total: 0,
+                    known_meals: 4,
+                    known_calories: 2000,
+                    coverage: 1,
+                    complete: true,
+                    target: 1000,
+                    direction: "minimum",
+                }),
+                cov({
+                    nutrient: "iron_mg",
+                    target: 18,
+                    direction: "minimum",
+                }),
+                cov({
+                    nutrient: "saturated_fat_g",
+                    unit: "g",
+                    known_total: 31.2,
+                    known_meals: 3,
+                    known_calories: 1700,
+                    coverage: 0.75,
+                    target: 20,
+                    direction: "maximum",
+                }),
+                cov({
+                    nutrient: "magnesium_mg",
+                    known_total: 260,
+                    known_meals: 4,
+                    known_calories: 2000,
+                    coverage: 1,
+                    complete: true,
+                    target: 400,
+                    direction: "minimum",
+                }),
+                cov({
+                    nutrient: "trans_fat_g",
+                    unit: "g",
+                    known_total: 0.4,
+                    known_meals: 4,
+                    known_calories: 2000,
+                    coverage: 1,
+                    complete: true,
+                }),
+                cov({
+                    nutrient: "vitamin_a_mcg",
+                    unit: "mcg",
+                    known_total: 610,
+                    known_meals: 4,
+                    known_calories: 2000,
+                    coverage: 1,
+                    complete: true,
+                    target: 900,
+                    direction: "minimum",
+                    confidence: "authoritative",
+                }),
+                cov({
+                    nutrient: "vitamin_c_mg",
+                    known_total: 75,
+                    known_meals: 4,
+                    known_calories: 2000,
+                    coverage: 1,
+                    complete: true,
+                    target: 90,
+                    direction: "minimum",
+                    confidence: "estimated",
+                }),
+                cov({
+                    nutrient: "vitamin_d_mcg",
+                    unit: "mcg",
+                    known_total: 12.5,
+                    known_meals: 4,
+                    known_calories: 2000,
+                    coverage: 1,
+                    complete: true,
+                    target: 15,
+                    direction: "minimum",
+                    confidence: "user_provided",
+                }),
+                cov({
+                    // A RANGE row: the target is already scaled to the span,
+                    // so the same value/target comparison holds and only the
+                    // caption changes.
+                    nutrient: "sodium_mg",
+                    known_total: 2400,
+                    known_meals: 12,
+                    total_meals: 12,
+                    known_calories: 6000,
+                    total_calories: 6000,
+                    coverage: 1,
+                    complete: true,
+                    target: 6900,
+                    target_days: 3,
+                    direction: "maximum",
+                }),
             ];
 
             // A limit cell is a grid item; on its own it needs a one-column
@@ -337,6 +480,17 @@
                           )}`,
                   )
                   .join("")}
+            </section>
+
+            <section class="card">
+              <h3>Micronutrient section — every coverage state</h3>
+              <div class="panel">${microSection(MICRO_STATES, { openUpTo: 99 })}</div>
+              <div class="hint" style="margin-top:10px">Sodium: partial, under its limit — grey, never green, and suffixed &ldquo;so far&rdquo;. Saturated fat: partial but already over — coloured, because more meals cannot undo it. Calcium: a measured 0. Iron: not recorded (em dash, dashed rail).</div>
+            </section>
+
+            <section class="card">
+              <h3>Micronutrient section — no data at all (renders nothing)</h3>
+              <div class="panel">${microSection([]) || '<div class="hint">(nothing — a user with no micronutrient data sees the widget exactly as before)</div>'}</div>
             </section>
 
             <section class="card">

@@ -1,7 +1,10 @@
-import { test, expect, describe } from "bun:test";
+import { test, expect, describe, mock, beforeEach } from "bun:test";
 import {
     mealIdempotencyKey,
     updatedMealIdempotencyKey,
+    normalizeMeal,
+    insertMeal,
+    updateMeal,
     widgetsEnabledFromProfile,
     alcoholTrackingEnabledFromProfile,
     preferredDrinkUnitFromProfile,
@@ -16,9 +19,12 @@ import {
     type Profile,
 } from "./supabase.js";
 import { rowContentDigest } from "./import.js";
+import { MICRONUTRIENT_FIELDS, type NutrientProvenance } from "./nutrients.js";
 
-// Every export exercised here is pure: no test in this file constructs a
-// Supabase client, and none touches the network or the database.
+// Most exports exercised here are pure: no Supabase client, no network, no
+// database. The exception is the "insertMeal / updateMeal against a fake
+// Supabase client" section below, which needs a stand-in for the real DB —
+// see the comment there for why and how.
 
 const USER = "11111111-1111-4111-8111-111111111111";
 const LOGGED_AT = "2026-03-14T12:00:00.000Z";
@@ -81,6 +87,27 @@ describe("mealIdempotencyKey", () => {
                 }),
             ),
         ).toBe(base);
+    });
+
+    test("REGRESSION: none of the twelve new micronutrient fields are hashed — two meals differing only in those fields produce an IDENTICAL key", () => {
+        // Locks the frozen-digest decision in CONTRACT §6 for the fields this
+        // agent added: MealInput now carries all twelve, and the array in
+        // mealIdempotencyKey must still describe exactly the same content it
+        // did before this epic. If a future agent "fixes" this by appending
+        // one of the twelve to the array, this test is the one that catches
+        // it — every stored "auto:" key would otherwise be silently
+        // orphaned (see the warning comment on the array itself).
+        const base = key(meal());
+        const withEveryMicronutrient = meal(
+            Object.fromEntries(
+                MICRONUTRIENT_FIELDS.map((field, i) => [field, i + 1]),
+            ),
+        );
+        expect(key(withEveryMicronutrient)).toBe(base);
+
+        // Negative control, same purpose as the one above: a field that IS
+        // hashed must still change the key, so this test can actually fail.
+        expect(key(meal({ description: "different meal" }))).not.toBe(base);
     });
 
     test("two coffees differing only in caffeine dedupe to one — the accepted cost", () => {
@@ -167,6 +194,19 @@ function existingMeal(overrides: Partial<Meal> = {}): Meal {
         sugar_g: null,
         alcohol_g: null,
         caffeine_mg: null,
+        saturated_fat_g: null,
+        trans_fat_g: null,
+        added_sugar_g: null,
+        sodium_mg: null,
+        potassium_mg: null,
+        cholesterol_mg: null,
+        calcium_mg: null,
+        iron_mg: null,
+        magnesium_mg: null,
+        vitamin_a_mcg: null,
+        vitamin_c_mg: null,
+        vitamin_d_mcg: null,
+        nutrient_provenance: null,
         notes: "made with milk",
         idempotency_key: key(meal()),
         ...overrides,
@@ -252,6 +292,406 @@ describe("updatedMealIdempotencyKey", () => {
         });
 
         expect(updated).toBe(key(meal({ calories: 600 })));
+    });
+});
+
+// ---------- insertMeal / updateMeal against a fake Supabase client ----------
+//
+// Every export exercised above this line is pure. insertMeal and updateMeal
+// are not — they call getSupabase() — so exercising the actual DB-write code
+// (the `?? null` coalescing into every column, the `!== undefined`
+// clear-vs-omit idiom, the assertValidNutrientValue guard, normalizeMeal on
+// the way back out) needs a stand-in for the real client.
+//
+// mock.module retroactively patches the module registry entry for
+// "@supabase/supabase-js" itself — one level below "./supabase.js", since
+// this file IS ./supabase.js's test and so cannot mock the module it is
+// testing (that's what middleware.test.ts and mcp.test.ts do instead, for
+// modules that import ./supabase.js). It still works for the same reason
+// their pattern does: supabase.ts's own
+// `import { createClient } from "@supabase/supabase-js"` only binds the name
+// at module-load time — the actual call happens lazily, inside
+// buildClient(), the first time any test here invokes getSupabase() (via
+// insertMeal/updateMeal) — which is always after every file's top-level
+// code, mock.module calls included, has already run.
+//
+// The fake only implements the exact chained calls insertMeal/updateMeal
+// make against "meals" — `.select().eq().eq().maybeSingle()`,
+// `.insert().select().single()`, `.update().eq().eq().select().single()` —
+// it is not a general PostgREST simulator.
+
+type FakeRow = Record<string, unknown>;
+
+function rowMatches(row: FakeRow, filters: [string, unknown][]): boolean {
+    return filters.every(([col, val]) => row[col] === val);
+}
+
+function createFakeMealsClient(rows: FakeRow[]) {
+    function builder() {
+        const filters: [string, unknown][] = [];
+        let op: "select" | "insert" | "update" = "select";
+        let payload: FakeRow = {};
+        const api = {
+            select(_cols?: string) {
+                return api;
+            },
+            insert(row: FakeRow) {
+                op = "insert";
+                payload = row;
+                return api;
+            },
+            update(row: FakeRow) {
+                op = "update";
+                payload = row;
+                return api;
+            },
+            eq(col: string, val: unknown) {
+                filters.push([col, val]);
+                return api;
+            },
+            async maybeSingle() {
+                const found = rows.find((r) => rowMatches(r, filters));
+                return { data: found ? { ...found } : null, error: null };
+            },
+            async single() {
+                if (op === "insert") {
+                    const row: FakeRow = {
+                        id: `fake-${rows.length + 1}`,
+                        ...payload,
+                    };
+                    rows.push(row);
+                    return { data: { ...row }, error: null };
+                }
+                if (op === "update") {
+                    const idx = rows.findIndex((r) => rowMatches(r, filters));
+                    if (idx === -1) {
+                        return {
+                            data: null,
+                            error: { message: "no rows found" },
+                        };
+                    }
+                    rows[idx] = { ...rows[idx], ...payload };
+                    return { data: { ...rows[idx] }, error: null };
+                }
+                const found = rows.find((r) => rowMatches(r, filters));
+                return found
+                    ? { data: { ...found }, error: null }
+                    : { data: null, error: { message: "no rows found" } };
+            },
+        };
+        return api;
+    }
+    return {
+        from(table: string) {
+            if (table !== "meals") {
+                throw new Error(
+                    `fake client only supports "meals", got "${table}"`,
+                );
+            }
+            return builder();
+        },
+    };
+}
+
+// One array, never reassigned — reset with .length = 0 in beforeEach so the
+// fake client (created once, the first time getSupabase() memoizes it) keeps
+// referencing the same backing store across the whole file.
+const fakeMealRows: FakeRow[] = [];
+
+// createClient's real signature is (url, key, options); the fake ignores all
+// three — insertMeal/updateMeal never see raw URLs or keys, only the
+// client's query-builder surface.
+mock.module("@supabase/supabase-js", () => ({
+    createClient: () => createFakeMealsClient(fakeMealRows),
+}));
+
+// buildClient() throws before ever reaching createClient if these are unset;
+// the values themselves are never used since createClient is mocked above.
+process.env.SUPABASE_URL ??= "http://localhost:54321";
+process.env.SUPABASE_SECRET_KEY ??= "test-secret-key";
+
+beforeEach(() => {
+    fakeMealRows.length = 0;
+});
+
+describe("normalizeMeal — backward compatibility for rows predating this migration", () => {
+    // The exact shape PostgREST would have returned before the
+    // micronutrient_expansion migration's columns existed: no
+    // saturated_fat_g..vitamin_d_mcg keys, no nutrient_provenance key at all.
+    const oldRow = {
+        id: "old-1",
+        user_id: USER,
+        logged_at: LOGGED_AT,
+        meal_type: "breakfast",
+        description: "oatmeal",
+        calories: 300,
+        protein_g: 12,
+        carbs_g: 45,
+        fat_g: 8,
+        fiber_g: null,
+        sugar_g: null,
+        alcohol_g: null,
+        caffeine_mg: null,
+        notes: null,
+        idempotency_key: null,
+    };
+
+    test("every new field is backfilled to null, never 0, when the row has no such column at all", () => {
+        const normalized = normalizeMeal(oldRow);
+        for (const field of MICRONUTRIENT_FIELDS) {
+            expect(normalized[field]).toBeNull();
+            expect(normalized[field]).not.toBe(0);
+        }
+        expect(normalized.nutrient_provenance).toBeNull();
+    });
+
+    test("existing fields pass through untouched", () => {
+        const normalized = normalizeMeal(oldRow);
+        expect(normalized.calories).toBe(300);
+        expect(normalized.protein_g).toBe(12);
+        expect(normalized.description).toBe("oatmeal");
+        expect(normalized.id).toBe("old-1");
+    });
+
+    test("a row that already has the new columns as explicit null normalizes the same way", () => {
+        const normalized = normalizeMeal({ ...existingMeal() });
+        for (const field of MICRONUTRIENT_FIELDS) {
+            expect(normalized[field]).toBeNull();
+        }
+        expect(normalized.nutrient_provenance).toBeNull();
+    });
+
+    test("a genuine zero on a new field is preserved, never collapsed to null", () => {
+        const normalized = normalizeMeal({ ...existingMeal(), sodium_mg: 0 });
+        expect(normalized.sodium_mg).toBe(0);
+    });
+
+    test("malformed nutrient_provenance degrades to null on read instead of propagating or throwing", () => {
+        expect(() =>
+            normalizeMeal({
+                ...oldRow,
+                nutrient_provenance: { sodium_mg: { source: "made_up" } },
+            }),
+        ).not.toThrow();
+        const normalized = normalizeMeal({
+            ...oldRow,
+            nutrient_provenance: { sodium_mg: { source: "made_up" } },
+        });
+        expect(normalized.nutrient_provenance).toBeNull();
+    });
+});
+
+describe("insertMeal — micronutrient value handling (the 7-case matrix, CONTRACT §8)", () => {
+    for (const field of MICRONUTRIENT_FIELDS) {
+        describe(field, () => {
+            test("undefined -> null", async () => {
+                const { meal: stored } = await insertMeal(USER, meal());
+                expect(stored[field]).toBeNull();
+            });
+
+            test("null -> null", async () => {
+                const { meal: stored } = await insertMeal(
+                    USER,
+                    meal({ [field]: null }) as MealInput,
+                );
+                expect(stored[field]).toBeNull();
+            });
+
+            test("0 -> 0 (zero is preserved, never collapsed to null)", async () => {
+                const { meal: stored } = await insertMeal(
+                    USER,
+                    meal({ [field]: 0 }) as MealInput,
+                );
+                expect(stored[field]).toBe(0);
+            });
+
+            test("a positive value is preserved exactly", async () => {
+                const { meal: stored } = await insertMeal(
+                    USER,
+                    meal({ [field]: 123.45 }) as MealInput,
+                );
+                expect(stored[field]).toBe(123.45);
+            });
+
+            test("a negative value is rejected", async () => {
+                await expect(
+                    insertMeal(USER, meal({ [field]: -1 }) as MealInput),
+                ).rejects.toThrow();
+            });
+
+            test("NaN is rejected", async () => {
+                await expect(
+                    insertMeal(USER, meal({ [field]: NaN }) as MealInput),
+                ).rejects.toThrow();
+            });
+
+            test("Infinity is rejected", async () => {
+                await expect(
+                    insertMeal(USER, meal({ [field]: Infinity }) as MealInput),
+                ).rejects.toThrow();
+            });
+        });
+    }
+});
+
+describe("insertMeal / updateMeal — micronutrient round trips", () => {
+    test("create -> retrieve preserves an explicit 0 alongside an explicit null in the same row", async () => {
+        const loggedAt = "2026-04-01T12:00:00.000Z";
+        const input = meal({
+            logged_at: loggedAt,
+            sodium_mg: 0,
+            potassium_mg: null,
+            vitamin_c_mg: 42.5,
+        });
+
+        const created = await insertMeal(USER, input);
+        expect(created.deduplicated).toBe(false);
+        expect(created.meal.sodium_mg).toBe(0);
+        expect(created.meal.potassium_mg).toBeNull();
+        expect(created.meal.vitamin_c_mg).toBe(42.5);
+
+        // Same content, same logged_at -> same derived idempotency key, so
+        // this re-runs the select-by-idempotency-key retrieval path (not a
+        // second insert) and must hand back the exact same stored values.
+        const retrieved = await insertMeal(USER, input);
+        expect(retrieved.deduplicated).toBe(true);
+        expect(retrieved.meal.id).toBe(created.meal.id);
+        expect(retrieved.meal.sodium_mg).toBe(0);
+        expect(retrieved.meal.potassium_mg).toBeNull();
+        expect(retrieved.meal.vitamin_c_mg).toBe(42.5);
+    });
+
+    test("create -> update one nutrient leaves every other nutrient (and non-nutrient fields) untouched", async () => {
+        const created = await insertMeal(
+            USER,
+            meal({
+                sodium_mg: 500,
+                potassium_mg: 300,
+                calcium_mg: 120,
+                vitamin_c_mg: 10,
+            }),
+        );
+
+        const updated = await updateMeal(USER, created.meal.id, {
+            sodium_mg: 750,
+        });
+
+        expect(updated.sodium_mg).toBe(750);
+        expect(updated.potassium_mg).toBe(300);
+        expect(updated.calcium_mg).toBe(120);
+        expect(updated.vitamin_c_mg).toBe(10);
+        expect(updated.description).toBe(created.meal.description);
+        expect(updated.calories).toBe(created.meal.calories);
+    });
+
+    test("create -> clear a nutrient explicitly back to null", async () => {
+        const created = await insertMeal(USER, meal({ sodium_mg: 500 }));
+        expect(created.meal.sodium_mg).toBe(500);
+
+        const updated = await updateMeal(USER, created.meal.id, {
+            sodium_mg: null,
+        });
+        expect(updated.sodium_mg).toBeNull();
+    });
+
+    test("updateMeal rejects a negative/NaN/Infinity micronutrient value and leaves the stored row untouched", async () => {
+        const created = await insertMeal(USER, meal({ sodium_mg: 500 }));
+
+        await expect(
+            updateMeal(USER, created.meal.id, { sodium_mg: -1 }),
+        ).rejects.toThrow();
+        await expect(
+            updateMeal(USER, created.meal.id, { potassium_mg: NaN }),
+        ).rejects.toThrow();
+        await expect(
+            updateMeal(USER, created.meal.id, { calcium_mg: Infinity }),
+        ).rejects.toThrow();
+
+        // None of the rejected calls wrote anything.
+        const stillThere = await insertMeal(
+            USER,
+            meal({
+                logged_at: new Date(created.meal.logged_at).toISOString(),
+                sodium_mg: 500,
+            }),
+        );
+        expect(stillThere.meal.sodium_mg).toBe(500);
+        expect(stillThere.meal.potassium_mg).toBeNull();
+        expect(stillThere.meal.calcium_mg).toBeNull();
+    });
+});
+
+describe("insertMeal / updateMeal — nutrient_provenance", () => {
+    const provenance: NutrientProvenance = {
+        sodium_mg: {
+            source: "usda_fdc",
+            source_id: "fdc:111",
+            confidence: "authoritative",
+        },
+    };
+
+    test("undefined -> null", async () => {
+        const { meal: stored } = await insertMeal(USER, meal());
+        expect(stored.nutrient_provenance).toBeNull();
+    });
+
+    test("null -> null", async () => {
+        const { meal: stored } = await insertMeal(
+            USER,
+            meal({ nutrient_provenance: null }),
+        );
+        expect(stored.nutrient_provenance).toBeNull();
+    });
+
+    test("create -> retrieve preserves the provenance object exactly", async () => {
+        const loggedAt = "2026-04-02T09:00:00.000Z";
+        const input = meal({
+            logged_at: loggedAt,
+            nutrient_provenance: provenance,
+        });
+
+        const created = await insertMeal(USER, input);
+        expect(created.meal.nutrient_provenance).toEqual(provenance);
+
+        const retrieved = await insertMeal(USER, input);
+        expect(retrieved.deduplicated).toBe(true);
+        expect(retrieved.meal.nutrient_provenance).toEqual(provenance);
+    });
+
+    test("create -> update REPLACES the whole object rather than merging per key", async () => {
+        const created = await insertMeal(
+            USER,
+            meal({ nutrient_provenance: provenance }),
+        );
+        const replacement: NutrientProvenance = {
+            calcium_mg: {
+                source: "nutrition_label",
+                source_id: null,
+                confidence: "authoritative",
+            },
+        };
+
+        const updated = await updateMeal(USER, created.meal.id, {
+            nutrient_provenance: replacement,
+        });
+
+        expect(updated.nutrient_provenance).toEqual(replacement);
+        // The sodium_mg entry from the original object is gone, not merged —
+        // updateMeal is a thin plumbing layer; a caller wanting a merge must
+        // read-modify-write client-side.
+        expect(updated.nutrient_provenance).not.toHaveProperty("sodium_mg");
+    });
+
+    test("create -> clear back to null", async () => {
+        const created = await insertMeal(
+            USER,
+            meal({ nutrient_provenance: provenance }),
+        );
+
+        const updated = await updateMeal(USER, created.meal.id, {
+            nutrient_provenance: null,
+        });
+        expect(updated.nutrient_provenance).toBeNull();
     });
 });
 
