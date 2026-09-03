@@ -31,7 +31,7 @@ Read the story behind it: [How I Replaced MyFitnessPal and Other Apps with a Sin
 - **Bun** — runtime and package manager
 - **Hono** — HTTP framework
 - **MCP SDK** — Model Context Protocol over Streamable HTTP
-- **Supabase** — PostgreSQL database + user authentication
+- **Supabase** — PostgreSQL database + user authentication (homeserver and the target path use vanilla Postgres)
 - **OAuth 2.0** — authentication for Claude.ai connectors
 
 ## MCP Tools
@@ -85,7 +85,7 @@ Read the story behind it: [How I Replaced MyFitnessPal and Other Apps with a Sin
 
 ## Self-hosting
 
-Pick **one** backend. Postgres is the homeserver path. Supabase is what production (`nutrition-mcp.com`) still runs.
+Pick **one** backend. Postgres is the homeserver path. Supabase is what production (`nutrition-mcp.com`) still runs. See [docs/architecture.md](docs/architecture.md) for the target architecture.
 
 ### 1a. Postgres (homeserver)
 
@@ -179,7 +179,7 @@ bun run dev             # starts with hot reload on http://localhost:8080
 
 ## Deploy
 
-The project includes a `Dockerfile` for container-based deployment.
+The project includes a `Dockerfile` for container-based deployment. [docs/architecture.md](docs/architecture.md) is the canonical description of where this runs and where it is going.
 
 1. Push your repo to a hosting provider (e.g. DigitalOcean App Platform)
 2. Set the environment variables listed above

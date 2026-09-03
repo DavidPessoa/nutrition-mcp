@@ -16,7 +16,7 @@ The Supabase and Postgres schemas are two hand-maintained copies of one design �
 
 ## Deploying
 
-This is a remote MCP server, and DigitalOcean auto-deploys `main`. **Merging to `main` ships to production** — there is no separate deploy step to run and no version bump or tag needed for a change to reach clients. Every client hitting `https://nutrition-mcp.com/mcp` picks it up as soon as the deploy finishes, so treat a merge as a release: prompt and tool-description edits go live exactly like code does.
+This is a remote MCP server, and DigitalOcean auto-deploys `main`. **Merging to `main` ships to production** — there is no separate deploy step to run and no version bump or tag needed for a change to reach clients. Every client hitting `https://nutrition-mcp.com/mcp` picks it up as soon as the deploy finishes, so treat a merge as a release: prompt and tool-description edits go live exactly like code does. Production is DigitalOcean auto-deploying `main`; the target architecture and the AWS plan live in [`docs/architecture.md`](docs/architecture.md).
 
 ## Publishing to the registry
 
