@@ -1,14 +1,20 @@
 # Nutrient Accuracy & Micronutrient Expansion — Handoff
 
-**Branch:** `claude/nutrient-accuracy-d3e306` (git worktree)
-**Updated:** 2026-08-20 (session 2)
-**Status:** All eight builder tracks BUILT. Independent verification ran once and
-returned **FAIL** with three findings; **all three are now fixed, none has been
-re-verified**. The epic is NOT done: the one thing still owed on the code is a
-second independent verification pass, and every database-dependent gate remains
-BLOCKED. See "Where it actually stands".
+**Branch:** `feat/finish-micronutrients` (cut from `origin/main`)
+**Updated:** 2026-09-03
+**Status:** All eight builder tracks BUILT and merged to main. This PR does
+**not** finish the epic: it tells the public product the truth about what
+already shipped, pins that copy, and adds a boot-time migration probe. The
+owed independent adversarial verification pass was **not** performed — the
+reviewer on this copy/guard diff is not a substitute for it. The six E2E
+scenarios and both live validation scripts (`validate:off`, `validate:usda`)
+could not run in this workspace because there is no `.env`. See "Where it
+actually stands" and the OPEN items below; none of those open items were
+deleted.
 
-**Working tree is CLEAN.** Everything is committed; nothing is half-finished.
+**Working tree for this PR:** public copy, comparison-page generator +
+regenerated pages, `src/site-copy.test.ts` guards, `src/preflight.ts` boot
+probe, and status docs. No schema, MCP tool, widget, or write-path changes.
 
 Read `docs/nutrient-epic/CONTRACT.md` FIRST — names, units, provenance shape,
 source precedence, file ownership, landmines. Do not re-derive any of it.
@@ -18,35 +24,53 @@ does not duplicate.
 
 ---
 
+## What this PR closed (2026-09-03)
+
+- **Public copy.** Landing FAQ (JSON-LD + visible), feature cards, `llms.txt`,
+  README, tools.html (39 tools, `lookup_food` card), privacy nutrient
+  enumerations, and the six comparison pages now describe the twelve tracked
+  micronutrients, the ten goals, the never-estimate rule, partial coverage, and
+  `lookup_food`.
+- **`lookup_food` visibility.** README tool table, tools.html, and llms.txt
+  name it; tool count is 39 on the landing-page tools CTA, tools.html, and
+  llms.txt — every surface that previously claimed 38.
+- **Copy-drift guards.** `src/site-copy.test.ts` pins the micronutrient
+  enumeration across index / llms / generator / six pages, forbids the old
+  denial strings, asserts `lookup_food` surfaces, scrapes `registerTool`
+  names from `src/mcp.ts` against the README table, and pins the landing-page
+  tool-count CTA to that same scrape so a new tool cannot leave a stale numeral.
+- **Boot preflight.** `src/preflight.ts` warns (does not throw) when hosted
+  Supabase is missing either micronutrient migration (`42703`), gated on
+  `!isPostgresBackend()`. `src/index.ts` fires it after `warmWidgets()` as
+  fire-and-forget (`void … .catch(() => {})`) so a slow PostgREST cannot delay
+  the port bind or `/health`.
+
+## What this PR did not close
+
+- The **owed independent adversarial verification pass** was not performed.
+  Findings 1–3 and the ten CSV-mapper defects were fixed on the epic branch,
+  but no verifier has re-run against those fixes. A reviewer of _this_ PR is
+  reviewing copy and guards, not that code.
+- All six E2E release scenarios remain **BLOCKED** — see
+  `validation/e2e/README.md`. This workspace has no `.env`, so
+  `e2e:nutrients`, `validate:off`, and `validate:usda` were not run here.
+- The open items below (CSV residual, widget height, weak USDA validator
+  script, OFF nutrient 539, importer source-claim hole) are unchanged.
+
+---
+
 ## START HERE
 
 ### 1. Environment
 
-`bun` is **not installed on this machine** and is not on PATH. Every session
-must do this first or every command fails:
-
-```bash
-export PATH="/private/tmp/claude-501/-Users-davidparreira-Documents-Git-Personal-nutrition-mcp--claude-worktrees-nutrient-accuracy-d3e306/9081a337-d677-4dfe-9499-a8e59d6191ce/scratchpad/node_modules/.bin:$PATH"
-bun --version   # expect 1.3.14
-```
-
-If that scratchpad is gone, reinstall it somewhere outside the repo:
-`npm i bun --prefix /tmp/bun-host` then PATH `/tmp/bun-host/node_modules/.bin`.
-Do not install bun into the repo and do not add it to package.json.
-
-`.env` exists, is gitignored, and holds a real `USDA_FDC_API_KEY` and
-`OFF_USER_AGENT`. Bun auto-loads it. **Never print the key or commit it.**
-There is **no** `SUPABASE_URL` / `SUPABASE_SECRET_KEY`, which is why every
-database-dependent gate below is unmet.
+`.env` is gitignored. This finish-micronutrients workspace has **no** `.env`,
+so every database-dependent and live-provider gate below stays unmet here.
 
 Confirm the baseline before changing anything:
 
 ```bash
 bun run format:check && bun run typecheck && bun test
 ```
-
-Expect clean, clean, **1015 pass** (30 files). Baseline before this epic was
-698 tests.
 
 ### 2. Orchestration model that has been working
 
@@ -72,42 +96,20 @@ earned their place:
 
 ## Where it actually stands
 
-### Commits on this branch (newest first)
-
-```
-2327c36  fix(import): the importer refused nothing, and a row chose its own provenance
-a161298  fix(import): the widget was dropping every micronutrient it could already read
-2f592fc  docs(nutrient-epic): hand over with the verification failure stated plainly
-c721a15  fix(summaries): scale a micronutrient target to the range it is judged over
-cdfca38  fix(validation): stop the validators editing the evidence they validate
-9a2fb4a  feat(summaries): fold per-nutrient confidence into the coverage payload
-713fd79  feat(widgets): show micronutrients without letting a partial total look whole
-636f295  fix(import): an empty cell was becoming a real zero, and micros never arrived
-cad6774  fix(export): goals.csv was silently dropping every micronutrient goal
-b729637  fix(insights): a zero floor is not a target, and coverage counts calories
-69de2fd  feat(nutrients): coverage-aware summaries, micronutrient goals, import/export
-0ddc9df  feat(usda): read Atwater energy when a Foundation record has no 208
-bc3d350  fix(usda): validate against live FoodData Central, and stop losing to parens
-fb4f7c1  fix(nutrients): make the resolution result the only authority on a write
-b7ced28  feat(nutrients): source precedence and the expanded model through MCP
-e273f8e  feat(usda): FoodData Central provider for generic whole foods
-7e3fd30  test(off): cover the micronutrient mapping with fixtures and live validation
-06b8052  feat(nutrients): canonical nutrient model, provenance and unit normalization
-```
-
 ### Builder tracks
 
-| #   | Track              | State                                                                      |
-| --- | ------------------ | -------------------------------------------------------------------------- |
-| 1   | schema + storage   | BUILT, verifier PASS                                                       |
-| 2   | units / conversion | BUILT, verifier PASS                                                       |
-| 3   | Open Food Facts    | BUILT, live-validated, verifier PASS (re-validated independently)          |
-| 4   | USDA FDC           | BUILT, live-validated, verifier PASS                                       |
-| 5   | resolution + MCP   | BUILT, PASS on log_meal/update_meal; Finding 3 → **fixed** in 2327c36      |
-| 6   | summaries + goals  | BUILT; verifier FAIL (Finding 1) → **fixed** in c721a15                    |
-| 7   | import / export    | BUILT; verifier FAIL (Finding 2) → **fixed** in a161298                    |
-| 8   | widgets            | BUILT; rendered Finding 1's false verdict → **fixed** in c721a15           |
-| 9   | verification       | Ran once, returned FAIL. **Must run again** after the open findings close. |
+| #   | Track              | State                                                                 |
+| --- | ------------------ | --------------------------------------------------------------------- |
+| 1   | schema + storage   | BUILT, on main                                                        |
+| 2   | units / conversion | BUILT, on main                                                        |
+| 3   | Open Food Facts    | BUILT, live-validated historically; re-run needs `.env`               |
+| 4   | USDA FDC           | BUILT, live-validated historically; re-run needs `.env`               |
+| 5   | resolution + MCP   | BUILT, on main                                                        |
+| 6   | summaries + goals  | BUILT, on main                                                        |
+| 7   | import / export    | BUILT, on main                                                        |
+| 8   | widgets            | BUILT, on main                                                        |
+| 9   | verification       | Ran once (FAIL, then fixes). **Must run again.** Not done in this PR. |
+| —   | public truth       | This PR: copy, guards, boot preflight. Does not close verification.   |
 
 ---
 
@@ -267,6 +269,8 @@ full adversarial pass once Finding 3 closes. Attack the range-scaling shape
 are new logic written under time pressure at the end of a session. Brief it with the three bugs already found in this epic as
 calibration — they are listed in "Bugs this epic actually found" below.
 
+**This PR did not perform that pass.**
+
 ### 4. Small, known, unfixed
 
 - The import widget's height re-report after its now-wider preview table was
@@ -289,14 +293,20 @@ calibration — they are listed in "Bugs this epic actually found" below.
 
 **All six E2E release scenarios, the clean-database migration test, and Agent
 1's real round-trip gate are formally UNMET**, and no amount of code work
-changes that. Every one of them writes a meal and reads it back.
+changes that. Every one of them writes a meal and reads it back. This PR did
+not change that status.
 
-Two migrations have **never been applied to any database**:
+Two migrations have **never been applied to any database** in the environments
+this epic has used for release validation:
 
 ```
 supabase/migrations/20260819120000_micronutrient_expansion.sql   (12 columns + nutrient_provenance jsonb)
 supabase/migrations/20260819130000_micronutrient_goals.sql       (10 min_/max_ goal columns)
 ```
+
+The boot preflight added in this PR warns when a hosted Supabase project is
+missing either migration; it does not apply them and does not replace the E2E
+gate.
 
 To unblock, put a **test** Supabase project (never production) in `.env`:
 
@@ -310,15 +320,16 @@ already lists the six scenarios and the evidence format. Do not record any of
 them as passed on the strength of unit tests — they exist precisely because
 unit tests cannot see a `numeric` column's precision or a jsonb round trip.
 
-What IS proven without a database, and re-verified independently today:
+What IS proven without a database when credentials exist:
 
 ```bash
 bun run validate:off     # 3 real barcodes, live, every value hand-derived
 bun run validate:usda    # 5 real FDC records, live, scaling checked outside the scaler
 ```
 
-Both pass. `validate:usda --capture` refreshes fixtures; without the flag it
-leaves them alone (it used to rewrite the evidence it was validating).
+Both have passed historically. This workspace could not re-run them (no `.env`).
+`validate:usda --capture` refreshes fixtures; without the flag it leaves them
+alone (it used to rewrite the evidence it was validating).
 
 ---
 

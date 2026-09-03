@@ -11,6 +11,7 @@ import { handleMcp } from "./mcp.js";
 import { startExportCleanup } from "./export.js";
 import {
     getLandingStats,
+    getSupabase,
     isPostgresBackend,
     type LandingStats,
 } from "./supabase.js";
@@ -18,6 +19,7 @@ import { readLocalExport } from "./pg.js";
 import { registerDiscoveryRoutes } from "./discovery.js";
 import { maskIp } from "./net.js";
 import { warmWidgets } from "./widgets.js";
+import { warnIfMicronutrientMigrationsMissing } from "./preflight.js";
 
 const app = new Hono();
 
@@ -295,6 +297,19 @@ await warmWidgets();
 
 // Periodically delete expired meal-export files from the storage bucket.
 startExportCleanup();
+
+// Hosted Supabase without the micronutrient migrations fails meal writes with
+// an opaque PostgREST error. Fire-and-forget — do not await: a slow or
+// unreachable PostgREST must not delay the port bind or /health. Warn inside
+// the probe, never throw. Skip when credentials are absent so a credential-less
+// process can still serve static pages.
+if (
+    !isPostgresBackend() &&
+    process.env.SUPABASE_URL &&
+    process.env.SUPABASE_SECRET_KEY
+) {
+    void warnIfMicronutrientMigrationsMissing(getSupabase()).catch(() => {});
+}
 
 // In Postgres mode the export download link is built from PUBLIC_BASE_URL. The
 // loopback fallback still serves the file, but the URL is one the user cannot

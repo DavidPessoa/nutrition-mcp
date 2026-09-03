@@ -115,7 +115,7 @@
                         "name": "What can I track?",
                         "acceptedAnswer": {
                             "@type": "Answer",
-                            "text": "Calories, protein, carbohydrates, fat, fiber, total sugar, and water for every entry — described in plain language or pulled from a product barcode via Open Food Facts. Caffeine is tracked too, in milligrams, the unit every label uses, and it adds no calories. Alcohol is tracked as well, in grams of pure ethanol, once you switch it on. You can also log your body weight in kg or lb and track trends toward a target weight. View daily summaries, query meals by date range, update or delete past entries, set goals, and monitor trends over time."
+                            "text": "Calories, protein, carbohydrates, fat, fiber, total sugar, and water for every entry — described in plain language, pulled from a product barcode via Open Food Facts, or looked up as a generic whole food in USDA FoodData Central. Twelve micronutrients are tracked when a real source states them: saturated fat, trans fat, and added sugar in grams; sodium, potassium, cholesterol, calcium, iron, magnesium, and vitamin C in milligrams; vitamin A in µg RAE and vitamin D in µg. Micronutrients are never estimated — a value the model invents is refused by the server, not stored. A day where only some meals carry a micronutrient reports what is known and how much of the day it covers, never an incomplete total as the day's true intake. Ten of those twelve have daily goals (maximums for saturated fat, sodium, and cholesterol; minimums for potassium, calcium, iron, magnesium, vitamins A, C, and D); trans fat and added sugar have no goal. Caffeine is tracked too, in milligrams, the unit every label uses, and it adds no calories. Alcohol is tracked as well, in grams of pure ethanol, once you switch it on. You can also log your body weight in kg or lb and track trends toward a target weight. View daily summaries, query meals by date range, update or delete past entries, set goals, and monitor trends over time."
                         }
                     },
                     {
@@ -1012,7 +1012,7 @@
                         ></span>
                         <span class="tools-cta-text">
                             <strong>Curious what it can actually do?</strong>
-                            Browse all 38 tools — logging, barcodes, water,
+                            Browse all 39 tools — logging, barcodes, water,
                             weight, goals, and trends — with a description and
                             an example prompt for each.
                         </span>
@@ -2955,7 +2955,10 @@
                             <p>
                                 Describe what you ate — your AI estimates
                                 calories, protein, carbs, fat, fiber, total
-                                sugar, and caffeine in milligrams and logs it.
+                                sugar, and caffeine in milligrams and logs them.
+                                Micronutrients are stored only from a label,
+                                barcode, USDA lookup, restaurant nutrition, a
+                                value you state, or an import — never estimated.
                             </p>
                         </article>
                         <article class="card feature">
@@ -2965,8 +2968,8 @@
                             <h3>Scan a barcode</h3>
                             <p>
                                 Snap or type a product barcode and pull macros,
-                                fiber, and sugar from Open Food Facts, scaled to
-                                how much you ate.
+                                fiber, sugar, and micronutrients from Open Food
+                                Facts, scaled to how much you ate.
                             </p>
                         </article>
                         <article class="card feature">
@@ -2977,8 +2980,11 @@
                             <p>
                                 Set daily calorie, macro, fiber, and water
                                 targets — plus sugar, caffeine, and alcohol
-                                limits to stay under — and check live progress
-                                toward them.
+                                limits to stay under, and micronutrient goals
+                                (maximums for saturated fat, sodium, and
+                                cholesterol; minimums for potassium, calcium,
+                                iron, magnesium, and vitamins A, C, and D) — and
+                                check live progress toward them.
                             </p>
                         </article>
                         <article class="card feature">
@@ -3333,8 +3339,25 @@
                             <p>
                                 Calories, protein, carbohydrates, fat, fiber,
                                 total sugar, and water for every entry —
-                                described in plain language or pulled from a
-                                product barcode via Open Food Facts. Caffeine is
+                                described in plain language, pulled from a
+                                product barcode via Open Food Facts, or looked
+                                up as a generic whole food in USDA FoodData
+                                Central. Twelve micronutrients are tracked when
+                                a real source states them: saturated fat, trans
+                                fat, and added sugar in grams; sodium,
+                                potassium, cholesterol, calcium, iron,
+                                magnesium, and vitamin C in milligrams; vitamin
+                                A in µg RAE and vitamin D in µg. Micronutrients
+                                are never estimated — a value the model invents
+                                is refused by the server, not stored. A day
+                                where only some meals carry a micronutrient
+                                reports what is known and how much of the day it
+                                covers, never an incomplete total as the day's
+                                true intake. Ten of those twelve have daily
+                                goals (maximums for saturated fat, sodium, and
+                                cholesterol; minimums for potassium, calcium,
+                                iron, magnesium, vitamins A, C, and D); trans
+                                fat and added sugar have no goal. Caffeine is
                                 tracked too, in milligrams, the unit every label
                                 uses, and it adds no calories. Alcohol is
                                 tracked as well, in grams of pure ethanol, once
