@@ -1484,11 +1484,12 @@ export async function updateWeight(
         .update(update)
         .eq("id", id)
         .eq("user_id", userId)
-        .select()
-        .single();
+        .select();
 
     if (error) throw new Error(`Failed to update weight: ${error.message}`);
-    return data as WeightEntry;
+    if (!data || data.length === 0)
+        throw new Error("Failed to update weight: entry not found");
+    return data[0] as WeightEntry;
 }
 
 /** Returns true if an entry was deleted, false if no matching row was found. */

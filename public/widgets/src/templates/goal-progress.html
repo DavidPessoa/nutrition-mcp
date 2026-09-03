@@ -334,32 +334,7 @@
 
             /*@include shared/micros.js@*/
 
-            const MONTHS = [
-                "Jan",
-                "Feb",
-                "Mar",
-                "Apr",
-                "May",
-                "Jun",
-                "Jul",
-                "Aug",
-                "Sep",
-                "Oct",
-                "Nov",
-                "Dec",
-            ];
-
-            // "2026-07-10" → "10 Jul", for the header line where the year is
-            // noise. Split on the string rather than through Date: the payload
-            // is a calendar date already resolved in the user's timezone, and
-            // new Date("2026-07-10") is UTC midnight, which renders as the 9th
-            // for anyone west of Greenwich. Anything not date-shaped is passed
-            // through untouched.
-            function shortDate(iso) {
-                const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(iso || ""));
-                if (!m) return String(iso || "");
-                return `${Number(m[3])} ${MONTHS[Number(m[2]) - 1]}`;
-            }
+            /*@include shared/date.js@*/
 
             // The weight section: one compact row on the strip's own idiom
             // (label · track · figure), or one line of text when there is
@@ -473,16 +448,17 @@
                     return;
                 }
 
+                const calLabel = isToday(data.date)
+                    ? "Calories today"
+                    : "Calories · " + shortDate(data.date);
                 const panel = macroPanel(
                     totals,
                     data.goals,
                     undefined,
                     data.meals,
                     // Nothing sits between the header line and the strip, so no
-                    // leading hairline; the label above the calorie figure is
-                    // the default "Calories today", which is exactly what this
-                    // widget shows.
-                    { drinkUnit: data.drink_unit },
+                    // leading hairline.
+                    { drinkUnit: data.drink_unit, calLabel },
                 );
 
                 // The day itself and what was logged on it — the context the

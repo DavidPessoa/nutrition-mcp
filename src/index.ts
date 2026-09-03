@@ -7,7 +7,7 @@ import {
     rateLimit,
     banRepeatAuthFailures,
 } from "./middleware.js";
-import { handleMcp } from "./mcp.js";
+import { handleMcp, closeMcpHandler } from "./mcp.js";
 import { startExportCleanup } from "./export.js";
 import {
     getLandingStats,
@@ -40,8 +40,9 @@ app.use("*", async (c, next) => {
     if (c.get("suppressAccessLog")) return;
     const ms = Math.round(performance.now() - start);
     const ip = maskIp(c.req.header("x-forwarded-for"));
+    const era = c.get("mcpEra");
     console.log(
-        `[req] ${c.req.method} ${path} ${c.res.status} ${ms}ms ip=${ip}`,
+        `[req] ${c.req.method} ${path} ${c.res.status} ${ms}ms ip=${ip}${era ? ` era=${era}` : ""}`,
     );
 });
 
@@ -86,14 +87,17 @@ app.use(
             return allowed.includes(origin) ? origin : null;
         },
         allowMethods: ["GET", "POST", "DELETE", "OPTIONS"],
-        allowHeaders: [
-            "Content-Type",
-            "Authorization",
-            "Mcp-Session-Id",
-            "Mcp-Protocol-Version",
-            "Last-Event-ID",
-            "Accept",
-        ],
+        // allowHeaders is deliberately omitted so Hono reflects the preflight's
+        // Access-Control-Request-Headers verbatim (and appends
+        // Vary: Access-Control-Request-Headers). A static list structurally
+        // cannot work here: the 2026-07-28 revision defines an open-ended
+        // Mcp-Param-* family (sent whenever a tool declares x-mcp-header), and
+        // CORS allow-lists match exact names, not prefixes — so a pinned list
+        // silently breaks any such tool for browser clients. Reflection adds no
+        // exposure in this configuration: `origin` above is a strict allowlist,
+        // so only origins we already trust get an Allow-Origin at all, and
+        // credentials is false, so no cookies or Authorization are attached by
+        // the browser on our behalf.
         exposeHeaders: [
             "Mcp-Session-Id",
             "Mcp-Protocol-Version",
@@ -103,6 +107,45 @@ app.use(
         maxAge: 86400,
     }),
 );
+
+// Shutdown gate. The signal handlers at the bottom of this file flip
+// `shuttingDown`, and from that instant every request is refused here — before
+// auth, before rate limiting, before any route. This gate, not closeMcpHandler,
+// is what makes a deploy clean: closing the SDK handler flips it to "closed"
+// while Bun.serve keeps accepting connections, so without the gate every POST
+// /mcp in the shutdown window fell through to the onError catch-all as
+// {"error":"internal_server_error"} 500 ("This MCP handler has been closed").
+// A 500 reads to a connector as a tool failure; 503 + Retry-After reads as
+// "this instance is going away, come back" — which is the truth, and on a
+// DigitalOcean deploy (SIGTERM) that window hits real users.
+// Registered after CORS so the refusal still carries Allow-Origin (a browser
+// client sees the 503 rather than an opaque CORS error) and is still access
+// logged. OPTIONS preflights never reach it: cors() answers those itself.
+let shuttingDown = false;
+
+export function setShuttingDownForTest(value: boolean): void {
+    shuttingDown = value;
+}
+
+app.use("*", async (c, next) => {
+    if (!shuttingDown) return next();
+    const path = new URL(c.req.url).pathname;
+    if (path === "/mcp") {
+        return c.json(
+            {
+                jsonrpc: "2.0",
+                id: null,
+                error: {
+                    code: -32000,
+                    message: "Server is shutting down, retry shortly",
+                },
+            },
+            503,
+            { "Retry-After": "1" },
+        );
+    }
+    return c.json({ error: "shutting_down" }, 503, { "Retry-After": "1" });
+});
 
 // OAuth discovery metadata (MCP spec requirement) — protected-resource and
 // authorization-server documents, served at the root and at the path-folded
@@ -289,49 +332,46 @@ app.onError((_err, c) => {
 
 const port = parseInt(process.env.PORT || "8080");
 
-console.log(`Nutrition MCP server listening on 0.0.0.0:${port}`);
-
-// Assemble every MCP Apps widget from its source partials up front, so a broken
-// @include/partial fails fast at boot rather than on a client's first tool call.
-await warmWidgets();
-
-// Periodically delete expired meal-export files from the storage bucket.
-startExportCleanup();
-
-// Hosted Supabase without the micronutrient migrations fails meal writes with
-// an opaque PostgREST error. Fire-and-forget — do not await: a slow or
-// unreachable PostgREST must not delay the port bind or /health. Warn inside
-// the probe, never throw. Skip when credentials are absent so a credential-less
-// process can still serve static pages.
-if (
-    !isPostgresBackend() &&
-    process.env.SUPABASE_URL &&
-    process.env.SUPABASE_SECRET_KEY
-) {
-    void warnIfMicronutrientMigrationsMissing(getSupabase()).catch(() => {});
-}
-
-// In Postgres mode the export download link is built from PUBLIC_BASE_URL. The
-// loopback fallback still serves the file, but the URL is one the user cannot
-// open — a silent dead end that reads as a broken export rather than a missing
-// variable, so say so at boot instead.
-if (isPostgresBackend() && !process.env.PUBLIC_BASE_URL) {
-    console.warn(
-        "PUBLIC_BASE_URL is unset: export download links will point at 127.0.0.1 and will not work outside this host.",
-    );
-}
-
-// Exit cleanly on shutdown signals (e.g. deploys). /mcp is stateless — no
-// server-side sessions are held, so there is nothing to tear down; just exit.
-let shuttingDown = false;
 function shutdown(signal: string): void {
     if (shuttingDown) return;
     shuttingDown = true;
     console.log(`Received ${signal}, shutting down...`);
-    process.exit(0);
+    void Promise.race([
+        closeMcpHandler(),
+        new Promise((r) => setTimeout(r, 2000)),
+    ])
+        .catch((err) => console.error("Error closing MCP handler:", err))
+        .finally(() => process.exit(0));
 }
-process.on("SIGTERM", () => shutdown("SIGTERM"));
-process.on("SIGINT", () => shutdown("SIGINT"));
+
+if (import.meta.main) {
+    console.log(`Nutrition MCP server listening on 0.0.0.0:${port}`);
+
+    await warmWidgets();
+
+    startExportCleanup();
+
+    if (
+        !isPostgresBackend() &&
+        process.env.SUPABASE_URL &&
+        process.env.SUPABASE_SECRET_KEY
+    ) {
+        void warnIfMicronutrientMigrationsMissing(getSupabase()).catch(
+            () => {},
+        );
+    }
+
+    if (isPostgresBackend() && !process.env.PUBLIC_BASE_URL) {
+        console.warn(
+            "PUBLIC_BASE_URL is unset: export download links will point at 127.0.0.1 and will not work outside this host.",
+        );
+    }
+
+    process.on("SIGTERM", () => shutdown("SIGTERM"));
+    process.on("SIGINT", () => shutdown("SIGINT"));
+}
+
+export { app };
 
 export default {
     port,

@@ -452,6 +452,9 @@ function macroCtxOf(vals, goal, wording, meals, opts) {
         // unrecognised unit: "us" is what src/mcp.ts uses for an
         // alcohol-tracking user with no saved preference.
         drinkUnit: DRINK_GRAMS[unit] ? unit : "us",
+        // goal-progress and meal-logged pass this explicitly when the date is
+        // today and a day-scoped label otherwise, so the ring never claims a
+        // day it is not; nutrition-summary and trends always pass their own.
         calLabel: (opts && opts.calLabel) || "Calories today",
         // Set by a widget that puts something of its own — a chart, a range
         // toggle's chart — between the header line and the strip, so the strip

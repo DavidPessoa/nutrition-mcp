@@ -1,5 +1,11 @@
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
+import {
+    createMcpHandler,
+    McpServer,
+    ProtocolError,
+    JSONRPC_VERSION,
+    type McpRequestContext,
+} from "@modelcontextprotocol/server";
+import { getBaseUrl } from "./url.js";
 import { z } from "zod";
 import type { Context } from "hono";
 import {
@@ -45,7 +51,11 @@ import {
     type WaterEntry,
     type WeightEntry,
 } from "./supabase.js";
-import { DELETED_ACCOUNT_ANALYTICS_ID, withAnalytics } from "./analytics.js";
+import {
+    DELETED_ACCOUNT_ANALYTICS_ID,
+    withAnalytics,
+    categorizeError,
+} from "./analytics.js";
 import {
     todayInTz,
     validateTz,
@@ -523,7 +533,7 @@ const DRINK_UNIT_FIELD = z.enum(["us", "uk"]).nullable();
 // (public/widgets/meal-logged.html). Both declare this identical output shape
 // and both build their payload via buildMealProgress() below, so the widget can
 // render either result; `action` only changes the header wording.
-const MEAL_PROGRESS_OUTPUT_SCHEMA = {
+const MEAL_PROGRESS_OUTPUT_SCHEMA = z.object({
     action: z.enum(["logged", "updated"]),
     date: z.string(),
     drink_unit: DRINK_UNIT_FIELD,
@@ -545,7 +555,7 @@ const MEAL_PROGRESS_OUTPUT_SCHEMA = {
     goals: GOALS_ITEM.nullable(),
     totals: TOTALS_ITEM,
     meals: z.array(MEAL_BREAKDOWN_ITEM),
-};
+});
 
 // Both payloads carry alcohol as a nullable number for the same reason
 // MEAL_BREAKDOWN_ITEM does. These two builders are the only places a goals or
@@ -778,7 +788,7 @@ const IMPORT_ROW_SCHEMA = z.object({
 
 // Real content: the import widget needs all of this. With no structuredContent
 // the bridge never paints and the iframe sits on its loading state forever.
-export const START_IMPORT_OUTPUT_SCHEMA = {
+export const START_IMPORT_OUTPUT_SCHEMA = z.object({
     tz: z.string(),
     tz_configured: z.boolean(),
     today: z.string(),
@@ -792,7 +802,7 @@ export const START_IMPORT_OUTPUT_SCHEMA = {
     // who had asked never to see alcohol — the exact scenario the opt-in
     // exists to prevent. What null makes the widget do: see startImportPayload.
     drink_unit: DRINK_UNIT_FIELD,
-};
+});
 
 export function startImportPayload(opts: {
     tz: string;
@@ -2115,7 +2125,7 @@ export function registerTools(
                 idempotentHint: false,
                 openWorldHint: false,
             },
-            inputSchema: {
+            inputSchema: z.object({
                 description: z.string().describe("What was eaten"),
                 meal_type: z
                     .enum(["breakfast", "lunch", "dinner", "snack"])
@@ -2180,7 +2190,7 @@ export function registerTools(
                     .describe(
                         "Optional stable key for safe retries. You normally don't need to set this: when omitted, the server derives a stable key from the meal content (including logged_at), so replaying the identical call returns the original meal instead of duplicating it. Pass a UUID only to force-override that behavior. Do NOT reuse a key for genuinely different meals.",
                     ),
-            },
+            }),
             outputSchema: MEAL_PROGRESS_OUTPUT_SCHEMA,
             // Link the tool to its progress UI (MCP Apps). update_meal reuses
             // the SAME widget; see buildMealProgress / meal-logged.html. The
@@ -2268,7 +2278,7 @@ export function registerTools(
             title: "Import Meals from a File",
             description:
                 "Open an importer the user can drive themselves to load a meal-history export (MyFitnessPal, Cronometer, Lose It!, MacroFactor). Prefer this over bulk_import_meals whenever the user has an actual file: the importer reads and maps it in the browser, so the rows never pass through you and cannot be mistranscribed, and it handles column mapping, batching and retries. Call it when the user says they want to import, upload, or bring in their history from another app. Fall back to bulk_import_meals if the user cannot use the importer, if they have already pasted the data into the conversation, or if the importer reports that this client will not let it save. If the user has alcohol tracking off but wants alcohol from the file, turn it on with set_alcohol_tracking BEFORE importing: the importer skips the alcohol column while tracking is off, and re-importing afterwards will not backfill it.",
-            inputSchema: {},
+            inputSchema: z.object({}),
             outputSchema: START_IMPORT_OUTPUT_SCHEMA,
             annotations: {
                 title: "Import Meals from a File",
@@ -2316,7 +2326,7 @@ export function registerTools(
                 " rows per call: split larger files by date range, keeping all rows for one calendar date in the same call. If a single calendar date alone has more than " +
                 MAX_ROWS_PER_CALL +
                 " rows, that date has to be split across more than one call — the row cap is a hard server-side limit and wins over the same-call grouping. Doing so loosens deduplication for that date only: two rows in it that are byte-identical (same description, meal_type, calories, protein_g, carbs_g, fat_g, notes and logged_at) may collapse into one if they land in different calls, so prefer keeping duplicate-looking rows together in one call when you have to split. Every nutrient value in a row must be TRANSCRIBED from the source: this tool restores history the user already has, it is not a way to write nutrition you worked out yourself. Never estimate a micronutrient here — sodium, iron, vitamin D and the rest are stored only when the file states them, and a row declaring one as a model estimate has that value refused exactly as log_meal would (an invented micronutrient is indistinguishable from a measured one, which is why no tool will store one). Leave nutrient_provenance out unless the file itself carried that column. If you want to log a meal you are estimating, that is log_meal. If the file is an export from THIS server (its header starts with an id column), map that column to source_id on every row, and map its timezone column to timezone on every row too — source_id is what makes restoring a backup a no-op instead of doubling the user's history, and timezone is what makes a restored row resolve at the local time it was actually recorded rather than the account's current timezone.",
-            inputSchema: {
+            inputSchema: z.object({
                 meals: z
                     .array(IMPORT_ROW_SCHEMA)
                     .describe(
@@ -2363,7 +2373,7 @@ export function registerTools(
                     .describe(
                         "Which app the file came from, e.g. myfitnesspal. Used to label rows that have no food name of their own.",
                     ),
-            },
+            }),
             outputSchema: BULK_IMPORT_OUTPUT_SCHEMA,
             annotations: {
                 title: "Bulk Import Meals",
@@ -2497,22 +2507,25 @@ export function registerTools(
         {
             title: "Look Up Barcode",
             description:
-                "Look up a packaged product's label nutrition by barcode via Open Food Facts. The figures come from the product's own label as transcribed by the Open Food Facts community, so they beat estimating — but they are not verified by this server and can be wrong, stale, or missing entirely. Pass the barcode digits (EAN/UPC, 8–14 digits). The user can type them, or you can read them from a photo of the package — transcribe the human-readable digits printed beneath the barcode. Returns the product name, serving, and macros, which you can then pass to log_meal scaled to the amount eaten. If no product is found, fall back to web search or estimation. Two gaps to close yourself before logging: a fiber or sugar figure shown as n/a is missing data rather than a zero, so estimate it and pass it anyway; and Open Food Facts carries no caffeine at all, so for a coffee, tea, cola, energy drink or other caffeinated product get caffeine_mg from the label or a web search.",
+                "Look up a packaged product's label nutrition by barcode via Open Food Facts. The figures come from the product's own label as transcribed by the Open Food Facts community, so they beat estimating — but they are not verified by this server and can be wrong, stale, or missing entirely. Pass the barcode digits (EAN/UPC, 8–14 digits). The user can type them, or you can read them from a photo of the package — transcribe the human-readable digits printed beneath the barcode. Returns the product name, serving, and macros, which you can then pass to log_meal scaled to the amount eaten. When Open Food Facts has computed them, it also returns the Nutri-Score (A–E, a nutritional-quality grade) and NOVA group (1–4, how processed the product is) — pass these along if the user is asking about the product's quality, not just its macros; they're omitted, not \"n/a\", when OFF hasn't computed one for that product. If no product is found, fall back to web search or estimation. Two gaps to close yourself before logging: a fiber or sugar figure shown as n/a is missing data rather than a zero, so estimate it and pass it anyway; and Open Food Facts carries no caffeine at all, so for a coffee, tea, cola, energy drink or other caffeinated product get caffeine_mg from the label or a web search.",
             annotations: {
                 readOnlyHint: true,
                 destructiveHint: false,
                 idempotentHint: true,
                 openWorldHint: true,
             },
-            inputSchema: {
+            inputSchema: z.object({
                 barcode: z
                     .string()
                     .describe(
                         "Product barcode digits (EAN-8/13, UPC-A/E, or GTIN-14). Spaces and separators are ignored.",
                     ),
-            },
+            }),
         },
         async ({ barcode }) => {
+            // Written by the handler, read by `outcome` after the handler
+            // completes — not read concurrently with the handler running.
+            let offFailure: string | null = null;
             return withAnalytics(
                 "lookup_barcode",
                 async () => {
@@ -2534,6 +2547,11 @@ export function registerTools(
                     } catch (err) {
                         const msg =
                             err instanceof Error ? err.message : String(err);
+                        const category = categorizeError(err);
+                        offFailure =
+                            category === "unknown"
+                                ? "external_api_error"
+                                : category;
                         return {
                             content: [
                                 {
@@ -2566,6 +2584,12 @@ export function registerTools(
                 },
                 { userId },
                 { barcode },
+                {
+                    outcome: () =>
+                        offFailure
+                            ? { success: false, errorCategory: offFailure }
+                            : { success: true },
+                },
             );
         },
     );
@@ -2582,7 +2606,7 @@ export function registerTools(
                 idempotentHint: true,
                 openWorldHint: true,
             },
-            inputSchema: {
+            inputSchema: z.object({
                 query: z
                     .string()
                     .optional()
@@ -2605,7 +2629,7 @@ export function registerTools(
                     .describe(
                         "How many grams were eaten. Only meaningful with fdc_id: the values come back scaled to this amount. Omitted, the food's per-100 g figures are returned as-is.",
                     ),
-            },
+            }),
         },
         async ({ query, fdc_id, grams }) => {
             return withAnalytics(
@@ -2736,9 +2760,9 @@ export function registerTools(
                 idempotentHint: true,
                 openWorldHint: false,
             },
-            inputSchema: {
+            inputSchema: z.object({
                 date: z.string().describe("Date in YYYY-MM-DD format"),
-            },
+            }),
         },
         async ({ date }) => {
             return withAnalytics(
@@ -2779,10 +2803,10 @@ export function registerTools(
                 idempotentHint: true,
                 openWorldHint: false,
             },
-            inputSchema: {
+            inputSchema: z.object({
                 start_date: z.string().describe("Start date (YYYY-MM-DD)"),
                 end_date: z.string().describe("End date (YYYY-MM-DD)"),
-            },
+            }),
         },
         async ({ start_date, end_date }) => {
             return withAnalytics(
@@ -2853,7 +2877,7 @@ export function registerTools(
                 idempotentHint: true,
                 openWorldHint: false,
             },
-            inputSchema: {
+            inputSchema: z.object({
                 queries: z
                     .array(z.string().min(1))
                     .min(1)
@@ -2875,7 +2899,7 @@ export function registerTools(
                     .max(100)
                     .optional()
                     .describe("Max matching entries to analyze (default 50)."),
-            },
+            }),
         },
         async ({ queries, days, limit }) => {
             return withAnalytics(
@@ -3063,11 +3087,11 @@ export function registerTools(
                 idempotentHint: true,
                 openWorldHint: false,
             },
-            inputSchema: {
+            inputSchema: z.object({
                 start_date: z.string().describe("Start date (YYYY-MM-DD)"),
                 end_date: z.string().describe("End date (YYYY-MM-DD)"),
-            },
-            outputSchema: {
+            }),
+            outputSchema: z.object({
                 start_date: z.string(),
                 end_date: z.string(),
                 logged_days: z.number(),
@@ -3109,7 +3133,7 @@ export function registerTools(
                     }),
                 ),
                 meals: z.array(MEAL_BREAKDOWN_ITEM),
-            },
+            }),
             // Link the tool to its dashboard UI (MCP Apps).
             ...uiMeta(SUMMARY_WIDGET_URI),
         },
@@ -3343,7 +3367,7 @@ export function registerTools(
                 idempotentHint: true,
                 openWorldHint: false,
             },
-            inputSchema: {
+            inputSchema: z.object({
                 // Bounded in the schema for the same reason as log_meal, with
                 // the gram ceiling set by the numeric(6,2) goal columns rather
                 // than by what a plausible meal carries.
@@ -3409,7 +3433,7 @@ export function registerTools(
                         "Unit for target_weight. Defaults to the user's preferred weight unit.",
                     ),
                 ...micronutrientGoalSchema(),
-            },
+            }),
         },
         async (args) => {
             return withAnalytics(
@@ -3551,13 +3575,13 @@ export function registerTools(
                 idempotentHint: true,
                 openWorldHint: false,
             },
-            inputSchema: {
+            inputSchema: z.object({
                 date: z
                     .string()
                     .optional()
                     .describe("Date in YYYY-MM-DD format. Defaults to today."),
-            },
-            outputSchema: {
+            }),
+            outputSchema: z.object({
                 date: z.string(),
                 meal_count: z.number(),
                 water_entries: z.number(),
@@ -3578,7 +3602,7 @@ export function registerTools(
                     })
                     .nullable(),
                 meals: z.array(MEAL_BREAKDOWN_ITEM),
-            },
+            }),
             // Link the tool to its progress UI (MCP Apps).
             ...uiMeta(GOAL_PROGRESS_WIDGET_URI),
         },
@@ -3708,9 +3732,9 @@ export function registerTools(
                 idempotentHint: true,
                 openWorldHint: false,
             },
-            inputSchema: {
+            inputSchema: z.object({
                 id: z.string().describe("UUID of the meal to delete"),
-            },
+            }),
         },
         async ({ id }) => {
             return withAnalytics(
@@ -3750,7 +3774,7 @@ export function registerTools(
                 idempotentHint: true,
                 openWorldHint: false,
             },
-            inputSchema: {
+            inputSchema: z.object({
                 id: z.string().describe("UUID of the meal to update"),
                 description: z.string().optional(),
                 meal_type: z
@@ -3788,7 +3812,7 @@ export function registerTools(
                     .optional()
                     .describe("When the meal was eaten. " + LOGGED_AT_FORMS),
                 notes: z.string().optional(),
-            },
+            }),
             outputSchema: MEAL_PROGRESS_OUTPUT_SCHEMA,
             // Reuses the SAME meal-logged widget as log_meal (see
             // buildMealProgress / meal-logged.html); `action: "updated"` just
@@ -3852,7 +3876,7 @@ export function registerTools(
                 idempotentHint: false,
                 openWorldHint: false,
             },
-            inputSchema: {
+            inputSchema: z.object({
                 amount_ml: z.coerce
                     .number()
                     .int()
@@ -3878,7 +3902,7 @@ export function registerTools(
                     .describe(
                         "Optional stable key for safe retries. You normally don't need to set this: when omitted, the server derives a stable key from the entry content (including logged_at), so replaying the identical call returns the original entry instead of duplicating it. Pass a UUID only to force-override that behavior. Do NOT reuse a key for genuinely different sips.",
                     ),
-            },
+            }),
         },
         async (args) => {
             return withAnalytics(
@@ -3973,9 +3997,9 @@ export function registerTools(
                 idempotentHint: true,
                 openWorldHint: false,
             },
-            inputSchema: {
+            inputSchema: z.object({
                 date: z.string().describe("Date in YYYY-MM-DD format"),
-            },
+            }),
         },
         async ({ date }) => {
             return withAnalytics(
@@ -4024,9 +4048,9 @@ export function registerTools(
                 idempotentHint: true,
                 openWorldHint: false,
             },
-            inputSchema: {
+            inputSchema: z.object({
                 id: z.string().describe("UUID of the water entry to delete"),
-            },
+            }),
         },
         async ({ id }) => {
             return withAnalytics(
@@ -4061,7 +4085,7 @@ export function registerTools(
                 idempotentHint: false,
                 openWorldHint: false,
             },
-            inputSchema: {
+            inputSchema: z.object({
                 weight: z.coerce
                     .number()
                     .positive()
@@ -4094,7 +4118,7 @@ export function registerTools(
                     .describe(
                         "Optional stable key for safe retries. You normally don't need to set this: when omitted, the server derives a stable key from the entry content (including logged_at), so replaying the identical call returns the original entry instead of duplicating it. Pass a UUID only to force-override that behavior.",
                     ),
-            },
+            }),
         },
         async (args) => {
             return withAnalytics(
@@ -4199,9 +4223,9 @@ export function registerTools(
                 idempotentHint: true,
                 openWorldHint: false,
             },
-            inputSchema: {
+            inputSchema: z.object({
                 date: z.string().describe("Date in YYYY-MM-DD format"),
-            },
+            }),
         },
         async ({ date }) => {
             return withAnalytics(
@@ -4253,10 +4277,10 @@ export function registerTools(
                 idempotentHint: true,
                 openWorldHint: false,
             },
-            inputSchema: {
+            inputSchema: z.object({
                 start_date: z.string().describe("Start date (YYYY-MM-DD)"),
                 end_date: z.string().describe("End date (YYYY-MM-DD)"),
-            },
+            }),
         },
         async ({ start_date, end_date }) => {
             return withAnalytics(
@@ -4336,7 +4360,7 @@ export function registerTools(
                 idempotentHint: true,
                 openWorldHint: false,
             },
-            inputSchema: {
+            inputSchema: z.object({
                 days: z.coerce
                     .number()
                     .int()
@@ -4348,8 +4372,8 @@ export function registerTools(
                     .string()
                     .optional()
                     .describe("Window end date YYYY-MM-DD (default today)."),
-            },
-            outputSchema: {
+            }),
+            outputSchema: z.object({
                 end_date: z.string(),
                 unit: z.string(),
                 target: z.number().nullable(),
@@ -4362,7 +4386,7 @@ export function registerTools(
                         weight: z.number(),
                     }),
                 ),
-            },
+            }),
             // Link the tool to its interactive weight-trends UI (MCP Apps).
             ...uiMeta(WEIGHT_TRENDS_WIDGET_URI),
         },
@@ -4472,7 +4496,7 @@ export function registerTools(
                 idempotentHint: true,
                 openWorldHint: false,
             },
-            inputSchema: {
+            inputSchema: z.object({
                 id: z.string().describe("UUID of the weight entry to update"),
                 weight: z.coerce
                     .number()
@@ -4492,7 +4516,7 @@ export function registerTools(
                         "When the weight was measured. " + LOGGED_AT_FORMS,
                     ),
                 notes: z.string().optional(),
-            },
+            }),
         },
         async ({ id, weight, unit, logged_at, notes }) => {
             return withAnalytics(
@@ -4551,9 +4575,9 @@ export function registerTools(
                 idempotentHint: true,
                 openWorldHint: false,
             },
-            inputSchema: {
+            inputSchema: z.object({
                 id: z.string().describe("UUID of the weight entry to delete"),
-            },
+            }),
         },
         async ({ id }) => {
             return withAnalytics(
@@ -4588,14 +4612,14 @@ export function registerTools(
                 idempotentHint: true,
                 openWorldHint: false,
             },
-            inputSchema: {
+            inputSchema: z.object({
                 unit: z
                     .enum(["kg", "lb"])
                     .nullable()
                     .describe(
                         "Preferred weight unit: 'kg' or 'lb'. Pass null to clear the preference.",
                     ),
-            },
+            }),
         },
         async ({ unit }) => {
             return withAnalytics(
@@ -4671,13 +4695,13 @@ export function registerTools(
                 idempotentHint: true,
                 openWorldHint: false,
             },
-            inputSchema: {
+            inputSchema: z.object({
                 enabled: z
                     .boolean()
                     .describe(
                         "true to show widgets (default), false for text-only responses with no widget.",
                     ),
-            },
+            }),
         },
         async ({ enabled }) => {
             return withAnalytics(
@@ -4748,7 +4772,7 @@ export function registerTools(
                 idempotentHint: true,
                 openWorldHint: false,
             },
-            inputSchema: {
+            inputSchema: z.object({
                 enabled: z
                     .boolean()
                     .describe(
@@ -4763,7 +4787,7 @@ export function registerTools(
                     .describe(
                         "Which standard drink to show alongside grams: 'us' (14 g per drink) or 'uk' (7.9 g per unit). Defaults to 'us' when never set. Ask the user rather than inferring it from their language.",
                     ),
-            },
+            }),
         },
         // No "takes effect next conversation" caveat here, unlike
         // set_widget_display. That caveat is true for widgets because
@@ -4861,7 +4885,7 @@ export function registerTools(
                 idempotentHint: true,
                 openWorldHint: false,
             },
-            inputSchema: {
+            inputSchema: z.object({
                 days: z.coerce
                     .number()
                     .int()
@@ -4873,8 +4897,8 @@ export function registerTools(
                     .string()
                     .optional()
                     .describe("Window end date YYYY-MM-DD (default today)."),
-            },
-            outputSchema: {
+            }),
+            outputSchema: z.object({
                 end_date: z.string(),
                 // Which toggle the widget opens on (nearest of 7/14/30).
                 default_range: z.number(),
@@ -4882,7 +4906,7 @@ export function registerTools(
                 goals: GOALS_ITEM.nullable(),
                 // Up to 30 days of daily series; the widget slices to 7/14/30.
                 days: z.array(TRENDS_DAY_ITEM),
-            },
+            }),
             // Link the tool to its interactive trends UI (MCP Apps).
             ...uiMeta(TRENDS_WIDGET_URI),
         },
@@ -4965,7 +4989,7 @@ export function registerTools(
                 idempotentHint: true,
                 openWorldHint: false,
             },
-            inputSchema: {
+            inputSchema: z.object({
                 days: z.coerce
                     .number()
                     .int()
@@ -4979,7 +5003,7 @@ export function registerTools(
                     .string()
                     .optional()
                     .describe("Window end date YYYY-MM-DD (default today)."),
-            },
+            }),
         },
         async ({ days, end_date }) => {
             return withAnalytics(
@@ -5126,13 +5150,13 @@ export function registerTools(
                 idempotentHint: true,
                 openWorldHint: false,
             },
-            inputSchema: {
+            inputSchema: z.object({
                 timezone: z
                     .string()
                     .describe(
                         "IANA timezone identifier (e.g. 'America/New_York'). Must be a valid tzdata name.",
                     ),
-            },
+            }),
         },
         async ({ timezone }) => {
             return withAnalytics(
@@ -5256,13 +5280,13 @@ export function registerTools(
                 idempotentHint: false,
                 openWorldHint: false,
             },
-            inputSchema: {
+            inputSchema: z.object({
                 confirm: z
                     .boolean()
                     .describe(
                         "Must be true to confirm deletion. Always ask the user for explicit confirmation before setting this to true.",
                     ),
-            },
+            }),
         },
         async ({ confirm }) => {
             return withAnalytics(
@@ -5301,13 +5325,12 @@ export function registerTools(
 }
 
 // Build a fresh McpServer with this user's tools registered.
-async function buildMcpServer(c: Context, userId: string): Promise<McpServer> {
-    const proto = c.req.header("x-forwarded-proto") || "http";
-    const host =
-        c.req.header("x-forwarded-host") || c.req.header("host") || "localhost";
-    const baseUrl = `${proto}://${host}`;
-
-    const server = new McpServer(
+// The bare server: identity, capabilities and instructions, no tools. Shared
+// by both factory paths so the surface a `server/discover` probe is answered
+// from cannot drift from the one a tools/call is served by — the two responses
+// come from the same literal.
+function newMcpServer(baseUrl: string): McpServer {
+    return new McpServer(
         {
             name: "nutrition-mcp",
             version: "1.25.0",
@@ -5319,10 +5342,29 @@ async function buildMcpServer(c: Context, userId: string): Promise<McpServer> {
             ],
         },
         {
-            capabilities: { tools: {}, resources: {} },
+            // listChanged is explicitly false: v2 would advertise true by
+            // default, but /mcp is stateless and refuses the SSE stream, so
+            // there is never a channel to deliver a list_changed notification
+            // on. Advertising it would invite hosts to wait for one (the
+            // 2026-07-28 conformance suite warns on exactly this). A tool
+            // surface change (set_widget_display) is picked up on reconnect.
+            capabilities: {
+                tools: { listChanged: false },
+                resources: { listChanged: false },
+            },
             instructions: SERVER_INSTRUCTIONS,
         },
     );
+}
+
+// The full server: the bare one plus this user's tools registered. `baseUrl` is
+// the public origin the client reached us on (from the forwarding headers),
+// used only to advertise the server icon.
+async function buildMcpServer(
+    baseUrl: string,
+    userId: string,
+): Promise<McpServer> {
+    const server = newMcpServer(baseUrl);
 
     // ONE `select * from profiles` for all three display preferences. The
     // getWidgetsEnabled / getAlcoholTrackingEnabled / getPreferredDrinkUnit
@@ -5344,26 +5386,92 @@ async function buildMcpServer(c: Context, userId: string): Promise<McpServer> {
     return server;
 }
 
-// Stateless: /mcp holds no per-session state. Every request builds a brand-new
-// transport + McpServer and tears it down when the response completes (the SDK
-// forbids reusing a stateless transport). Because nothing is kept in-process, a
-// restart/deploy can never strand a connected client — there is no session to
-// lose, and therefore no reconnect step for a client to wedge on.
+// The two modern-era methods the SDK answers from server identity and
+// capabilities alone, without ever consulting a tool handler: `server/discover`
+// (supportedVersions + capabilities + instructions) and `subscriptions/listen`
+// (refused outright below, but the SDK still reads getCapabilities() and the
+// serverInfo off the instance before refusing). Both are served from
+// newMcpServer, skipping a Supabase profile read and ~38 tool registrations.
+// server/discover is the FIRST request every negotiating client sends, so under
+// Supabase pressure it was the probe that failed — for a response that contains
+// nothing a registration produces.
+//
+// Safe only because a modern request cannot reach the factory with a header
+// that disagrees with its body: classification rejects a Mcp-Method that names
+// a different method than the body does, and validateStandardRequestHeaders
+// rejects an absent one — both with -32020 / HTTP 400, both before the factory
+// runs. Those checks exist on the modern leg only — the legacy fallback ignores
+// the header entirely — hence the era guard.
+const IDENTITY_ONLY_METHODS = new Set([
+    "server/discover",
+    "subscriptions/listen",
+]);
+
+export type McpEraTrace = {
+    era?: "legacy" | "modern";
+};
+
+const mcpHandler = createMcpHandler(
+    async (ctx: McpRequestContext) => {
+        const trace = ctx.authInfo?.extra?.trace as McpEraTrace | undefined;
+        if (trace) trace.era = ctx.era;
+
+        const userId = ctx.authInfo?.extra?.userId;
+        if (typeof userId !== "string" || userId.length === 0) {
+            // handleMcp always sets it; reaching here means the /mcp route was
+            // wired without authenticateBearer, which must fail loudly rather
+            // than serve an anonymous server.
+            throw new Error(
+                "mcp: request reached the handler without a userId",
+            );
+        }
+        // requestInfo is set on both HTTP legs; the fallback only covers a
+        // non-HTTP embedding of this factory (e.g. serveStdio), which never
+        // reaches production.
+        const baseUrl = ctx.requestInfo
+            ? getBaseUrl(ctx.requestInfo)
+            : "http://localhost";
+
+        const mcpMethod = ctx.requestInfo?.headers.get("mcp-method") ?? "";
+        if (ctx.era === "modern" && IDENTITY_ONLY_METHODS.has(mcpMethod)) {
+            return newMcpServer(baseUrl);
+        }
+
+        return await buildMcpServer(baseUrl, userId);
+    },
+    {
+        legacy: "stateless",
+        maxSubscriptions: 0,
+        onerror: (err) =>
+            console.error(
+                `[mcp] ${JSON.stringify(
+                    err instanceof ProtocolError
+                        ? err.message
+                        : (err.stack ?? err.message),
+                )}`,
+            ),
+    },
+);
+
+// Stateless: /mcp holds no per-session state on either protocol era, so a
+// restart/deploy can never strand a connected client.
 //
 // Only POST (JSON-RPC request/response) is served. We reject GET and DELETE
-// with 405 instead of delegating to the transport, because a GET would open a
-// long-lived standalone SSE stream — and that stream is the one piece of state
-// a deploy still severs. Since stateless mode never pushes server-initiated
-// messages, that stream carries nothing; the only thing it does is die on every
-// restart and leave some clients (observed: a Claude connector) wedged in a
-// "connected but no tools" state. Refusing the stream (spec-allowed: a server
+// ourselves with 405 so a GET never opens a long-lived standalone SSE stream,
+// the one piece of state a deploy still severs. The handler's legacy fallback
+// answers 405 too, with its own JSON-RPC error ("Method not allowed."), but
+// without an `Allow` header — which is what this adds, alongside a message that
+// tells the client why rather than just that. Since stateless mode never pushes
+// server-initiated messages, that stream carries nothing; the only thing it does
+// is die on every restart and leave some clients (observed: a Claude connector)
+// wedged in a "connected but no tools" state. Refusing the stream (spec-allowed: a server
 // MAY return 405 when it offers no SSE stream at this endpoint) means the client
 // holds nothing that a deploy can break, so updates become truly invisible.
 export const handleMcp = async (c: Context) => {
     if (c.req.method !== "POST") {
         return c.json(
             {
-                jsonrpc: "2.0",
+                jsonrpc: JSONRPC_VERSION,
                 id: null,
                 error: {
                     code: -32000,
@@ -5378,11 +5486,18 @@ export const handleMcp = async (c: Context) => {
 
     const userId = c.get("userId") as string;
 
-    const transport = new WebStandardStreamableHTTPServerTransport({
-        sessionIdGenerator: undefined,
+    const trace: McpEraTrace = {};
+    const response = await mcpHandler.fetch(c.req.raw, {
+        authInfo: {
+            token: "",
+            clientId: "",
+            scopes: [],
+            extra: { userId, trace },
+        },
     });
-    const server = await buildMcpServer(c, userId);
-    await server.connect(transport);
 
-    return transport.handleRequest(c.req.raw);
+    if (trace.era) c.set("mcpEra", trace.era);
+    return response;
 };
+
+export const closeMcpHandler = (): Promise<void> => mcpHandler.close();

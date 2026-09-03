@@ -20,6 +20,7 @@
     "type": "module",
     "private": true,
     "devDependencies": {
+        "@modelcontextprotocol/client": "^2.0.0",
         "@types/bun": "latest"
     },
     "peerDependencies": {
@@ -41,9 +42,10 @@
         "e2e:nutrients": "bun run scripts/e2e-nutrients.ts"
     },
     "dependencies": {
-        "@modelcontextprotocol/sdk": "^1.29.0",
+        "@modelcontextprotocol/server": "^2.0.0",
         "@supabase/supabase-js": "^2.110.5",
         "hono": "^4.12.30",
-        "prettier": "^3.9.5"
+        "prettier": "^3.9.5",
+        "zod": "^4.4.3"
     }
 }

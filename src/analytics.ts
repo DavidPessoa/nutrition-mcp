@@ -29,13 +29,87 @@ interface AnalyticsContext {
     sessionId?: string;
 }
 
-function categorizeError(error: unknown): string {
+/**
+ * Bucket a thrown error for `tool_analytics.error_category`.
+ *
+ * Checked in three tiers. Tier 1 matches the *literal, fixed wording* of
+ * validation/config errors this codebase throws itself — checked first so they
+ * don't get swallowed by tier 3's looser keyword heuristics. Tier 2 is every
+ * src/supabase.ts persistence throw, matched generically by its "Failed to
+ * <verb> <noun>: <cause>" prefix — this runs *before* tier 3's auth/rate/date
+ * keyword checks specifically so that a message like "Failed to store token"
+ * or "Failed to delete auth codes" (which legitimately contain "token"/"auth"
+ * as our own noun, not as a signal about the failure) is bucketed as
+ * `supabase_error`, not `auth_expired`, before tier 3 ever sees it. Tier 3 is
+ * for third-party text we didn't author where only a keyword heuristic is
+ * possible.
+ */
+export function categorizeError(error: unknown): string {
     const msg =
         error instanceof Error ? error.message.toLowerCase() : String(error);
+
+    // ---- Tier 1: our own fixed message wording ----
+
+    if (
+        msg.includes("logged_at is invalid") ||
+        msg.includes("logged_at is in the future") ||
+        msg.includes("carries no utc offset")
+    )
+        return "invalid_date_format";
+
+    if (msg.includes("invalid timezone")) return "invalid_timezone";
+
+    if (
+        msg.includes("outside the plausible body-weight range") ||
+        msg.includes("invalid weight value") ||
+        msg.includes("invalid drink volume") ||
+        msg.includes("invalid abv")
+    )
+        return "invalid_numeric_value";
+
+    if (msg.includes("invalid weight unit")) return "invalid_param_value";
+
+    if (msg.includes("no weight unit given and no preference set"))
+        return "missing_required_param";
+
+    if (msg.includes("meal not found") || msg.includes("entry not found"))
+        return "record_not_found";
+
+    if (
+        msg.includes("missing supabase_url") ||
+        msg.includes("missing database_url") ||
+        msg.includes("off_user_agent is not configured")
+    )
+        return "service_misconfigured";
+
+    if (
+        msg.includes("@inlinets") ||
+        msg.includes("widget source partial not found") ||
+        msg.includes("@include cycle") ||
+        msg.startsWith("unknown widget:")
+    )
+        return "internal_asset_error";
+
+    if (
+        msg.includes("failed to upload export") ||
+        msg.includes("failed to create download link") ||
+        msg.includes("export would be truncated")
+    )
+        return "export_error";
+
+    // ---- Tier 2: every src/supabase.ts persistence throw ----
+
+    if (msg.includes("failed to ") || msg.includes("supabase"))
+        return "supabase_error";
+
+    // ---- Tier 3: keyword heuristics for third-party error text ----
 
     if (
         msg.includes("auth") ||
         msg.includes("token") ||
+        msg.includes("jwt") ||
+        msg.includes("unauthorized") ||
+        msg.includes("invalid api key") ||
         msg.includes("expired")
     )
         return "auth_expired";
@@ -46,18 +120,11 @@ function categorizeError(error: unknown): string {
     if (msg.includes("required") || msg.includes("missing"))
         return "missing_required_param";
     if (
-        msg.includes("supabase") ||
-        msg.includes("failed to insert") ||
-        msg.includes("failed to get") ||
-        msg.includes("failed to delete") ||
-        msg.includes("failed to update") ||
-        msg.includes("failed to search")
-    )
-        return "supabase_error";
-    if (
         msg.includes("network") ||
         msg.includes("fetch") ||
-        msg.includes("ECONNREFUSED")
+        msg.includes("econnrefused") ||
+        msg.includes("timeout") ||
+        msg.includes("timed out")
     )
         return "network_error";
 
@@ -156,7 +223,7 @@ export async function withAnalytics<T>(
         const errorCategory = categorizeError(error);
 
         console.warn(
-            `[analytics] ${toolName} error=${errorCategory} ${durationMs}ms user=${context.userId}`,
+            `[analytics] ${toolName} error=${errorCategory} ${durationMs}ms user=${context.userId}: ${error instanceof Error ? error.message : String(error)}`,
         );
 
         persistAnalytics({

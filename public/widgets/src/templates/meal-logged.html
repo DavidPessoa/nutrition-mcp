@@ -190,6 +190,8 @@
 
             /*@include shared/macros.js@*/
 
+            /*@include shared/date.js@*/
+
             function render(data) {
                 const root = document.getElementById("root");
 
@@ -201,6 +203,9 @@
                 }
 
                 const totals = data.totals || {};
+                const calLabel = isToday(data.date)
+                    ? "Calories today"
+                    : "Calories · " + shortDate(data.date);
                 const panel = macroPanel(
                     totals,
                     data.goals,
@@ -210,13 +215,14 @@
                     // alcohol, which is also the case in which no alcohol
                     // figure reaches the strip; macroCtxOf falls back to the
                     // server's own default of "us".
-                    { drinkUnit: data.drink_unit },
+                    { drinkUnit: data.drink_unit, calLabel },
                 );
 
                 // The meal that was just logged names itself on the header
                 // line; the strip below is the whole day.
                 const meal = data.logged_meal;
                 const bits = [];
+                if (data.date) bits.push(esc(shortDate(data.date)));
                 if (meal && meal.description) {
                     bits.push(esc(meal.description));
                     if (meal.meal_type) bits.push(esc(meal.meal_type));
