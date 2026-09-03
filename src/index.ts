@@ -9,7 +9,12 @@ import {
 } from "./middleware.js";
 import { handleMcp } from "./mcp.js";
 import { startExportCleanup } from "./export.js";
-import { getLandingStats, type LandingStats } from "./supabase.js";
+import {
+    getLandingStats,
+    isPostgresBackend,
+    type LandingStats,
+} from "./supabase.js";
+import { readLocalExport } from "./pg.js";
 import { registerDiscoveryRoutes } from "./discovery.js";
 import { maskIp } from "./net.js";
 import { warmWidgets } from "./widgets.js";
@@ -260,6 +265,20 @@ app.get("/favicon.ico", async (c) => {
 // Health check
 app.get("/health", (c) => c.text("ok"));
 
+// Postgres-mode export downloads. HMAC URL minted by createSignedUrl; 404 on
+// Supabase-backed deploys where this path is unused.
+app.get("/exports/:token", async (c) => {
+    if (!isPostgresBackend()) return c.notFound();
+    const result = await readLocalExport(c.req.param("token"));
+    if (!result.ok) return c.notFound();
+    return new Response(result.bytes, {
+        headers: {
+            "Content-Type": "application/zip",
+            "Content-Disposition": `attachment; filename="${result.filename}"`,
+        },
+    });
+});
+
 // Error handler
 app.onError((_err, c) => {
     console.error("Unhandled error:", _err);
@@ -276,6 +295,16 @@ await warmWidgets();
 
 // Periodically delete expired meal-export files from the storage bucket.
 startExportCleanup();
+
+// In Postgres mode the export download link is built from PUBLIC_BASE_URL. The
+// loopback fallback still serves the file, but the URL is one the user cannot
+// open — a silent dead end that reads as a broken export rather than a missing
+// variable, so say so at boot instead.
+if (isPostgresBackend() && !process.env.PUBLIC_BASE_URL) {
+    console.warn(
+        "PUBLIC_BASE_URL is unset: export download links will point at 127.0.0.1 and will not work outside this host.",
+    );
+}
 
 // Exit cleanly on shutdown signals (e.g. deploys). /mcp is stateless — no
 // server-side sessions are held, so there is nothing to tear down; just exit.

@@ -1,0 +1,64 @@
+# Homeserver: Postgres + the MCP process. One replica — OAuth login sessions
+# are in-memory. Do not `compose scale`.
+#
+# cp .env.example .env  then fill OAUTH_* (and PUBLIC_BASE_URL for the tunnel).
+# Leave SUPABASE_* unset so the app uses DATABASE_URL.
+
+services:
+    db:
+        image: postgres:16-alpine
+        restart: unless-stopped
+        environment:
+            POSTGRES_USER: nutrition
+            POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-nutrition}
+            POSTGRES_DB: nutrition
+        volumes:
+            - pgdata:/var/lib/postgresql/data
+            - ./schema/postgres.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+        healthcheck:
+            test: ["CMD-SHELL", "pg_isready -U nutrition -d nutrition"]
+            interval: 5s
+            timeout: 5s
+            retries: 10
+
+    nutrition-mcp:
+        build: .
+        restart: unless-stopped
+        env_file: .env
+        environment:
+            DATABASE_URL: postgres://nutrition:${POSTGRES_PASSWORD:-nutrition}@db:5432/nutrition
+            # Force Postgres mode even if a leftover SUPABASE_* is in .env.
+            SUPABASE_URL: ""
+            SUPABASE_SECRET_KEY: ""
+            PORT: "8080"
+            EXPORTS_DIR: /app/exports
+        volumes:
+            - exports:/app/exports
+        depends_on:
+            db:
+                condition: service_healthy
+        healthcheck:
+            test:
+                [
+                    "CMD",
+                    "bun",
+                    "-e",
+                    "fetch('http://127.0.0.1:'+(process.env.PORT||'8080')+'/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+                ]
+            interval: 30s
+            timeout: 5s
+            retries: 3
+            start_period: 15s
+        logging:
+            driver: json-file
+            options:
+                max-size: "10m"
+                max-file: "3"
+        # Host-level cloudflared: publish loopback only.
+        # Sidecar tunnel: drop ports and point ingress at http://nutrition-mcp:8080.
+        ports:
+            - "127.0.0.1:8080:8080"
+
+volumes:
+    pgdata:
+    exports:
