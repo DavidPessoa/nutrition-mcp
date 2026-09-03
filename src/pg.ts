@@ -1,6 +1,6 @@
 import { SQL } from "bun";
 import { createHash, createHmac, timingSafeEqual as tse } from "node:crypto";
-import { mkdir, readdir, stat, unlink } from "node:fs/promises";
+import { mkdir, readdir, rmdir, stat, unlink } from "node:fs/promises";
 import { dirname, join, relative, resolve } from "node:path";
 
 const PGRST_NO_ROWS = "PGRST116";
@@ -38,16 +38,24 @@ function exportSecret(): string {
     return secret;
 }
 
+// OAUTH_CLIENT_SECRET signs these as well as OAuth material, so the signed
+// input carries what it is for. Without it, one key authenticates two different
+// grammars and a string that parses as both would be valid in either.
+const EXPORT_TOKEN_CONTEXT = "nutrition-mcp/export-download/v1";
+
+function exportTokenSignature(payload: string, secret: string): string {
+    return createHmac("sha256", secret)
+        .update(`${EXPORT_TOKEN_CONTEXT}.${payload}`)
+        .digest("base64url");
+}
+
 export function signExportToken(
     path: string,
     expiresAtMs: number,
     secret: string,
 ): string {
     const payload = `${Buffer.from(path, "utf8").toString("base64url")}.${expiresAtMs}`;
-    const sig = createHmac("sha256", secret)
-        .update(payload)
-        .digest("base64url");
-    return `${payload}.${sig}`;
+    return `${payload}.${exportTokenSignature(payload, secret)}`;
 }
 
 export function verifyExportToken(
@@ -59,10 +67,7 @@ export function verifyExportToken(
     if (parts.length !== 3) return null;
     const [pathB64, expStr, sig] = parts;
     if (!pathB64 || !expStr || !sig) return null;
-    const payload = `${pathB64}.${expStr}`;
-    const expected = createHmac("sha256", secret)
-        .update(payload)
-        .digest("base64url");
+    const expected = exportTokenSignature(`${pathB64}.${expStr}`, secret);
     if (expected.length !== sig.length) return null;
     if (!timingSafeEqual(expected, sig)) return null;
     const expiresAtMs = Number(expStr);
@@ -107,36 +112,31 @@ function pgError(err: unknown): { message: string; code?: string } {
     return { message: String(err) };
 }
 
-function mapValue(value: unknown): unknown {
-    if (value instanceof Date) return value.toISOString();
-    if (typeof value === "string" && /^-?\d+(\.\d+)?$/.test(value)) {
-        const n = Number(value);
-        if (Number.isFinite(n)) return n;
-    }
-    return value;
-}
+/**
+ * Columns Postgres hands back as strings because they are `numeric`, and that
+ * the app expects as JS numbers (PostgREST parses them for us).
+ *
+ * This is an allow-list of the numeric columns rather than a deny-list of the
+ * text ones on purpose. Coercing anything that merely *looks* numeric silently
+ * turns a new all-digits text column into a number — `food_cache.source_id`
+ * holds `String(fdcId)` and is one rename away from being exactly that. An
+ * unrecognized column now stays a string, which is the harmless direction.
+ */
+const NUMERIC_COLUMN = /_(g|mg|mcg|ml|ms|days)$|^(daily_)?calories$/;
 
-function mapRow(row: Record<string, unknown>): Record<string, unknown> {
+export function mapRow(row: Record<string, unknown>): Record<string, unknown> {
     const out: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(row)) {
-        if (k === "id" || k === "user_id" || k === "token" || k === "code") {
-            out[k] = v instanceof Date ? v.toISOString() : v;
+        if (v instanceof Date) {
+            out[k] = v.toISOString();
             continue;
         }
-        if (
-            k === "email" ||
-            k === "description" ||
-            k === "notes" ||
-            k === "source" ||
-            k === "source_id" ||
-            k === "timezone" ||
-            k === "redirect_uri" ||
-            k === "client_name"
-        ) {
-            out[k] = v;
+        if (typeof v === "string" && v !== "" && NUMERIC_COLUMN.test(k)) {
+            const n = Number(v);
+            out[k] = Number.isFinite(n) ? n : v;
             continue;
         }
-        out[k] = mapValue(v);
+        out[k] = v;
     }
     return out;
 }
@@ -300,6 +300,11 @@ class Query {
         return this;
     }
 
+    neq(col: string, val: unknown) {
+        this.filters.push({ kind: "neq", col, val });
+        return this;
+    }
+
     gt(col: string, val: unknown) {
         this.filters.push({ kind: "gt", col, val });
         return this;
@@ -401,22 +406,25 @@ class Query {
         return { data: rows, error: null, count };
     }
 
+    private async countRows(): Promise<number> {
+        const s = sql();
+        const [row] = await s`
+            SELECT COUNT(*)::int AS n
+            FROM ${ident(this.table)}
+            WHERE ${whereFragment(this.filters)}
+        `;
+        return Number((row as { n: number } | undefined)?.n ?? 0);
+    }
+
     private async execute(): Promise<QueryResult> {
         const s = sql();
         try {
             if (this.op === "select") {
                 if (this.head && this.countExact) {
-                    const [row] = await s`
-                        SELECT COUNT(*)::int AS n
-                        FROM ${ident(this.table)}
-                        WHERE ${whereFragment(this.filters)}
-                    `;
                     return {
                         data: null,
                         error: null,
-                        count: Number(
-                            (row as { n: number } | undefined)?.n ?? 0,
-                        ),
+                        count: await this.countRows(),
                     };
                 }
                 const limitFrag =
@@ -431,9 +439,13 @@ class Query {
                     ${limitFrag}
                     ${offsetFrag}
                 `) as Record<string, unknown>[];
+                // count is the number of matching rows, not the number
+                // returned. Reporting the page length instead would defeat the
+                // reconciliation in getAllMeals, whose whole job is to notice a
+                // paged read that came back short.
                 return this.finish(
                     rows.map(mapRow),
-                    this.countExact ? rows.length : null,
+                    this.countExact ? await this.countRows() : null,
                 );
             }
 
@@ -595,11 +607,61 @@ export function hashedGoogleNonce(rawNonce: string): string {
     return createHash("sha256").update(rawNonce).digest("hex");
 }
 
+export type GoogleClaims = {
+    aud?: string;
+    email?: string;
+    email_verified?: string | boolean;
+    sub?: string;
+    nonce?: string;
+};
+
+/**
+ * Accept a Google ID token's claims, or say why not. `tokeninfo` has already
+ * checked the signature, issuer and expiry, so what is left is the three things
+ * only we can check: that the token was minted for *this* client, that it
+ * belongs to this sign-in attempt, and that Google actually owns the address.
+ *
+ * `email_verified` is load-bearing rather than belt-and-braces: an unverified
+ * address on a Workspace or federated account would otherwise be enough to
+ * claim the matching local account below.
+ */
+export function verifyGoogleClaims(
+    claims: GoogleClaims,
+    clientId: string,
+    rawNonce: string,
+): { ok: true; email: string; sub: string } | { ok: false; reason: string } {
+    if (claims.aud !== clientId) return { ok: false, reason: "aud mismatch" };
+    if (!claims.email || !claims.sub) {
+        return { ok: false, reason: "missing email or sub" };
+    }
+    if (claims.email_verified !== true && claims.email_verified !== "true") {
+        return { ok: false, reason: "email not verified by Google" };
+    }
+    // A token with no nonce is rejected, not waved through: we always request
+    // one, so its absence means this token was minted for some other flow and
+    // is being replayed here.
+    if (
+        claims.nonce !== hashedGoogleNonce(rawNonce) &&
+        claims.nonce !== rawNonce
+    ) {
+        return { ok: false, reason: "nonce mismatch" };
+    }
+    return { ok: true, email: claims.email, sub: claims.sub };
+}
+
 async function signInWithIdToken(opts: {
     provider: string;
     token: string;
     nonce: string;
 }) {
+    const fail = (reason: string) => {
+        console.warn(`Google sign-in rejected: ${reason}`);
+        return {
+            data: { user: null },
+            error: { message: "Google sign-in failed" },
+        };
+    };
+
     if (opts.provider !== "google") {
         return {
             data: { user: null },
@@ -616,65 +678,52 @@ async function signInWithIdToken(opts: {
     const res = await fetch(
         `https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(opts.token)}`,
     );
-    if (!res.ok) {
-        return {
-            data: { user: null },
-            error: { message: "Google sign-in failed" },
-        };
-    }
-    const claims = (await res.json()) as {
-        aud?: string;
-        email?: string;
-        sub?: string;
-        nonce?: string;
-    };
-    if (claims.aud !== clientId || !claims.email || !claims.sub) {
-        return {
-            data: { user: null },
-            error: { message: "Google sign-in failed" },
-        };
-    }
-    const wantNonce = hashedGoogleNonce(opts.nonce);
-    if (
-        claims.nonce &&
-        claims.nonce !== wantNonce &&
-        claims.nonce !== opts.nonce
-    ) {
-        return {
-            data: { user: null },
-            error: { message: "Google sign-in failed" },
-        };
-    }
+    if (!res.ok) return fail(`tokeninfo returned ${res.status}`);
+
+    const verified = verifyGoogleClaims(
+        (await res.json()) as GoogleClaims,
+        clientId,
+        opts.nonce,
+    );
+    if (!verified.ok) return fail(verified.reason);
+
     const s = sql();
     const [bySub] =
-        await s`SELECT id FROM users WHERE google_sub = ${claims.sub}`;
+        await s`SELECT id FROM users WHERE google_sub = ${verified.sub}`;
     if (bySub) {
         return {
             data: { user: { id: (bySub as { id: string }).id } },
             error: null,
         };
     }
+    // Matching on email alone would be an account takeover: sign-up here needs
+    // no email confirmation, so anyone can register someone else's address with
+    // a password of their choosing and then inherit them the moment the real
+    // owner arrives via Google. Adopt the row only when it has no password to
+    // inherit — which is exactly the Google-created row whose `sub` we somehow
+    // lost. Otherwise refuse and leave the password login as the way in.
     const [byEmail] = await s`
-        SELECT id FROM users WHERE lower(email) = lower(${claims.email})
+        SELECT id, password_hash FROM users WHERE lower(email) = lower(${verified.email})
     `;
     if (byEmail) {
-        await s`UPDATE users SET google_sub = ${claims.sub} WHERE id = ${(byEmail as { id: string }).id}`;
-        return {
-            data: { user: { id: (byEmail as { id: string }).id } },
-            error: null,
+        const existing = byEmail as {
+            id: string;
+            password_hash: string | null;
         };
+        if (existing.password_hash) {
+            return fail(
+                "email already registered with a password; refusing to link",
+            );
+        }
+        await s`UPDATE users SET google_sub = ${verified.sub} WHERE id = ${existing.id}`;
+        return { data: { user: { id: existing.id } }, error: null };
     }
     const [created] = await s`
         INSERT INTO users (email, google_sub)
-        VALUES (${claims.email}, ${claims.sub})
+        VALUES (${verified.email}, ${verified.sub})
         RETURNING id
     `;
-    if (!created) {
-        return {
-            data: { user: null },
-            error: { message: "Google sign-in failed" },
-        };
-    }
+    if (!created) return fail("insert returned no row");
     return {
         data: { user: { id: (created as { id: string }).id } },
         error: null,
@@ -766,10 +815,24 @@ function storageFrom(_bucket: string) {
         async remove(paths: string[]) {
             try {
                 for (const p of paths) {
+                    const full = filePathFor(p);
                     try {
-                        await unlink(filePathFor(p));
+                        await unlink(full);
                     } catch {
                         // missing path is success, matching Storage
+                    }
+                    // A bucket has no directories, so the per-user folder this
+                    // file lived in is an artifact of storing it on a disk.
+                    // Leaving it behind would accumulate one empty directory
+                    // per user who ever exported. rmdir only succeeds when the
+                    // directory is empty, which is the check we want.
+                    const parent = dirname(full);
+                    if (resolve(parent) !== resolve(exportsDir())) {
+                        try {
+                            await rmdir(parent);
+                        } catch {
+                            // not empty, or not ours to remove
+                        }
                     }
                 }
                 return { error: null };
@@ -780,23 +843,24 @@ function storageFrom(_bucket: string) {
     };
 }
 
+/**
+ * Every failure is the same "not found": a bad signature, an expired link and a
+ * swept file are indistinguishable to the caller on purpose, so a probe learns
+ * nothing about which export paths exist.
+ */
 export async function readLocalExport(
     token: string,
-): Promise<
-    | { ok: true; bytes: Uint8Array; filename: string }
-    | { ok: false; status: number; error: string }
-> {
+): Promise<{ ok: true; bytes: Uint8Array; filename: string } | { ok: false }> {
     const parsed = verifyExportToken(decodeURIComponent(token), exportSecret());
-    if (!parsed) return { ok: false, status: 404, error: "not_found" };
+    if (!parsed) return { ok: false };
     const full = resolve(filePathFor(parsed.path));
     const root = resolve(exportsDir());
     const rel = relative(root, full);
     if (rel.startsWith("..") || rel.startsWith("/") || rel === "") {
-        return { ok: false, status: 404, error: "not_found" };
+        return { ok: false };
     }
     const file = Bun.file(full);
-    if (!(await file.exists()))
-        return { ok: false, status: 404, error: "not_found" };
+    if (!(await file.exists())) return { ok: false };
     return {
         ok: true,
         bytes: new Uint8Array(await file.arrayBuffer()),

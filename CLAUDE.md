@@ -6,6 +6,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 nutrition-mcp is a Model Context Protocol (MCP) server for nutrition-related functionality, built with Bun and TypeScript. Entry point is `src/index.ts`. Server version must be updated in three places: `package.json`, `src/mcp.ts` (McpServer constructor), and `server.json`. The server icon is at `public/favicon.ico`. Tool call analytics (duration, success/failure, error category) are tracked via `src/analytics.ts` and persisted to a `tool_analytics` Supabase table.
 
+## Two backends
+
+Production runs Supabase; a homeserver can run vanilla Postgres instead. `isPostgresBackend()` picks between them — `DATABASE_URL` set and `SUPABASE_SECRET_KEY` unset means Postgres — and `src/pg.ts` answers the same surface Supabase does (`from().select()…`, `auth`, `storage`, `rpc`) so **nothing above `src/supabase.ts` knows which one it is talking to**.
+
+That shim is handed back as `createPgClient() as unknown as SupabaseClient`, so `bun run typecheck` cannot see it. A query-builder method used in `src/supabase.ts` but missing from `src/pg.ts` compiles cleanly and fails at runtime, on the self-hosted path CI never exercises. So: when you add a PostgREST operator (`.or()`, `.is()`, `.not()`, a `.rpc()` name, a `storage` call), implement it in `src/pg.ts` in the same change.
+
+The Supabase and Postgres schemas are two hand-maintained copies of one design — `supabase/migrations/*.sql` and `schema/postgres.sql`. `src/schema-parity.test.ts` fails when a table or column exists in the migrations but not in the flat schema, so a new migration means editing both. Postgres mode also keeps its own `users` table where Supabase has `auth.users`.
+
 ## Deploying
 
 This is a remote MCP server, and DigitalOcean auto-deploys `main`. **Merging to `main` ships to production** — there is no separate deploy step to run and no version bump or tag needed for a change to reach clients. Every client hitting `https://nutrition-mcp.com/mcp` picks it up as soon as the deploy finishes, so treat a merge as a release: prompt and tool-description edits go live exactly like code does.
