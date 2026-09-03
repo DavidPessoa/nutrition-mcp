@@ -1,11 +1,10 @@
 ---
 name: frontend
-description: MCP Apps widget work for nutrition-mcp. Use when changing public/widgets, src/widgets.ts, widget tests, the harness, or STYLE_GUIDE.md. Assembled self-contained HTML, deny-all iframe CSP.
+description: MCP Apps widget work for nutrition-mcp. Use when changing public/widgets, src/widgets.ts, widget tests under public/widgets/**, the harness, or STYLE_GUIDE.md. Assembled self-contained HTML, deny-all iframe CSP.
 disable-model-invocation: true
 paths:
     - public/widgets/**
     - src/widgets.ts
-    - src/widgets.test.ts
     - scripts/widget-harness.ts
 ---
 
@@ -53,7 +52,7 @@ Report `ui/notifications/size-changed`. Measure with `height = "max-content"` th
 2. Key in `WIDGET_TEMPLATES` (`src/widgets.ts`)
 3. Backend registers `ui://` resource (`text/html;profile=mcp-app`) and tool `_meta` (unless you own `src/mcp.ts`)
 4. Tool always returns `structuredContent`
-5. `bun test src/widgets.test.ts` (no unresolved markers, valid inline JS)
+5. `bun test src/widgets.test.ts` (no unresolved markers, valid inline JS; frontend runs this file, backend owns it)
 6. Behavior tests next to the widget (`public/widgets/*.test.ts`) when logic is non-trivial
 7. `bun run harness` for interactive work (`?serverTools=0`, `?delay=3000`, `?maxHeight=600` exist)
 
