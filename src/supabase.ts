@@ -1,4 +1,5 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import { createPgClient, isPostgresBackend } from "./pg.js";
 import { zonedDayStartUtc, zonedNextDayStartUtc } from "./tz.js";
 import { decodeEscapeSequences } from "./normalize.js";
 import { isWeightUnit, toStoredInteger, type WeightUnit } from "./units.js";
@@ -15,10 +16,15 @@ import {
 let supabase: SupabaseClient;
 
 function buildClient(): SupabaseClient {
+    if (isPostgresBackend()) {
+        return createPgClient() as unknown as SupabaseClient;
+    }
     const url = process.env.SUPABASE_URL;
     const key = process.env.SUPABASE_SECRET_KEY;
     if (!url || !key) {
-        throw new Error("Missing SUPABASE_URL or SUPABASE_SECRET_KEY");
+        throw new Error(
+            "Missing DATABASE_URL (Postgres) or SUPABASE_URL / SUPABASE_SECRET_KEY",
+        );
     }
     // persistSession: false keeps the client stateless — signIn/signUp on this
     // client won't attach a user JWT to future requests. Without this, the
@@ -32,6 +38,8 @@ function buildClient(): SupabaseClient {
         },
     });
 }
+
+export { isPostgresBackend } from "./pg.js";
 
 export function getSupabase(): SupabaseClient {
     if (!supabase) supabase = buildClient();

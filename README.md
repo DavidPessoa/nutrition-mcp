@@ -85,7 +85,21 @@ Read the story behind it: [How I Replaced MyFitnessPal and Other Apps with a Sin
 
 ## Self-hosting
 
-### 1. Supabase setup
+Pick **one** backend. Postgres is the homeserver path. Supabase is what production (`nutrition-mcp.com`) still runs.
+
+### 1a. Postgres (homeserver)
+
+No GoTrue, PostgREST, or Storage. The app uses `Bun.sql`, a local `users` table, and files on disk for export ZIPs.
+
+1. Generate OAuth credentials (`openssl rand -hex 16` / `32`).
+2. `cp .env.example .env` and set `OAUTH_CLIENT_ID`, `OAUTH_CLIENT_SECRET`, and `PUBLIC_BASE_URL` to the public HTTPS origin Claude.ai will call (your tunnel hostname). Leave `SUPABASE_*` unset.
+3. `docker compose up -d --build` — starts Postgres 16, applies [`schema/postgres.sql`](schema/postgres.sql) on first boot, and runs the server on `127.0.0.1:8080`.
+4. Point a Cloudflare Tunnel (or Tailscale Funnel) at that port. The proxy must send `X-Forwarded-Proto: https` and `X-Forwarded-Host: <public-host>` or OAuth discovery advertises `http://` and login loops. Do not put Cloudflare Access in front of `/mcp`.
+5. Claude.ai → Customize → Connectors → Add custom connector → `https://<public-host>/mcp`.
+
+To apply the schema to an existing empty database without Compose: `psql "$DATABASE_URL" -f schema/postgres.sql`. Init scripts only run when the Postgres volume is first created.
+
+### 1b. Supabase (hosted)
 
 1. Create a [Supabase](https://supabase.com) project.
 2. Enable **Email Auth** (Authentication → Providers → Email) and disable email confirmation.
@@ -98,20 +112,24 @@ Read the story behind it: [How I Replaced MyFitnessPal and Other Apps with a Sin
 
     This creates every table, index, RLS policy, and foreign key the app needs. No local Postgres is involved — migrations run against your hosted project.
 
-4. Copy the **service role key** from Project Settings → API and use it as `SUPABASE_SECRET_KEY`.
+4. Copy the **service role key** from Project Settings → API and use it as `SUPABASE_SECRET_KEY`. Do not set `DATABASE_URL` on this path.
 
 ### 2. Environment variables
 
-| Variable               | Description                                                                   |
-| ---------------------- | ----------------------------------------------------------------------------- |
-| `SUPABASE_URL`         | Your Supabase project URL                                                     |
-| `SUPABASE_SECRET_KEY`  | Supabase service role key (bypasses RLS)                                      |
-| `OAUTH_CLIENT_ID`      | Random string for OAuth client identification                                 |
-| `OAUTH_CLIENT_SECRET`  | Random string for OAuth client authentication                                 |
-| `GOOGLE_CLIENT_ID`     | _(optional)_ Google OAuth client ID for "Sign in with Google"                 |
-| `GOOGLE_CLIENT_SECRET` | _(optional)_ Google OAuth client secret                                       |
-| `OFF_USER_AGENT`       | Open Food Facts User-Agent for barcode lookups, in the form `AppName (email)` |
-| `PORT`                 | Server port (default: `8080`)                                                 |
+| Variable               | Description                                                                                      |
+| ---------------------- | ------------------------------------------------------------------------------------------------ |
+| `DATABASE_URL`         | Postgres URL. Homeserver mode when this is set and `SUPABASE_SECRET_KEY` is unset.               |
+| `PUBLIC_BASE_URL`      | _(Postgres)_ Public `https://` origin for OAuth-adjacent export download links                   |
+| `EXPORTS_DIR`          | _(Postgres)_ Directory for export ZIPs (default `./exports`)                                     |
+| `SUPABASE_URL`         | _(Supabase)_ Project URL                                                                         |
+| `SUPABASE_SECRET_KEY`  | _(Supabase)_ Service role key (bypasses RLS). If set, wins over `DATABASE_URL`.                  |
+| `OAUTH_CLIENT_ID`      | Random string for OAuth client identification                                                    |
+| `OAUTH_CLIENT_SECRET`  | Random string for OAuth client authentication                                                    |
+| `GOOGLE_CLIENT_ID`     | _(optional)_ Google OAuth client ID for "Sign in with Google"                                    |
+| `GOOGLE_CLIENT_SECRET` | _(optional)_ Google OAuth client secret                                                          |
+| `ALLOWED_ORIGINS`      | _(optional)_ CORS allowlist CSV for browser clients. Native connectors usually send no `Origin`. |
+| `OFF_USER_AGENT`       | Open Food Facts User-Agent for barcode lookups, in the form `AppName (email)`                    |
+| `PORT`                 | Server port (default: `8080`)                                                                    |
 
 > **Making it yours:** The public site includes the maintainer's personal bits — Google Analytics, Patreon/GitHub/contact links, and the `nutrition-mcp.com` domain. Run `bun run depersonalize` to strip them all in one pass (analytics + CSP, the Support/Contact sections, social links, and the domain → a `your-domain.com` placeholder). Use `bun run depersonalize --dry` to preview without writing. Afterwards, swap in your own `public/og.png`, `favicon.ico`, and `apple-touch-icon.png`, and replace the domain placeholder with your real domain.
 
@@ -125,9 +143,7 @@ openssl rand -hex 32   # use as OAUTH_CLIENT_SECRET
 ### 3. Google sign-in (optional)
 
 Email/password works out of the box. To also offer **"Continue with Google"**,
-follow [`docs/google-auth-setup.md`](docs/google-auth-setup.md) to create a
-Google OAuth client, enable the Google provider in Supabase, and set
-`GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`.
+create a Google OAuth Web client with redirect `https://<public-host>/auth/google/callback` and set `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`. On Supabase, also enable the Google provider — see [`docs/google-auth-setup.md`](docs/google-auth-setup.md). Postgres mode verifies the ID token with Google directly and does not need a Supabase provider.
 
 ## Development
 

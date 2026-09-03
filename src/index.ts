@@ -9,7 +9,12 @@ import {
 } from "./middleware.js";
 import { handleMcp } from "./mcp.js";
 import { startExportCleanup } from "./export.js";
-import { getLandingStats, type LandingStats } from "./supabase.js";
+import {
+    getLandingStats,
+    isPostgresBackend,
+    type LandingStats,
+} from "./supabase.js";
+import { readLocalExport } from "./pg.js";
 import { registerDiscoveryRoutes } from "./discovery.js";
 import { maskIp } from "./net.js";
 import { warmWidgets } from "./widgets.js";
@@ -259,6 +264,20 @@ app.get("/favicon.ico", async (c) => {
 
 // Health check
 app.get("/health", (c) => c.text("ok"));
+
+// Postgres-mode export downloads. HMAC URL minted by createSignedUrl; 404 on
+// Supabase-backed deploys where this path is unused.
+app.get("/exports/:token", async (c) => {
+    if (!isPostgresBackend()) return c.notFound();
+    const result = await readLocalExport(c.req.param("token"));
+    if (!result.ok) return c.json({ error: result.error }, result.status);
+    return new Response(result.bytes, {
+        headers: {
+            "Content-Type": "application/zip",
+            "Content-Disposition": `attachment; filename="${result.filename}"`,
+        },
+    });
+});
 
 // Error handler
 app.onError((_err, c) => {
