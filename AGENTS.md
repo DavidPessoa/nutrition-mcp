@@ -6,13 +6,13 @@ Operational invariants live in `CLAUDE.md`. This file is the team: who does the 
 
 ## Team
 
-| Role      | Invoke       | Model                                                  | Writes?   | Owns                                                                          |
-| --------- | ------------ | ------------------------------------------------------ | --------- | ----------------------------------------------------------------------------- |
-| Architect | `/architect` | Claude Opus 5 High (`claude-opus-5[effort=high]`)      | Plan only | Decomposition, file ownership, sequence                                       |
-| Database  | `/database`  | Grok 4.6 High Fast (`grok-4.6[effort=high,fast=true]`) | Yes       | `supabase/migrations/`, `schema/postgres.sql`, `src/pg.ts` query/SQL behavior |
-| Backend   | `/backend`   | Grok 4.6 High Fast (`grok-4.6[effort=high,fast=true]`) | Yes       | `src/**/*.ts` except widget assembly, MCP tools, tests                        |
-| Frontend  | `/frontend`  | Grok 4.6 High Fast (`grok-4.6[effort=high,fast=true]`) | Yes       | `public/widgets/`, `src/widgets.ts`, widget tests, style guide                |
-| Reviewer  | `/reviewer`  | Claude Opus 5 Medium (`claude-opus-5[effort=medium]`)  | No        | Quality, security, whether the change makes sense                             |
+| Role      | Invoke       | Model                                                  | Writes?   | Owns                                                                                     |
+| --------- | ------------ | ------------------------------------------------------ | --------- | ---------------------------------------------------------------------------------------- |
+| Architect | `/architect` | Claude Opus 5 High (`claude-opus-5[effort=high]`)      | Plan only | Decomposition, file ownership, sequence                                                  |
+| Database  | `/database`  | Grok 4.6 High Fast (`grok-4.6[effort=high,fast=true]`) | Yes       | `supabase/migrations/`, `schema/postgres.sql`, `src/pg.ts` query/SQL behavior            |
+| Backend   | `/backend`   | Grok 4.6 High Fast (`grok-4.6[effort=high,fast=true]`) | Yes       | `src/**/*.ts` including `src/*.test.ts` (except widget assembly)                         |
+| Frontend  | `/frontend`  | Grok 4.6 High Fast (`grok-4.6[effort=high,fast=true]`) | Yes       | `public/widgets/`, `src/widgets.ts`, widget tests under `public/widgets/**`, style guide |
+| Reviewer  | `/reviewer`  | Claude Opus 5 Medium (`claude-opus-5[effort=medium]`)  | No        | Quality, security, whether the change makes sense                                        |
 
 Custom subagents live in `.cursor/agents/`. Skills live in `.cursor/skills/`. Launch the named subagent — do not impersonate a role with `generalPurpose`.
 
@@ -29,14 +29,15 @@ The parent agent is the orchestrator. It does not implement the feature itself w
 1. **Plan** — Launch `architect`. It reads `CLAUDE.md`, explores the tree, and returns a plan with exclusive file ownership per specialist. No code in this step.
 2. **Distribute** — Launch only the specialists the plan named. Give each the plan excerpt, their file list, and the files they must not touch. One writer per file. If `src/mcp.ts` is in play, exactly one specialist owns it (usually backend).
 3. **Sequence** — Schema first when the database specialist is involved. Then backend and frontend in parallel if their files do not overlap. Shared files stay serial.
-4. **Prove** — After builders return, run `bun run format:check`, `bun run typecheck`, and `bun test` (or the files the plan named). Fix format/type/test failures by sending the owning specialist back in; do not patch across ownership lines.
-5. **Review** — Launch `reviewer` (read-only) with the plan, the diff, and the test output. The reviewer checks code quality, security, and whether the change makes sense.
-6. **Loop** — `REQUEST CHANGES` goes back to the owning specialist, then the reviewer runs again on the new diff. Repeat until `APPROVE`.
-7. **PR** — The feature is finished only when the reviewer returns `APPROVE` with zero blocking findings. The orchestrator then commits on a feature branch, pushes, and opens a pull request. Return the PR URL. Do not merge — merging `main` deploys production.
+4. **Prove** — After builders return, the orchestrator runs `bun run format:check`, `bun run typecheck`, and the **full** `bun test`. A named glob is additive, never a substitute. Fix format/type/test failures by sending the owning specialist back in; do not patch across ownership lines.
+5. **Review** — Launch `reviewer` (read-only) only after prove is green, with the plan, the diff, and the verbatim prove output. The reviewer checks code quality, security, and whether the change makes sense.
+6. **Loop** — `REQUEST CHANGES` goes back to the owning specialist, then prove runs again, then the reviewer runs on the new diff. Repeat until `APPROVE`.
+7. **PR** — The feature is finished only when prove is green and the reviewer returns `APPROVE` with zero blocking findings. The orchestrator then commits on a feature branch, pushes, and opens a pull request. Return the PR URL. Do not merge — merging `main` deploys production.
 
 ## Hard rules
 
 - **Reviewer is the gate.** Builders must not mark the feature done. A reviewer that finds nothing is suspect — they must list what they inspected.
+- **Tests are a hard gate.** The reviewer is not launched and no PR is opened while prove is red, skipped, or unrun.
 - **Builders do not verify their own work** as the final check. They may run tests locally; the reviewer still runs.
 - **Builders do not git commit, push, or change git config.** After `APPROVE`, the orchestrator commits, pushes the feature branch, and opens a PR. Do not merge.
 - **One writer per file** in a wave. Name the files another specialist currently holds.
@@ -45,13 +46,13 @@ The parent agent is the orchestrator. It does not implement the feature itself w
 
 ## Skills
 
-| Skill          | Use                                                |
-| -------------- | -------------------------------------------------- |
+| Skill          | Use                                                          |
+| -------------- | ------------------------------------------------------------ |
 | `ship-feature` | End-to-end autonomous feature ending in a PR. Default entry. |
-| `architect`    | Plan-only playbook the architect subagent follows. |
-| `database`     | Dual-backend schema/migration playbook.            |
-| `backend`      | MCP tool / Bun server playbook.                    |
-| `frontend`     | MCP Apps widget playbook.                          |
-| `review`       | Reviewer checklist and verdict format.             |
+| `architect`    | Plan-only playbook the architect subagent follows.           |
+| `database`     | Dual-backend schema/migration playbook.                      |
+| `backend`      | MCP tool / Bun server playbook.                              |
+| `frontend`     | MCP Apps widget playbook.                                    |
+| `review`       | Reviewer checklist and verdict format.                       |
 
 Each specialist subagent reads its skill before working. The orchestrator reads `ship-feature`.

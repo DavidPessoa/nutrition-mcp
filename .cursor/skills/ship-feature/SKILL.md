@@ -42,7 +42,7 @@ Cap concurrent implementation subagents at 3.
 
 ## 3. Prove
 
-After builders return:
+Tests are a hard gate. After builders return, run the full trio:
 
 ```bash
 bun run format:check
@@ -50,17 +50,16 @@ bun run typecheck
 bun test
 ```
 
-If the plan named a tighter test glob and the full suite is long, run that glob plus `format:check` and `typecheck`. Before calling the reviewer, still prefer a full `bun test` when the change can leak.
+A plan-named glob is extra coverage, not a substitute for the full suite.
 
 Send failures back to the owning specialist with the error output. Do not fix across ownership lines.
 
 ## 4. Review
 
-Launch `reviewer` (read-only) with:
+Launch `reviewer` (read-only) only once prove is green. It must receive the verbatim prove output, plus:
 
 - The original request and the plan
 - `git diff` against the starting point (or the file list + what changed)
-- Test/format/typecheck output
 - Builder reports
 - Instruction to follow `.cursor/skills/review/SKILL.md`
 
@@ -79,7 +78,7 @@ Stop only when the verdict is `APPROVE` and blocking findings are zero.
 
 ## 6. Pull request
 
-Every feature ends with a PR. Do this only after `APPROVE`. Specialists still must not git.
+Every feature ends with a PR. Do this only after green prove **and** `APPROVE` with zero blocking findings. Specialists still must not git.
 
 Work on a feature branch, not `main`. If HEAD is `main`, create and switch to a branch named for the feature (`feat/…`, `fix/…`) before committing.
 
@@ -108,7 +107,7 @@ gh pr create --title "<title>" --body "$(cat <<'EOF'
 ## Test plan
 - [ ] `bun run format:check`
 - [ ] `bun run typecheck`
-- [ ] `bun test` (or the files this feature covers)
+- [ ] `bun test`
 - [ ] <behavior to click/verify if UI>
 
 EOF
@@ -133,3 +132,5 @@ Report to the user:
 - Architect wants to implement: refuse and take only the plan.
 - Reviewer wants to patch: refuse; send findings to builders.
 - Reviewer returns APPROVE without listing what they inspected: send them back.
+- Launching the reviewer on red or absent prove output is a process violation.
+- Opening a PR without both green prove and `APPROVE` with zero blocking findings is a process violation.

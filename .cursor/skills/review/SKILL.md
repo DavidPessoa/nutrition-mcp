@@ -39,7 +39,9 @@ REQUEST CHANGES
 
 `APPROVE` is allowed only with zero blocking findings. The orchestrator will not open the PR otherwise. You do not create the PR.
 
-Blocking: incorrect behavior, security, dual-backend drift, missing tests for a new branch, broken widget handshake, CLAUDE.md landmine, `outputSchema` holes, silent data loss.
+Tests are a hard gate. `APPROVE` is forbidden unless `bun run format:check`, `bun run typecheck`, and `bun test` are all green in output the reviewer either ran or was given verbatim.
+
+Blocking: incorrect behavior, security, dual-backend drift, missing tests for a new branch, broken widget handshake, CLAUDE.md landmine, `outputSchema` holes, silent data loss, prove output that is missing, stale relative to the diff, or shows any failure.
 
 Non-blocking: style nits that Prettier does not settle, optional refactors, naming taste. Do not inflate these into blockers.
 
@@ -55,7 +57,7 @@ Non-blocking: style nits that Prettier does not settle, optional refactors, nami
 
 - Smallest change that works. No new abstraction for a one-call site.
 - Tests assert behavior, not that a function was called. New logic has a test next to it.
-- `bun run typecheck` and relevant `bun test` actually run in this review (or you quote the orchestrator's output and say you relied on it).
+- `bun run format:check`, `bun run typecheck`, and `bun test` actually run in this review (or you quote the orchestrator's verbatim output and say you relied on it).
 - Prettier-clean. No leftover debug. No commented-out code.
 
 ### Security
@@ -91,7 +93,7 @@ Non-blocking: style nits that Prettier does not settle, optional refactors, nami
 
 ## Tests
 
-<what ran, pass/fail>
+Name the exact commands (`bun run format:check`, `bun run typecheck`, `bun test`) and their pass/fail outcome.
 
 ## Verdict
 

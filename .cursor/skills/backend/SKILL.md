@@ -21,7 +21,7 @@ Whatever the plan listed, typically:
 - Domain modules (`src/import.ts`, `src/export.ts`, `src/tz.ts`, `src/analytics.ts`, …) and their tests
 - Tool wiring, `outputSchema`, `structuredContent`, widget `_meta.ui.resourceUri` (not the HTML)
 
-Leave migrations and widget source to those specialists unless assigned.
+Leave migrations and widget source to those specialists unless assigned. `src/*.test.ts` is backend. Widget tests under `public/widgets/**` belong to frontend.
 
 ## New or changed tools
 
