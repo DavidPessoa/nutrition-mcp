@@ -1,12 +1,12 @@
 <!doctype html>
 <html lang="en">
     <head>
-        <title>Tools Reference: All 38 Tools — Nutrition MCP</title>
+        <title>Tools Reference: All 39 Tools — Nutrition MCP</title>
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <meta charset="utf-8" />
         <meta
             name="description"
-            content="All 38 tools the Nutrition MCP server gives your AI — log meals, scan barcodes, import your history from another app, track water and weight, set goals, and review trends. Full reference with descriptions and example prompts."
+            content="All 39 tools the Nutrition MCP server gives your AI — log meals, scan barcodes, look up whole foods, import your history from another app, track water and weight, set goals, and review trends. Full reference with descriptions and example prompts."
         />
         <link rel="canonical" href="https://nutrition-mcp.com/tools" />
         <link rel="icon" href="/favicon.ico" />
@@ -14,11 +14,11 @@
         <meta name="theme-color" content="#4a7c59" />
         <meta
             property="og:title"
-            content="Tools Reference: All 38 Tools — Nutrition MCP"
+            content="Tools Reference: All 39 Tools — Nutrition MCP"
         />
         <meta
             property="og:description"
-            content="All 38 tools the Nutrition MCP server gives your AI, including a CSV importer for your history from another app — with descriptions and example prompts."
+            content="All 39 tools the Nutrition MCP server gives your AI, including a CSV importer for your history from another app — with descriptions and example prompts."
         />
         <meta property="og:type" content="website" />
         <meta property="og:url" content="https://nutrition-mcp.com/tools" />
@@ -461,7 +461,7 @@
                     </p>
                     <span class="count-pill"
                         ><i class="fa-solid fa-wrench" aria-hidden="true"></i
-                        ><b>38 tools</b> across 7 areas</span
+                        ><b>39 tools</b> across 7 areas</span
                     >
                 </div>
             </section>
@@ -729,6 +729,36 @@
                                         ></i>
                                         …or send a photo of the package — the AI
                                         reads the barcode digits off it.
+                                    </p>
+                                </div>
+                            </article>
+
+                            <article class="tool-card" id="lookup_food">
+                                <div class="tool-head">
+                                    <code class="tool-name">lookup_food</code>
+                                    <span class="chip chip-lookup"
+                                        >Look up</span
+                                    >
+                                </div>
+                                <p class="tool-desc">
+                                    Look up a generic whole food — chicken
+                                    breast, an egg, a baked potato, spinach,
+                                    cooked rice — in USDA FoodData Central. The
+                                    counterpart to lookup_barcode for unpackaged
+                                    foods with no label: it returns candidates
+                                    so raw vs cooked and skin vs skinless are
+                                    chosen deliberately, then scales nutrition
+                                    (including micronutrients) to the grams
+                                    eaten. Use it instead of estimating whenever
+                                    the user eats a plain whole food.
+                                </p>
+                                <div class="tool-ex">
+                                    <span class="tool-ex-label"
+                                        >Try saying</span
+                                    >
+                                    <p>
+                                        Look up 150 g of cooked chicken breast
+                                        in USDA
                                     </p>
                                 </div>
                             </article>

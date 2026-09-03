@@ -118,20 +118,20 @@ const APPS: App[] = [
         file: "cronometer.html",
         icon: "fa-seedling",
         hubBlurb:
-            "No MCP server. See the free, conversational way to track calories and macros inside your AI.",
+            "No MCP server. See the free, conversational way to track calories, macros, and twelve micronutrients inside your AI — Cronometer still goes deeper on the rest.",
         cons: [
             "No MCP server — can't run inside Claude or ChatGPT",
             "Log by searching its database, entry by entry",
             "Some features require a paid Gold plan",
             "A separate app to open every time you eat",
         ],
-        note: "Cronometer is excellent if you want deep micronutrient precision. Nutrition MCP takes a lighter, conversational approach to calories, macros, and weight — right inside your AI.",
+        note: "Cronometer is excellent if you want 80+ micronutrient precision. Nutrition MCP tracks twelve micronutrients from real sources — never estimated — and takes a lighter, conversational approach to the rest, right inside your AI.",
         migrate: {
             title: "When accuracy is the whole point",
             body: [
-                "Cronometer earned its reputation on precision — curated databases and tracking for 80+ micronutrients, vitamins and minerals included. If that micronutrient depth is why you open it, be honest with yourself: conversational estimates won't match a lab-grade database entry gram for gram.",
-                "But most people log to keep calories and macros in range, not to audit their selenium intake. That range is wider than it sounds: alongside protein, carbs, and fat you get fiber, total sugar, and caffeine in milligrams, and optional alcohol in grams of ethanol if you switch it on. For that, describing a meal to your AI is far less work than searching for and weighing every component — and you still get daily totals, trends, and a target weight to track against, for free.",
-                "There's also a middle path: because you're inside an AI assistant, you can ask for the micronutrient angle when you actually want it — “roughly how much iron and B12 was in today's meals?” — and get a reasoned estimate on demand, without the overhead of logging every gram to a curated entry the rest of the time.",
+                "Cronometer earned its reputation on precision — curated databases and tracking for 80+ micronutrients, vitamins and minerals included. If that full micronutrient depth is why you open it, be honest with yourself: twelve tracked micronutrients is not eighty, and conversational estimates of calories and macros won't match a lab-grade database entry gram for gram.",
+                "But most people log to keep calories and macros in range, with a useful micronutrient set beside them. Alongside protein, carbs, and fat you get fiber, total sugar, and caffeine in milligrams, optional alcohol in grams of ethanol if you switch it on, and twelve micronutrients stored only from a real source — a nutrition label, a barcode via Open Food Facts, a USDA FoodData Central lookup for generic whole foods, published restaurant nutrition, a value you state, or an import. Micronutrients the model estimates are refused by the server, not stored. For that, describing a meal to your AI is far less work than searching for and weighing every component — and you still get daily totals, coverage-aware progress, trends, and a target weight to track against, for free.",
+                "When you need a measured micronutrient figure rather than a guess, look the food up: scan a barcode for a packaged product, or ask for a USDA FoodData Central lookup of a generic whole food — chicken breast, an egg, spinach — then pick the right candidate (raw vs cooked, skin vs skinless) and scale it to the grams eaten. That is how sodium, iron, vitamin D and the rest of the twelve land in the log; there is no on-demand estimate path for them.",
             ],
         },
         importSection: {
@@ -139,19 +139,19 @@ const APPS: App[] = [
             body: [
                 "Precision is why you used Cronometer, so a sloppy import would be worse than none. Ask to import and a panel opens in the chat: you pick your Cronometer CSV, it's parsed in your browser, and you approve a preview before a single row is written. The numbers are read straight out of the file — the AI never sees the rows, so it can't round or retype one.",
                 "Cronometer's export shape is recognised by name. It splits the timestamp across separate date and time columns, and both are read, so a breakfast logged at 07:12 keeps its time instead of landing at a default midday. It writes a quantity with the unit inside the same cell — “58.00 g”, “1.00 cup” — and a value written that way still reads as the number it is rather than as nothing. And it repeats the “Amount” heading more than once, so columns are keyed by position rather than by name: the duplicates can't silently collide, and the mapper tells you which one you're pointing at.",
-                "Be clear about what crosses over: the date and time, food name, meal, calories, protein, carbs, fat, fiber, total sugar, caffeine, and notes. Cronometer is the one export in this list that ships a Caffeine (mg) column, and it lands as milligrams — the unit it is already in, and the one caffeine is stored in here, so nothing is converted. A caffeine column headed in grams is left unmapped instead, with the reason shown, rather than recording 0.18 where the label says 180 mg. Sugar means total sugars, the fruit and milk included — not added sugar, which no export reliably carries. Cronometer's separate “Sugar Alcohols” column is a polyol rather than a sugar or an ethanol, and it can't land in either field. Alcohol is a special case: Cronometer exports it as ethyl alcohol in grams, and it comes across only if you've turned alcohol tracking on here first, since it's off until you do. Portion amounts and Cronometer's 80-plus vitamins and minerals don't cross over at all — that micronutrient depth stays in Cronometer's own export. Re-importing is harmless: each row carries a content fingerprint, so a second run of the same file reports the meals as already logged rather than adding them twice.",
+                "Be clear about what crosses over: the date and time, food name, meal, calories, protein, carbs, fat, fiber, total sugar, caffeine, notes, and the twelve supported micronutrients when the export carries them — saturated fat, trans fat, added sugar, sodium, potassium, cholesterol, calcium, iron, magnesium, vitamin A, vitamin C, and vitamin D. Cronometer is the one export in this list that ships a Caffeine (mg) column, and it lands as milligrams — the unit it is already in, and the one caffeine is stored in here, so nothing is converted. A caffeine column headed in grams is left unmapped instead, with the reason shown, rather than recording 0.18 where the label says 180 mg. Sugar means total sugars, the fruit and milk included — added sugar is a separate column when the export has one. Cronometer's separate “Sugar Alcohols” column is a polyol rather than a sugar or an ethanol, and it can't land in either field. Alcohol is a special case: Cronometer exports it as ethyl alcohol in grams, and it comes across only if you've turned alcohol tracking on here first, since it's off until you do. Portion amounts and Cronometer's remaining seventy-odd vitamins and minerals do not cross over — that deeper set stays in Cronometer's own export. Re-importing is harmless: each row carries a content fingerprint, so a second run of the same file reports the meals as already logged rather than adding them twice.",
             ],
         },
         importFaq:
-            "Yes. Ask to import and an importer opens in the chat: you choose your Cronometer CSV, it's parsed in your browser rather than read by the AI, and you preview what will be added before confirming. Cronometer's export is recognised by name — its separate date and time columns are both read, and its repeated “Amount” heading can't collide because columns are keyed by position. The date and time, food name, meal, calories, protein, carbs, fat, fiber, total sugar, caffeine in milligrams, and notes come across; alcohol does too, but only if you've switched alcohol tracking on first. Vitamins, minerals, and portion amounts don't. Re-importing the same file never creates duplicates.",
+            "Yes. Ask to import and an importer opens in the chat: you choose your Cronometer CSV, it's parsed in your browser rather than read by the AI, and you preview what will be added before confirming. Cronometer's export is recognised by name — its separate date and time columns are both read, and its repeated “Amount” heading can't collide because columns are keyed by position. The date and time, food name, meal, calories, protein, carbs, fat, fiber, total sugar, caffeine in milligrams, notes, and the twelve supported micronutrients (saturated fat, trans fat, added sugar, sodium, potassium, cholesterol, calcium, iron, magnesium, vitamin A, vitamin C, and vitamin D) come across when the export carries them; alcohol does too, but only if you've switched alcohol tracking on first. Cronometer's remaining seventy-odd vitamins and minerals, and portion amounts, don't. Re-importing the same file never creates duplicates.",
         extraFaqs: [
             {
                 q: "Does Nutrition MCP track micronutrients like Cronometer?",
-                a: "No. Cronometer's tracking of 80+ vitamins and minerals is its specialty, and Nutrition MCP has no micronutrient data at all — no sodium, no vitamins. What it does track is calories, protein, carbs, fat, fiber, total sugar, caffeine in milligrams, optional alcohol, water, and weight. You can still ask your AI for a rough micronutrient read on a meal, but if lab-grade micronutrient depth is essential, Cronometer is the better fit.",
+                a: "Twelve of them, from real sources only — saturated fat, trans fat, and added sugar in grams; sodium, potassium, cholesterol, calcium, iron, magnesium, and vitamin C in milligrams; vitamin A in µg RAE and vitamin D in µg. Ten have daily goals (maximums for saturated fat, sodium, and cholesterol; minimums for potassium, calcium, iron, magnesium, and vitamins A, C, and D); trans fat and added sugar have no goal. Micronutrients are never estimated: a label, barcode, USDA lookup, restaurant nutrition, a value you state, or an import is required, and a model estimate is refused by the server. Cronometer still tracks 80+; if that full depth is essential, Cronometer remains the better fit for that job.",
             },
             {
                 q: "Is Nutrition MCP as accurate as Cronometer?",
-                a: "For calories, macros, fiber, and sugar, conversational estimates are close enough for most goals — but they won't match Cronometer's curated, gram-for-gram database. It trades a little precision for far less logging effort, which is the right trade for most people.",
+                a: "For calories, macros, fiber, and sugar, conversational estimates are close enough for most goals — but they won't match Cronometer's curated, gram-for-gram database. Micronutrients here come from labels, barcodes, USDA FoodData Central, restaurant nutrition, a value you state, or an import — never from a model guess. It trades a little logging friction for far less daily effort, which is the right trade for most people.",
             },
         ],
     },
@@ -535,7 +535,10 @@ const FEATURES = `                    <div class="features-grid">
                                 Say &ldquo;oatmeal with banana and peanut
                                 butter&rdquo; — your AI estimates calories and
                                 macros, fiber, total sugar and caffeine included, and logs
-                                it. No database search.
+                                it. Micronutrients are never estimated: they come
+                                from a label, barcode, USDA lookup, restaurant
+                                nutrition, a value you state, or an import. No
+                                database search.
                             </p>
                         </article>
                         <article class="card feature">
@@ -545,9 +548,9 @@ const FEATURES = `                    <div class="features-grid">
                             <h3>Barcode scanning — free</h3>
                             <p>
                                 Send a product barcode and pull the label macros
-                                from Open Food Facts — fiber and sugar too, where
-                                the label lists them. No Premium subscription to
-                                unlock it.
+                                from Open Food Facts — fiber, sugar, and
+                                micronutrients too, where the label lists them.
+                                No Premium subscription to unlock it.
                             </p>
                         </article>
                         <article class="card feature">
@@ -559,9 +562,15 @@ const FEATURES = `                    <div class="features-grid">
                                 Log body weight in kg or lb, set calorie, macro,
                                 fiber, sugar, caffeine, and water goals — fiber a
                                 target to reach, sugar and caffeine limits to
-                                stay under — and track
-                                trends toward a goal weight. Alcohol tracking is
-                                there too, opt-in and off unless you turn it on.
+                                stay under — plus micronutrient goals:
+                                maximums for saturated fat, sodium, and
+                                cholesterol; minimums for potassium, calcium,
+                                iron, magnesium, vitamin A, vitamin C, and
+                                vitamin D. Trans fat and added sugar are tracked
+                                when a source states them but have no goal.
+                                Track trends toward a goal weight. Alcohol
+                                tracking is there too, opt-in and off unless you
+                                turn it on.
                             </p>
                         </article>
                         <article class="card feature">
@@ -675,7 +684,7 @@ function faqsFor(app: App): { q: string; a: string }[] {
         ...app.extraFaqs,
         {
             q: `Is Nutrition MCP a good ${app.name} alternative?`,
-            a: `If you want to track calories, macros — fiber, total sugar, and caffeine included — water, and weight without opening a separate app or searching a food database, yes. Instead of tapping through a database, you describe what you ate in plain language, send a photo, or scan a barcode, and your AI logs it — completely free and open source.`,
+            a: `If you want to track calories, macros — fiber, total sugar, and caffeine included — twelve micronutrients from real sources, water, and weight without opening a separate app or searching a food database, yes. Instead of tapping through a database, you describe what you ate in plain language, send a photo, or scan a barcode, and your AI logs it — completely free and open source.`,
         },
         {
             q: `Can I import my ${app.name} data?`,

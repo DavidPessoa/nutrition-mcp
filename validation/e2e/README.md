@@ -3,7 +3,11 @@
 The six scenarios the epic requires before it can be called done
 (`docs/nutrient-epic/FEATURE_REQUEST.md`, "Required end-to-end release
 validation"). Each one is a chain, and the point of the chain is that a
-value survives every link unchanged:
+value survives every link unchanged.
+
+**This PR (`feat/finish-micronutrients`) did not change the status below.** All
+six rows remain BLOCKED — public copy, copy-drift guards, and the boot
+migration probe are not a substitute for these chains.
 
 | #   | Scenario                 | Chain                                                                            | Status                     |
 | --- | ------------------------ | -------------------------------------------------------------------------------- | -------------------------- |
@@ -24,7 +28,7 @@ migration applied. Nothing in this repo can meet them without one:
 - No `SUPABASE_URL` / `SUPABASE_SECRET_KEY` is configured.
 
 The provider halves of scenarios 1 and 2 — the parts that do not touch the
-database — are validated independently and do pass:
+database — are validated independently and do pass when credentials exist:
 
 - `bun run validate:off` — real barcodes through the real Open Food Facts
   API, compared against hand-derived values. See
@@ -68,15 +72,16 @@ SUPABASE_URL=https://<project>.supabase.co
 SUPABASE_SECRET_KEY=<service key>
 ```
 
-Apply every migration in `supabase/migrations/` to that project, then run
+Apply every migration in `supabase/migrations/` to that project, then run:
 
-````bash
+```bash
 bun run e2e:nutrients --test-project
-``` Record each one here as its own file using the evidence
-format in `validation/README.md`: date, source, source identifier, serving
-basis, source values, independently computed expectations, actual values,
-difference, pass/fail.
+```
+
+Record each one here as its own file using the evidence format in
+`validation/README.md`: date, source, source identifier, serving basis, source
+values, independently computed expectations, actual values, difference,
+pass/fail.
 
 A scenario is not passed because the code looks right. It is passed when the
 numbers were compared and written down.
-````

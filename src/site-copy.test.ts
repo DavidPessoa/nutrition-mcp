@@ -259,3 +259,184 @@ test("the comparison-page card names every table it promises back", async () => 
         );
     }
 });
+
+// Micronutrients shipped across the server, widgets, importer and tool
+// descriptions while the public copy still said they did not exist. Same
+// failure mode as caffeine: pin the enumeration, not the adjectives around it.
+const MICRONUTRIENT_NAMES = [
+    "saturated fat",
+    "trans fat",
+    "added sugar",
+    "sodium",
+    "potassium",
+    "cholesterol",
+    "calcium",
+    "iron",
+    "magnesium",
+    "vitamin a",
+    "vitamin c",
+    "vitamin d",
+] as const;
+
+const ALT_SLUGS = [
+    "cronometer",
+    "myfitnesspal",
+    "lose-it",
+    "macrofactor",
+    "yazio",
+    "lifesum",
+] as const;
+
+test("lookup_food is visible in the public tool surfaces", async () => {
+    const readme = await Bun.file("./README.md").text();
+    const llms = await Bun.file("./public/llms.txt").text();
+    const tools = await Bun.file("./public/tools.html").text();
+    expect(readme).toContain("lookup_food");
+    expect(llms).toContain("lookup_food");
+    expect(tools).toMatch(
+        /<code class="tool-name"\s*>\s*lookup_food\s*<\/code\s*>/,
+    );
+    expect(tools).toContain('id="lookup_food"');
+});
+
+// Scrape registerTool names from src/mcp.ts once — used by the README table
+// guard and the landing-page tool-count CTA. Matched against source text
+// rather than imported (mcp.ts has side effects). A scrape that finds nothing
+// fails loudly so a renamed call site cannot vacate the guard.
+async function registeredToolNames(): Promise<string[]> {
+    const mcpSrc = await Bun.file("./src/mcp.ts").text();
+    const registered = [
+        ...new Set(
+            [...mcpSrc.matchAll(/server\.registerTool\(\s*"([^"]+)"/g)].map(
+                (m) => m[1]!,
+            ),
+        ),
+    ].sort();
+    expect(
+        registered.length,
+        "scraped no registerTool names out of src/mcp.ts — this guard's regex has gone stale, not the copy",
+    ).toBeGreaterThan(0);
+    return registered;
+}
+
+// Word-boundary match so "iron" does not pass on "environment" and
+// "added sugar" is not satisfied by an unrelated "added" + distant "sugar".
+function namesMicronutrient(haystack: string, name: string): boolean {
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp(`\\b${escaped}\\b`, "i").test(haystack);
+}
+
+test("both 'What can I track?' answers name every micronutrient", () => {
+    const { jsonLd, visible } = trackAnswers();
+    for (const answer of [jsonLd!, visible!]) {
+        const t = normalize(answer);
+        // Scope to the enumeration sentence — the rest of the answer names
+        // macros and goals and would dilute a bare substring check.
+        const enumSentence = t.match(
+            /Twelve micronutrients are tracked[\s\S]*?have no goal\./i,
+        )?.[0];
+        expect(
+            enumSentence,
+            "track answer is missing the micronutrient enumeration sentence",
+        ).toBeTruthy();
+        for (const name of MICRONUTRIENT_NAMES) {
+            expect(
+                namesMicronutrient(enumSentence!, name),
+                `track answer omits ${name}`,
+            ).toBe(true);
+        }
+    }
+});
+
+test("llms.txt names every micronutrient and does not deny them", async () => {
+    const llms = await Bun.file("./public/llms.txt").text();
+    const t = normalize(llms);
+    const enumSentence = t.match(
+        /Twelve micronutrients are tracked[\s\S]*?have no goal\./i,
+    )?.[0];
+    expect(
+        enumSentence,
+        "llms.txt is missing the micronutrient enumeration sentence",
+    ).toBeTruthy();
+    for (const name of MICRONUTRIENT_NAMES) {
+        expect(
+            namesMicronutrient(enumSentence!, name),
+            `llms.txt omits ${name}`,
+        ).toBe(true);
+    }
+    expect(t.toLowerCase()).not.toContain("no micronutrient tracking");
+    expect(t.toLowerCase()).not.toContain("no micronutrient data at all");
+});
+
+test("the comparison-page generator names every micronutrient", () => {
+    const t = normalize(generator);
+    for (const name of MICRONUTRIENT_NAMES) {
+        expect(namesMicronutrient(t, name), `generator omits ${name}`).toBe(
+            true,
+        );
+    }
+    expect(t.toLowerCase()).not.toContain("no micronutrient data at all");
+    expect(t.toLowerCase()).not.toContain("no micronutrient tracking");
+});
+
+test("every generated comparison page names every micronutrient", async () => {
+    for (const slug of ALT_SLUGS) {
+        const html = await Bun.file(
+            `./public/alternatives/${slug}.html`,
+        ).text();
+        const t = normalize(html);
+        for (const name of MICRONUTRIENT_NAMES) {
+            expect(
+                namesMicronutrient(t, name),
+                `${slug}.html omits ${name}`,
+            ).toBe(true);
+        }
+        expect(
+            t.toLowerCase(),
+            `${slug}.html still denies micronutrients`,
+        ).not.toContain("no micronutrient data at all");
+        expect(
+            t.toLowerCase(),
+            `${slug}.html still denies micronutrient tracking`,
+        ).not.toContain("no micronutrient tracking");
+    }
+});
+
+// The README tool table is a mirror of registerTool names in src/mcp.ts.
+test("the README tool table lists every registerTool name in src/mcp.ts", async () => {
+    const registered = await registeredToolNames();
+
+    const readme = await Bun.file("./README.md").text();
+    const tabled = [
+        ...new Set(
+            [...readme.matchAll(/^\| `([a-z_]+)`\s*\|/gm)].map((m) => m[1]!),
+        ),
+    ].sort();
+    expect(
+        tabled.length,
+        "scraped no tool names out of README.md's tool table — this guard's regex has gone stale, not the copy",
+    ).toBeGreaterThan(0);
+    expect(
+        tabled,
+        "README.md tool table and src/mcp.ts registerTool names disagree",
+    ).toEqual(registered);
+});
+
+// The landing-page tools CTA is the other place a tool-count numeral goes
+// stale (it said 38 after lookup_food shipped). Derive N from the same
+// registerTool scrape so the next tool cannot leave this CTA behind.
+test("the landing page's tools CTA matches the registerTool count", async () => {
+    const n = (await registeredToolNames()).length;
+    const cta = index.match(/Browse all (\d+) tools/)?.[1];
+    expect(
+        cta,
+        "landing page is missing the 'Browse all N tools' CTA",
+    ).toBeTruthy();
+    expect(
+        Number(cta),
+        `landing page says "Browse all ${cta} tools" but src/mcp.ts registers ${n}`,
+    ).toBe(n);
+    // And no leftover whole-word 38 claiming a tool count elsewhere on the page
+    // (38.2 in a demo weight figure is fine — it is not a tool count).
+    expect(normalize(index)).not.toMatch(/\b38 tools\b/i);
+});

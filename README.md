@@ -1,6 +1,6 @@
 # Nutrition MCP
 
-A remote MCP server for personal nutrition tracking — log meals with calories, macros, fiber, total sugar and caffeine, log water and body weight, review nutrition history, and import an existing food diary from another app, all through conversation. Alcohol tracking is opt-in and off by default.
+A remote MCP server for personal nutrition tracking — log meals with calories, macros, fiber, total sugar, caffeine, and twelve micronutrients from real sources (never estimated), log water and body weight, review nutrition history, and import an existing food diary from another app, all through conversation. Alcohol tracking is opt-in and off by default.
 
 [Help me pay for the servers on Patreon][patreon]
 
@@ -42,6 +42,7 @@ Read the story behind it: [How I Replaced MyFitnessPal and Other Apps with a Sin
 | `start_meal_import`        | Open the in-chat CSV importer: pick an export from another app, map its columns, preview, confirm                                                |
 | `bulk_import_meals`        | Write up to 50 imported rows per call — each row validated, duplicates skipped so a re-send is safe                                              |
 | `lookup_barcode`           | Look up a packaged product's label nutrition by barcode via Open Food Facts (read from a photo or typed)                                         |
+| `lookup_food`              | Look up a generic whole food in USDA FoodData Central — pick among candidates (raw vs cooked, skin vs skinless), scale to the grams eaten        |
 | `get_meals_today`          | Get all meals logged today                                                                                                                       |
 | `get_meals_by_date`        | Get meals for a specific date (YYYY-MM-DD)                                                                                                       |
 | `get_meals_by_date_range`  | Get meals between two dates (inclusive)                                                                                                          |
@@ -111,6 +112,8 @@ To apply the schema to an existing empty database without Compose: `psql "$DATAB
     ```
 
     This creates every table, index, RLS policy, and foreign key the app needs. No local Postgres is involved — migrations run against your hosted project.
+
+    After upgrading to a build that includes the micronutrient migrations (`20260819120000_micronutrient_expansion.sql` and `20260819130000_micronutrient_goals.sql`), re-run `supabase db push` — meal writes name those columns, and an unmigrated project will fail them.
 
 4. Copy the **service role key** from Project Settings → API and use it as `SUPABASE_SECRET_KEY`. Do not set `DATABASE_URL` on this path.
 
