@@ -22,9 +22,8 @@ warmed in `src/index.ts`). Nothing generated is committed.
 
 - **Sources** live in `public/widgets/src/`: shared partials in `shared/`
   (`tokens.css`, `base.css`, `ring.css`, `macros.css`, `micros.css`, `trend.css`,
-  `seg.css`, `form.css`, `table.css`, `macros.js`, `micros.js`, `bridge.js`) and one
-  template per widget
-  in `templates/`.
+  `seg.css`, `form.css`, `table.css`, `macros.js`, `micros.js`, `date.js`,
+  `bridge.js`) and one template per widget in `templates/`.
 - **Include marker** — a partial is inlined with a comment that is valid CSS _and_
   JS, so a template still parses on its own:
   `/*@include shared/tokens.css@*/`, `/*@include shared/bridge.js@*/`.
@@ -501,6 +500,13 @@ widgets, and in two of them it names the **denominator**: `nutrition-summary` sa
 "Daily avg · logged days", `trends` says "14-day avg · all days". Same macros,
 different number (issue #70) — that label is the only place the difference is
 stated on screen, so keep it explicit.
+
+`goal-progress` and `meal-logged` pass `calLabel` from `shared/date.js`: "Calories
+today" when `isToday(data.date)` (the viewer's local calendar day) and
+`Calories · 11 Jul` otherwise. **The ring never claims a day it is not** — a
+backfilled or historical payload must not read "today" above its figure.
+`nutrition-summary` and `weight-trends` keep their own private `MONTHS` copies;
+only the day-scoped widgets include `date.js`.
 
 ### Layout is by `role`, never by a key list
 

@@ -72,6 +72,12 @@ Use HTML imports with `Bun.serve()` — not Vite. HTML files can directly import
 
 ---
 
+## Dual-era `/mcp`
+
+`/mcp` is served by `createMcpHandler` from `@modelcontextprotocol/server`: **2026-07-28** is the primary revision, with **2025-11-25** as a stateless legacy fallback (`legacy: "stateless"`). One server factory backs both eras — `newMcpServer(baseUrl)` for identity-only modern probes (`server/discover`, `subscriptions/listen`), `buildMcpServer(baseUrl, userId)` for everything that needs tools. New tools must declare `inputSchema` and `outputSchema` as `z.object(...)` (not bare `z.string()` etc.), which the v2 SDK requires for structured tool listings.
+
+---
+
 ## Custom UI Widgets (MCP Apps)
 
 In-chat UI uses **MCP Apps** (the official 2026-01-26 MCP extension), which renders across Claude, ChatGPT, VS Code, Goose, and MCP Inspector from one implementation. Widgets are **assembled from source partials at server startup** — not committed as built files. Sources live in `public/widgets/src/` (`shared/` partials + one `templates/*.html` per widget); `src/widgets.ts` inlines the partials (resolving `/*@include shared/…@*/` markers) into one self-contained HTML string per widget, cached and warmed at boot (`warmWidgets()` in `src/index.ts`). `src/mcp.ts` serves each via `getWidgetHtml(key)`. Every in-chat widget is **one compact card**: a header line, the widget's own top matter (a chart, a range toggle, a weight line), then the shared macro strip — a calorie ring beside its figure, three macro bars, a "limits" row (sugar / alcohol / caffeine / fiber), and the water line. The shell lives in `shared/base.css` (`.wrap.tight`, `.panel`, `.phead`, `.psec`) and the strip in `shared/macros.*`. The widgets: the `get_nutrition_summary` dashboard, the `get_goal_progress` view, the meal-progress strip (`meal-logged`, which renders nothing when no goals are set), the `get_trends` view (interactive 7/14/30-day toggle), the `get_weight_trends` view (data-scaled weight-over-time chart with the same toggle), and `import-meals` (the bulk-import flow — see "Bulk meal import" below). `component-gallery` is dev-only: it is listed in `WIDGET_TEMPLATES` so it is assembled and test-covered, but no `ui://` resource or tool references it, so no client can reach it — view it with `bun run harness`. They share one design language and one host bridge — see `public/widgets/STYLE_GUIDE.md`. `bun test src/widgets.test.ts` guards assembly (no unresolved markers, valid inline JS, every partial inlined in full).

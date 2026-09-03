@@ -72,6 +72,11 @@ export interface FoodResult {
     // as an explicit field (rather than omitted) so FoodResult always covers
     // every NUTRIENT_FIELD by name, matching ProviderNutrientValues.
     caffeine_mg: number | null;
+    // Open Food Facts' own quality scores. Both are null when OFF hasn't
+    // computed one — a real gap, not a lookup failure — so unlike fiber/sugar
+    // we don't advise the caller to estimate a replacement.
+    nutriscore_grade: "a" | "b" | "c" | "d" | "e" | null;
+    nova_group: 1 | 2 | 3 | 4 | null;
     // ---- twelve new canonical micronutrient fields (CONTRACT §1) ----
     // See MICRONUTRIENT_OFF_KEYS below for the OFF key + verified unit each
     // of these is read from.
@@ -208,6 +213,29 @@ interface OFFProduct {
     serving_quantity?: unknown;
     serving_quantity_unit?: unknown;
     nutriments?: Record<string, unknown>;
+    // "a"-"e", or "not-applicable" / "unknown" when OFF hasn't computed one.
+    nutriscore_grade?: unknown;
+    nova_group?: unknown;
+}
+
+const NUTRISCORE_GRADES = ["a", "b", "c", "d", "e"] as const;
+
+function normalizeNutriscoreGrade(
+    value: unknown,
+): FoodResult["nutriscore_grade"] {
+    const grade = String(value ?? "")
+        .trim()
+        .toLowerCase();
+    return (NUTRISCORE_GRADES as readonly string[]).includes(grade)
+        ? (grade as FoodResult["nutriscore_grade"])
+        : null;
+}
+
+function normalizeNovaGroup(value: unknown): FoodResult["nova_group"] {
+    const group = typeof value === "string" ? parseFloat(value) : value;
+    return group === 1 || group === 2 || group === 3 || group === 4
+        ? group
+        : null;
 }
 
 // The only alcohol unit Open Food Facts actually emits (see below).
@@ -448,6 +476,8 @@ function normalizeOFFProduct(product: OFFProduct, barcode: string): FoodResult {
         alcohol_g: resolveAlcoholGrams(product, n, hasServing),
         // Open Food Facts has no caffeine nutriment at all.
         caffeine_mg: null,
+        nutriscore_grade: normalizeNutriscoreGrade(product.nutriscore_grade),
+        nova_group: normalizeNovaGroup(product.nova_group),
         saturated_fat_g: readMicronutrient(
             "saturated_fat_g",
             "saturated-fat",
@@ -593,7 +623,7 @@ const BACKFILL_NULL_FIELDS = [
     "vitamin_d_mcg",
 ] as const satisfies readonly NutrientField[];
 
-async function getCachedFood(
+export async function getCachedFood(
     source: string,
     sourceId: string,
     ttlMs: number,
@@ -613,6 +643,8 @@ async function getCachedFood(
         for (const field of BACKFILL_NULL_FIELDS) {
             backfilled[field] = payload[field] ?? null;
         }
+        backfilled.nutriscore_grade = payload.nutriscore_grade ?? null;
+        backfilled.nova_group = payload.nova_group ?? null;
         // `servingBasis` did not exist before this change. Best-effort
         // reconstruction from the pre-existing `serving` label: the old
         // normalizer only ever wrote the literal "100 g" on the per-100g
@@ -682,6 +714,19 @@ function macro(value: number | null, unit: string): string {
     return value == null ? "n/a" : `${value} ${unit}`;
 }
 
+function novaLabel(group: 1 | 2 | 3 | 4): string {
+    switch (group) {
+        case 1:
+            return "unprocessed/minimally processed";
+        case 2:
+            return "processed culinary ingredient";
+        case 3:
+            return "processed";
+        case 4:
+            return "ultra-processed";
+    }
+}
+
 // Human labels for the micronutrient line, in the order they are checked —
 // only fields Open Food Facts actually populated are ever shown, so a
 // product with a sparse micronutrient panel gets a short line instead of a
@@ -719,6 +764,9 @@ const MICRONUTRIENT_DISPLAY: ReadonlyArray<
  * least one of them is non-null — a product Open Food Facts has no
  * micronutrient data for at all renders exactly as it did before this field
  * set existed, so this is purely additive.
+ *
+ * Nutri-Score and NOVA are omitted entirely when OFF hasn't computed them —
+ * unlike fiber/sugar, that is not a gap to estimate around.
  */
 export function formatFoodResult(
     food: FoodResult,
@@ -740,6 +788,15 @@ export function formatFoodResult(
             "g",
         )}`,
     ];
+    const scoreParts = [
+        food.nutriscore_grade
+            ? `Nutri-Score: ${food.nutriscore_grade.toUpperCase()}`
+            : null,
+        food.nova_group
+            ? `NOVA: ${food.nova_group} (${novaLabel(food.nova_group)})`
+            : null,
+    ].filter(Boolean);
+    if (scoreParts.length > 0) lines.push(scoreParts.join(" · "));
     if (alcoholUnit && food.alcohol_g != null) {
         lines.push(`Alcohol: ${formatAlcohol(food.alcohol_g, alcoholUnit)}`);
     }

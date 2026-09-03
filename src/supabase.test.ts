@@ -5,6 +5,7 @@ import {
     normalizeMeal,
     insertMeal,
     updateMeal,
+    updateWeight,
     widgetsEnabledFromProfile,
     alcoholTrackingEnabledFromProfile,
     preferredDrinkUnitFromProfile,
@@ -17,6 +18,7 @@ import {
     type Meal,
     type MealInput,
     type Profile,
+    type WeightEntry,
 } from "./supabase.js";
 import { rowContentDigest } from "./import.js";
 import { MICRONUTRIENT_FIELDS, type NutrientProvenance } from "./nutrients.js";
@@ -315,10 +317,11 @@ describe("updatedMealIdempotencyKey", () => {
 // insertMeal/updateMeal) — which is always after every file's top-level
 // code, mock.module calls included, has already run.
 //
-// The fake only implements the exact chained calls insertMeal/updateMeal
-// make against "meals" — `.select().eq().eq().maybeSingle()`,
+// The fake implements the exact chained calls insertMeal/updateMeal make
+// against "meals" — `.select().eq().eq().maybeSingle()`,
 // `.insert().select().single()`, `.update().eq().eq().select().single()` —
-// it is not a general PostgREST simulator.
+// and updateWeight's `.update().eq().eq().select()` without `.single()` on
+// "weight_log". It is not a general PostgREST simulator.
 
 type FakeRow = Record<string, unknown>;
 
@@ -326,11 +329,40 @@ function rowMatches(row: FakeRow, filters: [string, unknown][]): boolean {
     return filters.every(([col, val]) => row[col] === val);
 }
 
-function createFakeMealsClient(rows: FakeRow[]) {
+function createFakeTableClient(rows: FakeRow[]) {
     function builder() {
         const filters: [string, unknown][] = [];
         let op: "select" | "insert" | "update" = "select";
         let payload: FakeRow = {};
+        let queryCount = 0;
+
+        async function execute(): Promise<{
+            data: FakeRow | FakeRow[] | null;
+            error: { message: string } | null;
+        }> {
+            queryCount += 1;
+            if (op === "insert") {
+                const row: FakeRow = {
+                    id: `fake-${rows.length + 1}`,
+                    ...payload,
+                };
+                rows.push(row);
+                return { data: { ...row }, error: null };
+            }
+            if (op === "update") {
+                const idx = rows.findIndex((r) => rowMatches(r, filters));
+                if (idx === -1) {
+                    return { data: [], error: null };
+                }
+                rows[idx] = { ...rows[idx], ...payload };
+                return { data: [{ ...rows[idx] }], error: null };
+            }
+            const found = rows.find((r) => rowMatches(r, filters));
+            return found
+                ? { data: { ...found }, error: null }
+                : { data: null, error: { message: "no rows found" } };
+        }
+
         const api = {
             select(_cols?: string) {
                 return api;
@@ -350,46 +382,76 @@ function createFakeMealsClient(rows: FakeRow[]) {
                 return api;
             },
             async maybeSingle() {
-                const found = rows.find((r) => rowMatches(r, filters));
-                return { data: found ? { ...found } : null, error: null };
+                const result = await execute();
+                if (result.error) {
+                    return { data: null, error: null };
+                }
+                return {
+                    data:
+                        result.data == null || Array.isArray(result.data)
+                            ? null
+                            : result.data,
+                    error: null,
+                };
             },
             async single() {
-                if (op === "insert") {
-                    const row: FakeRow = {
-                        id: `fake-${rows.length + 1}`,
-                        ...payload,
-                    };
-                    rows.push(row);
-                    return { data: { ...row }, error: null };
-                }
+                const result = await execute();
                 if (op === "update") {
-                    const idx = rows.findIndex((r) => rowMatches(r, filters));
-                    if (idx === -1) {
+                    if (
+                        result.data == null ||
+                        (Array.isArray(result.data) && result.data.length === 0)
+                    ) {
                         return {
                             data: null,
                             error: { message: "no rows found" },
                         };
                     }
-                    rows[idx] = { ...rows[idx], ...payload };
-                    return { data: { ...rows[idx] }, error: null };
+                    const row = Array.isArray(result.data)
+                        ? result.data[0]
+                        : result.data;
+                    return { data: row, error: null };
                 }
-                const found = rows.find((r) => rowMatches(r, filters));
-                return found
-                    ? { data: { ...found }, error: null }
-                    : { data: null, error: { message: "no rows found" } };
+                if (result.error) return result;
+                return {
+                    data: Array.isArray(result.data)
+                        ? result.data[0]
+                        : result.data,
+                    error: null,
+                };
+            },
+            then(
+                onFulfilled: (value: {
+                    data: FakeRow | FakeRow[] | null;
+                    error: { message: string } | null;
+                }) => unknown,
+                onRejected?: (reason: unknown) => unknown,
+            ) {
+                return execute().then(onFulfilled, onRejected);
+            },
+            getQueryCount() {
+                return queryCount;
             },
         };
         return api;
     }
     return {
+        builder,
+        rows,
+    };
+}
+
+function createFakeSupabaseClient(mealRows: FakeRow[], weightRows: FakeRow[]) {
+    const meals = createFakeTableClient(mealRows);
+    const weights = createFakeTableClient(weightRows);
+    return {
         from(table: string) {
-            if (table !== "meals") {
-                throw new Error(
-                    `fake client only supports "meals", got "${table}"`,
-                );
-            }
-            return builder();
+            if (table === "meals") return meals.builder();
+            if (table === "weight_log") return weights.builder();
+            throw new Error(
+                `fake client only supports "meals" and "weight_log", got "${table}"`,
+            );
         },
+        weights,
     };
 }
 
@@ -397,12 +459,13 @@ function createFakeMealsClient(rows: FakeRow[]) {
 // fake client (created once, the first time getSupabase() memoizes it) keeps
 // referencing the same backing store across the whole file.
 const fakeMealRows: FakeRow[] = [];
+const fakeWeightRows: FakeRow[] = [];
 
 // createClient's real signature is (url, key, options); the fake ignores all
 // three — insertMeal/updateMeal never see raw URLs or keys, only the
 // client's query-builder surface.
 mock.module("@supabase/supabase-js", () => ({
-    createClient: () => createFakeMealsClient(fakeMealRows),
+    createClient: () => createFakeSupabaseClient(fakeMealRows, fakeWeightRows),
 }));
 
 // buildClient() throws before ever reaching createClient if these are unset;
@@ -412,6 +475,7 @@ process.env.SUPABASE_SECRET_KEY ??= "test-secret-key";
 
 beforeEach(() => {
     fakeMealRows.length = 0;
+    fakeWeightRows.length = 0;
 });
 
 describe("normalizeMeal — backward compatibility for rows predating this migration", () => {
@@ -692,6 +756,51 @@ describe("insertMeal / updateMeal — nutrient_provenance", () => {
             nutrient_provenance: null,
         });
         expect(updated.nutrient_provenance).toBeNull();
+    });
+});
+
+describe("updateWeight against a fake Supabase client", () => {
+    const WEIGHT_ID = "w-1";
+
+    function weightRow(over: Partial<WeightEntry> = {}): WeightEntry {
+        return {
+            id: WEIGHT_ID,
+            user_id: USER,
+            weight_g: 70_000,
+            logged_at: LOGGED_AT,
+            notes: null,
+            created_at: LOGGED_AT,
+            idempotency_key: null,
+            ...over,
+        };
+    }
+
+    test("zero-row update throws entry not found", async () => {
+        await expect(
+            updateWeight(USER, WEIGHT_ID, { weight_g: 71_000 }),
+        ).rejects.toThrow("Failed to update weight: entry not found");
+    });
+
+    test("a matching row is updated and returned", async () => {
+        fakeWeightRows.push(weightRow() as unknown as FakeRow);
+        const updated = await updateWeight(USER, WEIGHT_ID, {
+            weight_g: 71_000,
+        });
+        expect(updated.weight_g).toBe(71_000);
+        expect(fakeWeightRows[0]!.weight_g).toBe(71_000);
+    });
+
+    test("uses one round trip (no separate existence check)", async () => {
+        fakeWeightRows.push(weightRow() as unknown as FakeRow);
+        const client = createFakeSupabaseClient(fakeMealRows, fakeWeightRows);
+        const builder = client.from("weight_log");
+        builder
+            .update({ weight_g: 72_000 })
+            .eq("id", WEIGHT_ID)
+            .eq("user_id", USER);
+        expect(builder.getQueryCount()).toBe(0);
+        await builder.select();
+        expect(builder.getQueryCount()).toBe(1);
     });
 });
 

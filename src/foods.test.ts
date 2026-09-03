@@ -1,13 +1,60 @@
-import { test, expect, mock, beforeEach, afterEach, describe } from "bun:test";
 import {
+    test,
+    expect,
+    mock,
+    beforeEach,
+    afterEach,
+    describe,
+    afterAll,
+} from "bun:test";
+import type { FoodResult } from "./foods.js";
+import * as actualSupabase from "./supabase.js";
+import { emptyNutrientValues } from "./providers/types.js";
+
+const REAL_SUPABASE = { ...actualSupabase };
+let foodCacheRow: {
+    payload: Record<string, unknown>;
+    fetched_at: string;
+} | null = null;
+
+mock.module("./supabase.js", () => ({
+    ...REAL_SUPABASE,
+    getSupabase: () => ({
+        from: (table: string) => {
+            if (table !== "food_cache") {
+                throw new Error(
+                    `foods.test stub only supports food_cache, got "${table}"`,
+                );
+            }
+            return {
+                select: () => ({
+                    eq: () => ({
+                        eq: () => ({
+                            maybeSingle: async () => ({
+                                data: foodCacheRow,
+                                error: null,
+                            }),
+                        }),
+                    }),
+                }),
+                upsert: async () => ({ error: null }),
+            };
+        },
+    }),
+}));
+
+afterAll(() => {
+    mock.module("./supabase.js", () => REAL_SUPABASE);
+});
+
+const {
     normalizeBarcode,
     fetchProductFromOFF,
     formatFoodResult,
     buildOFFProvenance,
     toFoodNutrition,
-    type FoodResult,
-} from "./foods.js";
-import { emptyNutrientValues } from "./providers/types.js";
+    getCachedFood,
+} = await import("./foods.js");
 
 const realFetch = globalThis.fetch;
 
@@ -26,6 +73,7 @@ function jsonResponse(body: unknown, status = 200): Response {
 
 beforeEach(() => {
     process.env.OFF_USER_AGENT = "nutrition-mcp-test (test@example.com)";
+    foodCacheRow = null;
 });
 
 afterEach(() => {
@@ -445,6 +493,122 @@ describe("fetchProductFromOFF alcohol (ABV, not grams)", () => {
     });
 });
 
+describe("fetchProductFromOFF Nutri-Score / NOVA", () => {
+    function product(over: Record<string, unknown> = {}) {
+        return {
+            status: 1,
+            product: {
+                product_name: "Nutella",
+                nutriments: { "energy-kcal_100g": 539 },
+                nutriscore_grade: "e",
+                nova_group: 4,
+                ...over,
+            },
+        };
+    }
+
+    test("maps a valid grade and group", async () => {
+        mockFetch(() => jsonResponse(product()));
+        const food = await fetchProductFromOFF("3017620422003");
+        expect(food!.nutriscore_grade).toBe("e");
+        expect(food!.nova_group).toBe(4);
+    });
+
+    test("uppercase grades are normalized to lowercase", async () => {
+        mockFetch(() => jsonResponse(product({ nutriscore_grade: "E" })));
+        const food = await fetchProductFromOFF("3017620422003");
+        expect(food!.nutriscore_grade).toBe("e");
+    });
+
+    test("'not-applicable' and 'unknown' grades become null, not passed through", async () => {
+        mockFetch(() =>
+            jsonResponse(product({ nutriscore_grade: "not-applicable" })),
+        );
+        expect(
+            (await fetchProductFromOFF("3017620422003"))!.nutriscore_grade,
+        ).toBeNull();
+
+        mockFetch(() => jsonResponse(product({ nutriscore_grade: "unknown" })));
+        expect(
+            (await fetchProductFromOFF("3017620422003"))!.nutriscore_grade,
+        ).toBeNull();
+    });
+
+    test("nova_group as a string is coerced", async () => {
+        mockFetch(() => jsonResponse(product({ nova_group: "3" })));
+        expect((await fetchProductFromOFF("3017620422003"))!.nova_group).toBe(
+            3,
+        );
+    });
+
+    test("an out-of-range NOVA group becomes null instead of passed through", async () => {
+        mockFetch(() => jsonResponse(product({ nova_group: 5 })));
+        expect(
+            (await fetchProductFromOFF("3017620422003"))!.nova_group,
+        ).toBeNull();
+    });
+
+    test("both are null when OFF carries neither field", async () => {
+        mockFetch(() =>
+            jsonResponse(
+                product({ nutriscore_grade: undefined, nova_group: undefined }),
+            ),
+        );
+        const food = await fetchProductFromOFF("3017620422003");
+        expect(food!.nutriscore_grade).toBeNull();
+        expect(food!.nova_group).toBeNull();
+    });
+});
+
+describe("getCachedFood score backfill", () => {
+    test("a stale payload missing both keys backfills to null while micros stay defined", async () => {
+        foodCacheRow = {
+            payload: {
+                name: "Cached Cereal",
+                brand: null,
+                serving: "100 g",
+                calories: 380,
+                protein_g: 8,
+                carbs_g: 70,
+                fat_g: 5,
+                fiber_g: 6,
+                sugar_g: 12,
+                alcohol_g: null,
+                caffeine_mg: null,
+                saturated_fat_g: 1,
+                trans_fat_g: 0,
+                added_sugar_g: 4,
+                sodium_mg: 400,
+                potassium_mg: 200,
+                cholesterol_mg: null,
+                calcium_mg: 50,
+                iron_mg: 3,
+                magnesium_mg: 40,
+                vitamin_a_mcg: null,
+                vitamin_c_mg: null,
+                vitamin_d_mcg: 2,
+                servingBasis: { kind: "per_100g" },
+                source: "off:016000275287",
+                source_name: "openfoodfacts",
+                barcode: "016000275287",
+            },
+            fetched_at: new Date().toISOString(),
+        };
+        const food = await getCachedFood(
+            "openfoodfacts",
+            "016000275287",
+            7 * 24 * 60 * 60 * 1000,
+        );
+        expect(food!.nutriscore_grade).toBeNull();
+        expect(food!.nova_group).toBeNull();
+        expect(food!.sodium_mg).toBe(400);
+        expect(food!.calcium_mg).toBe(50);
+        expect(food!.caffeine_mg).toBeNull();
+        expect(food!.servingBasis).toEqual({ kind: "per_100g" });
+        expect(food!.provenance).not.toBeNull();
+    });
+});
+
 describe("formatFoodResult", () => {
     const base: FoodResult = {
         servingBasis: { kind: "per_100g" },
@@ -471,6 +635,8 @@ describe("formatFoodResult", () => {
         vitamin_a_mcg: null,
         vitamin_c_mg: null,
         vitamin_d_mcg: null,
+        nutriscore_grade: "b",
+        nova_group: 3,
         provenance: null,
         source: "off:737628064502",
         source_name: "openfoodfacts",
@@ -485,9 +651,35 @@ describe("formatFoodResult", () => {
         expect(text).toContain("barcode 737628064502");
     });
 
-    // "n/a" states the gap but leaves the model to decide what to do with it,
-    // and what it did was omit the field — which records "nobody measured
-    // this" and drops the whole day from the fiber average.
+    test("includes Nutri-Score and NOVA when OFF has computed them", () => {
+        const text = formatFoodResult(base);
+        expect(text).toContain("Nutri-Score: B");
+        expect(text).toContain("NOVA: 3 (processed)");
+    });
+
+    test("omits the score line entirely when OFF has computed neither", () => {
+        const text = formatFoodResult({
+            ...base,
+            nutriscore_grade: null,
+            nova_group: null,
+        });
+        expect(text).not.toContain("Nutri-Score");
+        expect(text).not.toContain("NOVA");
+    });
+
+    test("shows whichever of Nutri-Score/NOVA is present", () => {
+        const gradeOnly = formatFoodResult({ ...base, nova_group: null });
+        expect(gradeOnly).toContain("Nutri-Score: B");
+        expect(gradeOnly).not.toContain("NOVA");
+
+        const novaOnly = formatFoodResult({
+            ...base,
+            nutriscore_grade: null,
+        });
+        expect(novaOnly).not.toContain("Nutri-Score");
+        expect(novaOnly).toContain("NOVA: 3 (processed)");
+    });
+
     test("an n/a fiber or sugar comes with what to do about it", () => {
         const text = formatFoodResult({ ...base, fiber_g: null });
         expect(text).toContain("no fiber figure");
